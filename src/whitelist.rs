@@ -1,3 +1,4 @@
+use crate::blacklist::Blacklist;
 use nostr_sdk::prelude::PublicKey;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -7,18 +8,20 @@ use tracing::{info, warn};
 const RUNTIME_FILE: &str = "whitelist_runtime.json";
 
 /// Thread-safe shared whitelist that supports runtime modifications, persistence,
-/// and follow-derived entries from reference accounts.
+/// follow-derived entries from reference accounts, and blacklist exclusion.
 #[derive(Debug, Clone)]
 pub struct Whitelist {
     /// Manually added pubkeys (config + runtime overrides)
     inner: Arc<RwLock<Vec<PublicKey>>>,
     /// Follow-derived pubkeys (from reference account sync)
     follow_derived: Arc<RwLock<Vec<PublicKey>>>,
+    /// Blacklist that overrides whitelist membership
+    blacklist: Blacklist,
 }
 
 impl Whitelist {
     /// Create a new whitelist from initial pubkeys, merging with any persisted runtime overrides.
-    pub fn new(initial: Vec<PublicKey>, config_dir: Option<&Path>) -> Self {
+    pub fn new(initial: Vec<PublicKey>, config_dir: Option<&Path>, blacklist: Blacklist) -> Self {
         let mut pubkeys = initial;
 
         // Merge runtime overrides if they exist
@@ -51,11 +54,15 @@ impl Whitelist {
         Self {
             inner: Arc::new(RwLock::new(pubkeys)),
             follow_derived: Arc::new(RwLock::new(Vec::new())),
+            blacklist,
         }
     }
 
-    /// Check if a pubkey is in the whitelist (manual or follow-derived).
+    /// Check if a pubkey is in the whitelist (manual or follow-derived) and NOT blacklisted.
     pub fn contains(&self, pk: &PublicKey) -> bool {
+        if self.blacklist.contains(pk) {
+            return false;
+        }
         self.inner.read().contains(pk) || self.follow_derived.read().contains(pk)
     }
 
@@ -65,7 +72,7 @@ impl Whitelist {
         self.inner.read().is_empty() && self.follow_derived.read().is_empty()
     }
 
-    /// Return a snapshot of all whitelisted pubkeys (manual + follow-derived union).
+    /// Return a snapshot of all whitelisted pubkeys (manual + follow-derived union), excluding blacklisted.
     pub fn list(&self) -> Vec<PublicKey> {
         let manual = self.inner.read().clone();
         let follows = self.follow_derived.read().clone();
@@ -75,6 +82,7 @@ impl Whitelist {
                 combined.push(pk);
             }
         }
+        combined.retain(|pk| !self.blacklist.contains(pk));
         combined
     }
 
@@ -86,6 +94,11 @@ impl Whitelist {
     /// Return only the follow-derived pubkeys.
     pub fn list_follow_derived(&self) -> Vec<PublicKey> {
         self.follow_derived.read().clone()
+    }
+
+    /// Get a reference to the blacklist.
+    pub fn blacklist(&self) -> &Blacklist {
+        &self.blacklist
     }
 
     /// Add a pubkey to the manual whitelist. Returns true if it was added (not already present).
@@ -106,7 +119,7 @@ impl Whitelist {
         guard.len() < len_before
     }
 
-    /// Number of whitelisted pubkeys (manual + follow-derived, deduplicated).
+    /// Number of whitelisted pubkeys (manual + follow-derived, deduplicated, excluding blacklisted).
     pub fn len(&self) -> usize {
         self.list().len()
     }

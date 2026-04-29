@@ -118,6 +118,17 @@ struct SyncFollowsResponse {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct AddBlacklistRequest {
+    pubkey: String,
+}
+
+#[derive(Serialize)]
+struct BlacklistEntry {
+    hex: String,
+    npub: String,
+}
+
 // --- Helper: generate random hex ---
 
 fn random_hex(bytes: usize) -> String {
@@ -181,6 +192,11 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
             "/reference-accounts/sync",
             post(handle_reference_accounts_sync),
         )
+        .route(
+            "/blacklist",
+            get(handle_blacklist_list).post(handle_blacklist_add),
+        )
+        .route("/blacklist/{hex}", delete(handle_blacklist_remove))
 }
 
 pub fn public_api_routes() -> Router<Arc<ServerState>> {
@@ -589,6 +605,34 @@ async fn handle_reference_accounts_add(
         {
             warn!("Failed to persist reference accounts: {}", e);
         }
+
+        // Auto-sync follows in background
+        let whitelist = state.whitelist.clone();
+        let reference_accounts = state.reference_accounts.clone();
+        let config_dir = state.config_dir.clone();
+        tokio::spawn(async move {
+            let ref_list = reference_accounts.list();
+            if ref_list.is_empty() {
+                return;
+            }
+            info!("Auto-syncing follows after adding reference account");
+            match follow_sync::sync_follows(&ref_list).await {
+                Ok(follows) => {
+                    let count = follows.len();
+                    whitelist.set_follow_derived(follows.clone());
+                    if let Err(e) = follow_sync::persist_follow_derived(
+                        &follows,
+                        std::path::Path::new(&config_dir),
+                    ) {
+                        warn!("Failed to persist follow-derived whitelist: {}", e);
+                    }
+                    info!("Auto-sync complete: {} derived pubkeys", count);
+                }
+                Err(e) => {
+                    warn!("Auto-sync failed: {}", e);
+                }
+            }
+        });
     }
 
     Ok((
@@ -682,6 +726,114 @@ async fn handle_reference_accounts_sync(
             ref_accounts.len()
         ),
     }))
+}
+
+// --- Blacklist handlers ---
+
+async fn handle_blacklist_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let entries: Vec<BlacklistEntry> = state
+        .whitelist
+        .blacklist()
+        .list()
+        .iter()
+        .map(|pk| BlacklistEntry {
+            hex: pk.to_hex(),
+            npub: pk.to_bech32().unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+async fn handle_blacklist_add(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<AddBlacklistRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let pk = if req.pubkey.starts_with("npub") {
+        PublicKey::from_bech32(&req.pubkey).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid npub".to_string(),
+                }),
+            )
+        })?
+    } else {
+        PublicKey::from_hex(&req.pubkey).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid hex pubkey".to_string(),
+                }),
+            )
+        })?
+    };
+
+    let added = state.whitelist.blacklist().add(pk);
+    if added {
+        if let Err(e) = state
+            .whitelist
+            .blacklist()
+            .persist(std::path::Path::new(&state.config_dir))
+        {
+            warn!("Failed to persist blacklist: {}", e);
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(BlacklistEntry {
+            hex: pk.to_hex(),
+            npub: pk.to_bech32().unwrap_or_default(),
+        }),
+    ))
+}
+
+async fn handle_blacklist_remove(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(hex): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let pk = PublicKey::from_hex(&hex).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid hex pubkey".to_string(),
+            }),
+        )
+    })?;
+
+    let removed = state.whitelist.blacklist().remove(&pk);
+    if removed {
+        if let Err(e) = state
+            .whitelist
+            .blacklist()
+            .persist(std::path::Path::new(&state.config_dir))
+        {
+            warn!("Failed to persist blacklist: {}", e);
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- State helpers ---

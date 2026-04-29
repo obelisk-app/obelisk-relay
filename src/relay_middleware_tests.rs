@@ -32,7 +32,7 @@ mod tests {
         );
 
         let groups_processor =
-            GroupsRelayProcessor::new(groups_arc.clone(), admin_keys.public_key(), crate::whitelist::Whitelist::new(vec![], None));
+            GroupsRelayProcessor::new(groups_arc.clone(), admin_keys.public_key(), crate::whitelist::Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
 
         (groups_processor, groups_arc)
     }

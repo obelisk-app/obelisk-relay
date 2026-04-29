@@ -332,7 +332,7 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), Whitelist::new(vec![], None));
+        let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
 
         // Verify the logic was created correctly
         assert_eq!(processor.relay_pubkey(), &admin_keys.public_key());
@@ -352,7 +352,7 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None));
+        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
         let (_admin_keys, member_keys, _non_member_keys) = create_test_keys().await;
 
         // Create a non-group event (no 'h' tag)
@@ -384,7 +384,7 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None));
+        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
         let (_admin_keys, member_keys, _non_member_keys) = create_test_keys().await;
 
         // Create an unmanaged group event (has 'h' tag but group doesn't exist)

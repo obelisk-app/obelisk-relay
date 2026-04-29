@@ -119,6 +119,21 @@ export class AdminApiClient {
   async syncFollows(): Promise<{ derived_count: number; message: string }> {
     return this.request('/api/admin/reference-accounts/sync', { method: 'POST' })
   }
+
+  async getBlacklist(): Promise<Array<{ hex: string; npub: string }>> {
+    return this.request('/api/admin/blacklist')
+  }
+
+  async addToBlacklist(pubkey: string): Promise<{ hex: string; npub: string }> {
+    return this.request('/api/admin/blacklist', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey }),
+    })
+  }
+
+  async removeFromBlacklist(hex: string): Promise<void> {
+    return this.request(`/api/admin/blacklist/${hex}`, { method: 'DELETE' })
+  }
 }
 
 export const adminApi = new AdminApiClient()

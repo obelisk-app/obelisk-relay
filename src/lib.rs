@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod app_state;
+pub mod blacklist;
 pub mod config;
 pub mod create_client;
 pub mod error;

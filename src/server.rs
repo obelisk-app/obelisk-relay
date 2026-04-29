@@ -1,5 +1,5 @@
 use crate::{
-    admin, app_state::HttpServerState, config, follow_sync, groups::Groups,
+    admin, app_state::HttpServerState, blacklist::Blacklist, config, follow_sync, groups::Groups,
     groups_event_processor::GroupsRelayProcessor, handler, metrics,
     metrics_handler::PrometheusSubscriptionMetricsHandler,
     reference_accounts::ReferenceAccounts,
@@ -85,7 +85,11 @@ pub async fn run_server(
         .filter_map(|hex| PublicKey::from_hex(hex).ok())
         .collect();
     let config_dir = std::path::Path::new("config");
-    let whitelist = Whitelist::new(initial_whitelist, Some(config_dir));
+    let blacklist = Blacklist::new(Some(config_dir));
+    if blacklist.len() > 0 {
+        info!("Blacklist loaded: {} pubkeys blocked", blacklist.len());
+    }
+    let whitelist = Whitelist::new(initial_whitelist, Some(config_dir), blacklist);
     if !whitelist.is_empty() {
         info!("Whitelist enabled: {} pubkeys allowed", whitelist.len());
     }

@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'preact/hooks'
+import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi } from '../../services/AdminApiClient'
 import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
+import { ProfileCard, CopyNpubButton } from './ProfileCard'
 
 interface RefAccount {
   hex: string
@@ -15,8 +16,11 @@ export const ReferenceAccountsManager = () => {
   const [toast, setToast] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  const [autoSyncing, setAutoSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [selectedProfile, setSelectedProfile] = useState<{ hex: string; npub: string; profile?: NostrProfile } | null>(null)
+  const autoSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -41,7 +45,12 @@ export const ReferenceAccountsManager = () => {
     }
   }
 
-  useEffect(fetchAccounts, [])
+  useEffect(() => {
+    fetchAccounts()
+    return () => {
+      if (autoSyncTimer.current) clearTimeout(autoSyncTimer.current)
+    }
+  }, [])
 
   const handleAdd = async () => {
     if (!newPubkey.trim()) return
@@ -50,7 +59,7 @@ export const ReferenceAccountsManager = () => {
       const entry = await adminApi.addReferenceAccount(newPubkey.trim())
       setAccounts(prev => [...prev.filter(e => e.hex !== entry.hex), entry])
       setNewPubkey('')
-      showToast('Reference account added')
+      showToast('Reference account added — syncing follows...')
       fetchProfiles([entry.hex]).then(profs => {
         setProfiles(prev => {
           const next = new Map(prev)
@@ -59,6 +68,18 @@ export const ReferenceAccountsManager = () => {
           return next
         })
       })
+
+      // Show auto-syncing indicator and poll for updated stats
+      setAutoSyncing(true)
+      autoSyncTimer.current = setTimeout(async () => {
+        try {
+          const stats = await adminApi.getStats()
+          setSyncResult(`Auto-sync complete: ${stats.whitelisted_count} total whitelisted pubkeys`)
+        } catch {
+          // ignore
+        }
+        setAutoSyncing(false)
+      }, 20000) // Follow sync typically takes ~15-20s
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add')
     }
@@ -93,6 +114,11 @@ export const ReferenceAccountsManager = () => {
 
   const truncate = (s: string) => s.length > 16 ? `${s.slice(0, 8)}...${s.slice(-8)}` : s
 
+  const openProfile = (hex: string, npub: string) => {
+    const profile = profiles.get(hex)
+    setSelectedProfile({ hex, npub, profile })
+  }
+
   return (
     <div>
       <div class="flex items-center justify-between mb-6">
@@ -125,7 +151,14 @@ export const ReferenceAccountsManager = () => {
         </div>
       )}
 
-      {syncResult && !toast && (
+      {autoSyncing && (
+        <div class="mb-4 p-3 rounded-lg text-sm border flex items-center gap-2" style={{ background: 'rgba(180,249,83,0.05)', color: 'var(--color-text-secondary)', borderColor: 'var(--color-border)' }}>
+          <span class="lc-spinner" style={{ width: '14px', height: '14px', borderTopColor: '#b4f953', borderWidth: '2px' }} />
+          Syncing follows in background...
+        </div>
+      )}
+
+      {syncResult && !toast && !autoSyncing && (
         <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.05)', color: 'var(--color-text-secondary)', borderColor: 'var(--color-border)' }}>
           {syncResult}
         </div>
@@ -178,7 +211,10 @@ export const ReferenceAccountsManager = () => {
             const profile = profiles.get(account.hex)
             return (
               <div key={account.hex} class="lc-card p-4 flex items-center justify-between" style={{ cursor: 'default' }}>
-                <div class="flex items-center gap-3">
+                <div
+                  class="flex items-center gap-3 cursor-pointer"
+                  onClick={() => openProfile(account.hex, account.npub)}
+                >
                   {profile?.picture ? (
                     <img src={profile.picture} alt="" class="w-10 h-10 rounded-full object-cover flex-shrink-0"
                       style={{ border: '2px solid rgba(180,249,83,0.2)' }}
@@ -193,6 +229,7 @@ export const ReferenceAccountsManager = () => {
                     <div class="font-medium">{getDisplayName(profile, account.npub)}</div>
                     <div class="text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
                       {truncate(account.npub)}
+                      <CopyNpubButton npub={account.npub} />
                     </div>
                   </div>
                 </div>
@@ -230,6 +267,16 @@ export const ReferenceAccountsManager = () => {
       <div class="mt-4 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
         {accounts.length} reference account{accounts.length !== 1 ? 's' : ''}
       </div>
+
+      {/* Profile Card Modal */}
+      {selectedProfile && (
+        <ProfileCard
+          profile={selectedProfile.profile}
+          hex={selectedProfile.hex}
+          npub={selectedProfile.npub}
+          onClose={() => setSelectedProfile(null)}
+        />
+      )}
     </div>
   )
 }

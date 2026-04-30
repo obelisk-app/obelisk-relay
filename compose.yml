@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     volumes:
-      - ./config:/app/config:ro
+      - ./config:/app/config
       - relay-db:/app/db
     environment:
       RUST_LOG: "${RUST_LOG:-info}"

@@ -227,8 +227,8 @@ export const ReferenceAccountsManager = () => {
                   )}
                   <div>
                     <div class="font-medium">{getDisplayName(profile, account.npub)}</div>
-                    <div class="text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
-                      {truncate(account.npub)}
+                    <div class="flex items-center text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
+                      <span>{truncate(account.npub)}</span>
                       <CopyNpubButton npub={account.npub} />
                     </div>
                   </div>

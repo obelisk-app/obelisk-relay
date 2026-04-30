@@ -24,6 +24,10 @@ pub async fn sync_follows(reference_pubkeys: &[PublicKey]) -> Result<Vec<PublicK
         reference_pubkeys.len()
     );
 
+    // Ensure a TLS crypto provider is available for outbound WSS connections.
+    // The relay builder may install one for the main relay, but this client is independent.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let client = Client::default();
 
     for relay_url in FOLLOW_RELAYS {

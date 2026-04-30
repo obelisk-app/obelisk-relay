@@ -1352,6 +1352,7 @@ dependencies = [
  "prost 0.14.3",
  "rand 0.8.5",
  "relay_builder",
+ "rustls",
  "serde",
  "serde_json",
  "snafu",

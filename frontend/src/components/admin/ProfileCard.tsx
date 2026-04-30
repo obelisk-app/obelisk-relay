@@ -133,22 +133,22 @@ export const ProfileCard = ({ profile, hex, npub, onClose }: ProfileCardProps) =
 export const CopyNpubButton = ({ npub }: { npub: string }) => {
   const handleCopy = (e: Event) => {
     e.stopPropagation()
+    const target = e.currentTarget as HTMLButtonElement
     navigator.clipboard.writeText(npub).then(() => {
-      const target = e.currentTarget as HTMLButtonElement
-      const original = target.textContent
-      target.textContent = 'Copied!'
-      setTimeout(() => { target.textContent = original }, 1500)
+      target.innerHTML = '&#10003;'
+      setTimeout(() => {
+        target.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+      }, 1500)
     })
   }
 
   return (
     <button
       onClick={handleCopy}
-      class="text-xs px-1.5 py-0.5 rounded transition-colors ml-1"
-      style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+      class="inline-flex items-center justify-center rounded transition-colors ml-2 flex-shrink-0"
+      style={{ width: '22px', height: '22px', background: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
       title="Copy npub"
-    >
-      Copy
-    </button>
+      dangerouslySetInnerHTML={{ __html: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' }}
+    />
   )
 }

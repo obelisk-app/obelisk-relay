@@ -134,6 +134,10 @@ export class AdminApiClient {
   async removeFromBlacklist(hex: string): Promise<void> {
     return this.request(`/api/admin/blacklist/${hex}`, { method: 'DELETE' })
   }
+
+  async deleteGroup(id: string): Promise<void> {
+    return this.request(`/api/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
 }
 
 export const adminApi = new AdminApiClient()

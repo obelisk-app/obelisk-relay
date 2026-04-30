@@ -13,6 +13,19 @@ interface BlacklistEntry {
   npub: string
 }
 
+// Resolve a NIP-05 identifier (name@domain) to a hex pubkey
+async function resolveNip05(identifier: string): Promise<string> {
+  const [name, domain] = identifier.split('@')
+  if (!name || !domain) throw new Error('Invalid NIP-05 format')
+  const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`NIP-05 lookup failed: ${res.status}`)
+  const data = await res.json()
+  const hex = data?.names?.[name]
+  if (!hex) throw new Error(`No pubkey found for ${identifier}`)
+  return hex
+}
+
 export const WhitelistManager = () => {
   const [entries, setEntries] = useState<WhitelistEntry[]>([])
   const [profiles, setProfiles] = useState<Map<string, NostrProfile>>(new Map())
@@ -22,6 +35,8 @@ export const WhitelistManager = () => {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [profilesLoading, setProfilesLoading] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [search, setSearch] = useState('')
 
   // Blacklist state
   const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([])
@@ -84,10 +99,20 @@ export const WhitelistManager = () => {
   useEffect(() => { fetchWhitelist(); fetchBlacklist() }, [])
 
   const handleAdd = async () => {
-    if (!newPubkey.trim()) return
+    const value = newPubkey.trim()
+    if (!value) return
     setError(null)
+    setAdding(true)
     try {
-      const entry = await adminApi.addToWhitelist(newPubkey.trim())
+      let pubkeyToAdd = value
+
+      // NIP-05 resolution: name@domain
+      if (value.includes('@') && !value.startsWith('npub')) {
+        showToast(`Looking up ${value}…`)
+        pubkeyToAdd = await resolveNip05(value)
+      }
+
+      const entry = await adminApi.addToWhitelist(pubkeyToAdd)
       setEntries(prev => [...prev.filter(e => e.hex !== entry.hex), entry])
       setNewPubkey('')
       showToast('Pubkey added to whitelist')
@@ -101,6 +126,8 @@ export const WhitelistManager = () => {
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add')
+    } finally {
+      setAdding(false)
     }
   }
 
@@ -156,6 +183,22 @@ export const WhitelistManager = () => {
     setSelectedProfile({ hex, npub, profile })
   }
 
+  // Filter by search query: name, npub, hex, nip05
+  const q = search.toLowerCase()
+  const filtered = entries.filter(entry => {
+    if (!q) return true
+    if (entry.hex.toLowerCase().includes(q)) return true
+    if (entry.npub.toLowerCase().includes(q)) return true
+    const profile = profiles.get(entry.hex)
+    if (profile?.name?.toLowerCase().includes(q)) return true
+    if (profile?.display_name?.toLowerCase().includes(q)) return true
+    if (profile?.nip05?.toLowerCase().includes(q)) return true
+    return false
+  })
+
+  // Hint: is the add input a NIP-05?
+  const isNip05Input = newPubkey.includes('@') && !newPubkey.startsWith('npub')
+
   return (
     <div>
       <h2 class="text-xl font-bold mb-6">Whitelist Management</h2>
@@ -173,25 +216,44 @@ export const WhitelistManager = () => {
       )}
 
       {/* Add form */}
-      <div class="flex gap-2 mb-6">
+      <div class="flex gap-2 mb-2">
         <input
           type="text"
           value={newPubkey}
           onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
-          placeholder="npub1... or hex pubkey"
+          placeholder="npub1…, hex pubkey, or name@domain.com"
           class="flex-1 px-4 py-2 rounded-lg text-sm"
           style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
           onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
         />
         <button
           onClick={handleAdd}
-          disabled={!newPubkey.trim()}
+          disabled={!newPubkey.trim() || adding}
           class="lc-pill-primary text-sm"
           style={{ padding: '8px 20px', borderRadius: '10px' }}
         >
-          Add
+          {adding ? '…' : 'Add'}
         </button>
       </div>
+      {isNip05Input && (
+        <div class="mb-4 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          NIP-05 identifier detected — will resolve to pubkey on add
+        </div>
+      )}
+
+      {/* Search */}
+      {entries.length > 0 && (
+        <div class="mb-4">
+          <input
+            type="text"
+            value={search}
+            onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
+            placeholder="Search by name, npub, NIP-05…"
+            class="w-full px-4 py-2 rounded-lg text-sm"
+            style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
+          />
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
@@ -202,6 +264,8 @@ export const WhitelistManager = () => {
         </div>
       ) : entries.length === 0 ? (
         <div style={{ color: 'var(--color-text-secondary)' }}>No whitelisted pubkeys. The relay is open to all.</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ color: 'var(--color-text-secondary)' }}>No entries match "{search}".</div>
       ) : (
         <div class="lc-card overflow-hidden" style={{ padding: 0 }}>
           <table class="w-full">
@@ -213,7 +277,7 @@ export const WhitelistManager = () => {
               </tr>
             </thead>
             <tbody>
-              {entries.map(entry => {
+              {filtered.map(entry => {
                 const profile = profiles.get(entry.hex)
                 const isBlacklisted = blacklistedSet.has(entry.hex)
                 return (
@@ -249,7 +313,7 @@ export const WhitelistManager = () => {
                             )}
                           </div>
                           <div class="text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
-                            {truncate(entry.hex)}
+                            {profile?.nip05 ? profile.nip05 : truncate(entry.hex)}
                           </div>
                         </div>
                       </div>
@@ -294,7 +358,10 @@ export const WhitelistManager = () => {
       )}
 
       <div class="mt-4 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-        {entries.length} whitelisted pubkey{entries.length !== 1 ? 's' : ''}
+        {filtered.length !== entries.length
+          ? `${filtered.length} of ${entries.length} whitelisted pubkey${entries.length !== 1 ? 's' : ''}`
+          : `${entries.length} whitelisted pubkey${entries.length !== 1 ? 's' : ''}`
+        }
       </div>
 
       {/* Blacklist Section */}
@@ -370,8 +437,8 @@ export const WhitelistManager = () => {
                         )}
                         <div>
                           <div class="text-sm font-medium">{getDisplayName(profile, entry.npub)}</div>
-                          <div class="text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
-                            {truncate(entry.npub)}
+                          <div class="flex items-center text-xs font-mono" style={{ color: 'var(--color-text-secondary)' }}>
+                            <span>{truncate(entry.npub)}</span>
                             <CopyNpubButton npub={entry.npub} />
                           </div>
                         </div>

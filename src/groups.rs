@@ -673,7 +673,41 @@ impl Groups {
         Ok(commands)
     }
 
-    // Nothing - removing backward compatibility method
+    /// Admin-only: delete a group and all its events from the database.
+    /// Searches all scopes for groups matching the given group ID.
+    pub async fn admin_delete_group(&self, group_id: &str) -> Result<(), Error> {
+        let keys: Vec<(Scope, String)> = self
+            .groups
+            .iter()
+            .filter(|e| e.key().1 == group_id)
+            .map(|e| e.key().clone())
+            .collect();
+
+        if keys.is_empty() {
+            return Err(Error::notice("Group not found"));
+        }
+
+        for (scope, _) in &keys {
+            let h_filter = Filter::new()
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), group_id.to_string());
+            let d_filter = Filter::new()
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), group_id.to_string());
+
+            self.db
+                .delete(h_filter, scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+            self.db
+                .delete(d_filter, scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+
+            self.groups.remove(&(scope.clone(), group_id.to_string()));
+        }
+
+        info!("Admin deleted group '{}' ({} scope(s))", group_id, keys.len());
+        Ok(())
+    }
 
     /// Returns counts of groups by their privacy settings for all scopes
     pub fn count_groups_by_privacy(&self) -> [(bool, bool, usize); 4] {

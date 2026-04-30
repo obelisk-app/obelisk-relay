@@ -1,0 +1,6 @@
+relay.obelisk.ar {
+	reverse_proxy groups_relay:8080 {
+		header_up Connection {>Connection}
+		header_up Upgrade {>Upgrade}
+	}
+}

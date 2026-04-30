@@ -179,6 +179,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/whitelist", post(handle_whitelist_add))
         .route("/whitelist/{hex}", delete(handle_whitelist_remove))
         .route("/groups", get(handle_groups))
+        .route("/groups/{id}", delete(handle_group_delete))
         .route("/stats", get(handle_stats))
         .route(
             "/reference-accounts",
@@ -495,6 +496,33 @@ async fn handle_groups(
     }
 
     Ok(Json(result))
+}
+
+async fn handle_group_delete(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    state
+        .http_state
+        .groups
+        .admin_delete_group(&group_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn handle_stats(

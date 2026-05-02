@@ -31,6 +31,10 @@ services:
       - ./public-config:/app/config
       - public-relay-db:/app/db
       - ./public-config/branding/favicon.ico:/app/frontend/dist/favicon.ico:ro
+      # Purple theme override: same filename hash as the baked CSS, so index.html
+      # picks up our tinted variant without needing a frontend rebuild. If the
+      # frontend bundle is rebuilt and the hash changes, regenerate this file.
+      - ./public-config/branding/assets/index-DUXQZBvw.css:/app/frontend/dist/assets/index-DUXQZBvw.css:ro
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
       NIP29__relay__relay_url: "wss://public.obelisk.ar"

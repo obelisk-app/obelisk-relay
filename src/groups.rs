@@ -32,6 +32,13 @@ pub struct Groups {
     groups: DashMap<ScopedGroupKey, Group>, // (scope, group_id) -> Group
     pub relay_pubkey: PublicKey,
     pub relay_url: String,
+    /// When `true`, every kind 9007 / 9002 has its `private` flag forced to
+    /// `false` after `apply_tags`. Set on the public Obelisk relay where
+    /// private groups would create read-access scoping the public relay
+    /// isn't designed to enforce. Plumbed all the way to the per-call sites
+    /// in handle_create_group_event / handle_edit_metadata so existing
+    /// loaded groups also get re-coerced on first edit.
+    pub force_public_groups: bool,
 }
 
 impl Groups {
@@ -39,6 +46,7 @@ impl Groups {
         database: Arc<RelayDatabase>,
         relay_pubkey: PublicKey,
         relay_url: String,
+        force_public_groups: bool,
     ) -> Result<Self, Error> {
         // Get all scopes available in the database
         let scopes = match database.list_scopes().await {
@@ -79,11 +87,24 @@ impl Groups {
             );
         }
 
+        // Apply the force-public-groups policy to every loaded group so an
+        // older private group is coerced public on relay restart, even if
+        // no admin ever publishes a fresh kind 9002 to retire its
+        // `["private"]` tag.
+        if force_public_groups {
+            for mut entry in all_groups.iter_mut() {
+                if entry.metadata.private {
+                    entry.metadata.private = false;
+                }
+            }
+        }
+
         Ok(Self {
             db: database,
             groups: all_groups,
             relay_pubkey,
             relay_url,
+            force_public_groups,
         })
     }
 
@@ -441,6 +462,13 @@ impl Groups {
 
         let mut group = Group::new(&event, scope.clone())?;
 
+        // Force-public policy: applied here (after Group::new ran apply_tags
+        // on the kind 9007) so a creation event carrying ["private"] still
+        // ends up public on relays configured as public-only.
+        if self.force_public_groups {
+            group.metadata.private = false;
+        }
+
         // Only allow migrating unmanaged groups to managed ones if creator is relay admin
         if !previous_events.is_empty() && event.pubkey != self.relay_pubkey {
             return Err(Error::event_error(
@@ -556,6 +584,13 @@ impl Groups {
             .ok_or_else(|| Error::event_error("[EditMetadata] Group not found", event_id))?;
 
         group.set_metadata(&event, &self.relay_pubkey)?;
+
+        // Force-public policy: re-apply after every edit so a 9002 carrying
+        // ["private"] doesn't quietly flip a public-only relay's group back
+        // to private.
+        if self.force_public_groups {
+            group.metadata.private = false;
+        }
 
         let scope_clone = scope.clone();
         let mut commands = vec![StoreCommand::SaveSignedEvent(
@@ -1038,6 +1073,7 @@ mod tests {
             groups: DashMap::new(),
             relay_pubkey: admin_keys.public_key(),
             relay_url: "wss://test.relay.url".to_string(),
+            force_public_groups: false,
         }
     }
 

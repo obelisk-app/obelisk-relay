@@ -137,6 +137,7 @@ async fn async_main() -> Result<()> {
         pubkey_rate_limit_per_minute: relay_settings.pubkey_rate_limit_per_minute,
         connection_rate_limit_per_minute: relay_settings.connection_rate_limit_per_minute,
         global_rate_limit_per_minute: relay_settings.global_rate_limit_per_minute,
+        force_public_groups: relay_settings.force_public_groups,
     };
 
     if let Some(target_url) = args.relay_url {
@@ -162,6 +163,7 @@ async fn async_main() -> Result<()> {
             Arc::clone(&database),
             relay_keys.public_key(),
             settings.relay_url.clone(),
+            settings.force_public_groups,
         )
         .await?,
     );

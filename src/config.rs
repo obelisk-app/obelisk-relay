@@ -49,6 +49,14 @@ pub struct RelaySettings {
     /// Global events/minute across the whole relay. None disables the global limiter.
     #[serde(default)]
     pub global_rate_limit_per_minute: Option<u32>,
+    /// When `true`, the relay forces every group to be public regardless
+    /// of the `["private"]` / `["public"]` tags in incoming kind 9007 /
+    /// 9002 events. Intended for the public Obelisk relay where private
+    /// groups would create read-access scoping the public relay isn't
+    /// designed to enforce. Defaults to `false` so the whitelisted relay
+    /// keeps full NIP-29 semantics.
+    #[serde(default)]
+    pub force_public_groups: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -167,6 +175,7 @@ pub struct Settings {
     pub pubkey_rate_limit_per_minute: Option<u32>,
     pub connection_rate_limit_per_minute: Option<u32>,
     pub global_rate_limit_per_minute: Option<u32>,
+    pub force_public_groups: bool,
 }
 
 pub use nostr_sdk::Keys;

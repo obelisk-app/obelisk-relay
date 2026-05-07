@@ -12,6 +12,13 @@ relay:
     - "419b7df0b0701bc75c7a105722549dd16220c41f51e79d92b7697d6e7124181a"
     # npub1ur853z967pvl8mnzglzvedgnzqsznkmzeuw7rvzw0dappfvke53srvd97k
     - "e0cf4888baf059f3ee6247c4ccb513102029db62cf1de1b04e7b7a10a596cd23"
+    # Obelisk SFU service pubkey — publishes kind 31313 advertisements,
+    # kind 25050 RPC responses (mediasoup signaling), kind 20078 beacons,
+    # kind 31314 active-call. Server: github.com/obelisk-app/obelisk-sfu.
+    - "a1801c5b927266f9088fc5332b8eeac5e25b6d0a23d5e3cf4901e80bc8dc41e0"
+    # SFU mediasoup test peer — synthetic ffmpeg producer used to smoke
+    # test the SFU end-to-end. Publishes kind 25052 + kind 20078.
+    - "834d1b5d842fd844fd90564dda5681d90bbdad50c9b51b14e4f557b4e5553b0a"
 
   # Admin pubkeys (hex) - can access the admin panel
   admin_pubkeys:
@@ -20,6 +27,14 @@ relay:
 
   max_subscriptions: 50
   max_limit: 500
+
+  # Rate limits — relay is whitelisted so abuse risk is bounded by the
+  # allowlist. Pre-existing default was 600/min per-connection, which throttles
+  # legitimate admin bursts (group create + put_user + edit_metadata fire
+  # several 9000-range events back-to-back). Match the public relay tuning.
+  pubkey_rate_limit_per_minute: 6000
+  connection_rate_limit_per_minute: 12000
+  global_rate_limit_per_minute: 600000
 
   websocket:
     max_connection_duration: "24h"

@@ -140,6 +140,58 @@ Deep integration with the Obelisk chat platform:
 
 ---
 
+## 🛡️ Reliability
+
+Operational hardening, separate from feature work. Companion sections in
+`obelisk-app/obelisk` (dex client) and `obelisk-app/obelisk-sfu`.
+
+- [ ] **GUI-managed admin pubkeys.** Today `admin_pubkeys` in
+  `config/settings.local.yml` is loaded once at startup; adding/removing
+  an admin requires editing YAML and `docker compose restart`. Move to a
+  runtime-overlay file (`admin_runtime.json`) the existing admin GUI
+  can mutate via signed POSTs, with hot-reload. YAML stays as bootstrap
+  default.
+- [ ] **First-run admin bootstrap flow.** When `admin_pubkeys` is empty,
+  the very first signed NIP-42 AUTH to a new `/api/admin/bootstrap`
+  endpoint should self-claim admin and persist to runtime config. Gate
+  with a 5-minute setup window after relay start, or a one-time token
+  printed to stdout. Eliminates the "ssh in to edit YAML" step on a
+  fresh install.
+- [ ] **Runtime rate-limit + retention edits.** `pubkey_rate_limit_per_minute`,
+  `connection_rate_limit_per_minute`, `event_retention`, `prune_kinds`,
+  `force_public_groups` should all be mutable from the admin GUI without
+  restart. Track changes in an audit log so operators can see who
+  changed what.
+- [x] **`force_public_groups` policy** (shipped). New
+  `RelaySettings.force_public_groups` flag (default `false`); when `true`,
+  every group's `metadata.private` is forced to `false` after every
+  `apply_tags` (load-time + handle_create + handle_edit_metadata). Used
+  by the public.obelisk.ar deployment which can't actually enforce
+  read-scoping.
+- [x] **`parent` and `t` (channel kind) as first-class metadata.**
+  `GroupMetadata` got typed `parent: Option<String>` and
+  `channel_kind: Option<String>` fields; kind 39000 broadcasts emit them
+  explicitly so client sidebars can render forum nesting + voice channel
+  variants without relying on the unknown-tag stash. Backfill plan: a
+  one-shot rebroadcast for groups created before this change.
+- [ ] **Health probes for relay-self publishes.** Watch `relay.publish`
+  failures for events the relay itself signs (kind 39000 / 39001 /
+  39002). Surface in `/healthz` and the admin GUI — silent failure has
+  caused multi-day state divergence in the past.
+- [ ] **Per-pubkey activity dashboard.** `/admin` should chart events/min
+  per whitelisted pubkey so abusive (or stuck) clients can be identified
+  before they trip rate limits.
+- [ ] **Whitelist-import audit trail.** When the runtime whitelist is
+  edited via GUI, log the operator pubkey, timestamp, and diff so
+  multi-admin deployments have a paper trail.
+- [ ] **Subscription-quota `Retry-After` semantics.** `restricted:
+  Subscription quota exceeded: 50/50` CLOSEDs are common when an
+  obelisk-dex tab fan-outs per-channel subs on a chatty relay. Add a
+  `Retry-After: <seconds>` hint in the CLOSED reason so well-behaved
+  clients back off without per-client cooldown patches.
+
+---
+
 ## Contributing
 
 This relay is maintained as part of the Obelisk ecosystem. To contribute:

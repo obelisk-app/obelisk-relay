@@ -117,6 +117,23 @@ pub struct GroupMetadata {
     pub name: String,
     pub about: Option<String>,
     pub picture: Option<String>,
+    /// Optional banner URL — non-standard NIP-29 extension used by the
+    /// Obelisk client to render a group/server banner image. We promote it
+    /// out of `unknown_tags` so `generate_metadata_event` can emit it on
+    /// every kind 39000 broadcast (preserves it across edit_metadata flows).
+    pub banner: Option<String>,
+    /// NIP-29 nesting: parent group id. When `Some`, this group is a
+    /// child of the named container. Promoted out of `unknown_tags` so
+    /// kind 39000 broadcasts always carry it — without this, a thread
+    /// child created via 9007 would lose its parent the next time the
+    /// relay rebuilt its 39000 broadcast and the obelisk-dex sidebar
+    /// would stop rendering it under its forum container.
+    pub parent: Option<String>,
+    /// Channel-variant marker (`["t",<kind>]`) — `text`/`voice`/`voice-sfu`/
+    /// `forum` in the obelisk client. Promoted for the same reason as
+    /// `parent`: every 39000 needs to carry it or the client will see
+    /// e.g. a forum container as a regular text channel.
+    pub channel_kind: Option<String>,
     /// Private = needs authentication to read
     pub private: bool,
     /// Closed = automatic creation of 9000 events when a 9021 comes
@@ -133,6 +150,9 @@ impl GroupMetadata {
             name,
             about: None,
             picture: None,
+            banner: None,
+            parent: None,
+            channel_kind: None,
             private: true,
             closed: true,
             is_broadcast: false,
@@ -170,6 +190,22 @@ impl GroupMetadata {
                         "closed" => self.closed = true,
                         "broadcast" => self.is_broadcast = true,
                         "nonbroadcast" => self.is_broadcast = false,
+                        "banner" => {
+                            if let Some(content) = tag.content() {
+                                self.banner = Some(content.to_string());
+                            }
+                        }
+                        "parent" => {
+                            if let Some(content) = tag.content() {
+                                self.parent = Some(content.to_string());
+                            }
+                        }
+                        "t" => {
+                            // Channel variant: "text" | "voice" | "voice-sfu" | "forum".
+                            if let Some(content) = tag.content() {
+                                self.channel_kind = Some(content.to_string());
+                            }
+                        }
                         "name" => {
                             if let Some(content) = tag.content() {
                                 self.name = content.to_string();
@@ -1579,6 +1615,18 @@ impl Group {
 
         if let Some(picture) = &self.metadata.picture {
             tags.push(Tag::custom(TagKind::custom("picture"), [picture.clone()]));
+        }
+
+        if let Some(banner) = &self.metadata.banner {
+            tags.push(Tag::custom(TagKind::custom("banner"), [banner.clone()]));
+        }
+
+        if let Some(parent) = &self.metadata.parent {
+            tags.push(Tag::custom(TagKind::custom("parent"), [parent.clone()]));
+        }
+
+        if let Some(channel_kind) = &self.metadata.channel_kind {
+            tags.push(Tag::custom(TagKind::custom("t"), [channel_kind.clone()]));
         }
 
         // Add any unknown tags

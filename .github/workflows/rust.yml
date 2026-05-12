@@ -126,7 +126,10 @@ jobs:
           cargo tarpaulin --verbose --all-features --timeout 120 --out xml --exclude-files "*/bin/*" --exclude-files "*/examples/*" --exclude-files "*/tests/*" --exclude-files "*/benches/*"
 
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          # Coverage upload is informational. Don't fail the build if
+          # codecov is rate-limiting or temporarily unavailable.
+          fail_ci_if_error: false
+        continue-on-error: true

@@ -70,7 +70,13 @@ async fn main() -> Result<()> {
 
     // Load groups
     let groups =
-        Groups::load_groups(Arc::clone(&database), relay_pubkey, args.relay_url.clone()).await?;
+        Groups::load_groups(
+            Arc::clone(&database),
+            relay_pubkey,
+            args.relay_url.clone(),
+            false,
+        )
+        .await?;
 
     // Get all scopes
     let scopes = database.list_scopes().await?;

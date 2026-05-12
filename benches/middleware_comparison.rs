@@ -1,8 +1,14 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use groups_relay::blacklist::Blacklist;
 use groups_relay::config::Keys;
 use groups_relay::groups::Groups;
 use groups_relay::groups_event_processor::GroupsRelayProcessor;
+use groups_relay::whitelist::Whitelist;
 use groups_relay::RelayDatabase;
+
+fn bench_whitelist() -> Whitelist {
+    Whitelist::new(vec![], None, Blacklist::new(None))
+}
 use nostr_sdk::prelude::*;
 use relay_builder::{EventContext, EventProcessor, RelayConfig};
 use std::hint::black_box;
@@ -60,6 +66,7 @@ async fn create_test_data(
     let processor = Arc::new(GroupsRelayProcessor::new(
         groups.clone(),
         admin_keys.public_key(),
+        bench_whitelist(),
     ));
 
     // Create groups
@@ -157,7 +164,7 @@ fn bench_visibility_direct(c: &mut Criterion) {
                 event,
                 |b, event| {
                     let processor =
-                        GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key());
+                        GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
 
                     b.to_async(&rt).iter(|| async {
                         let context = EventContext {
@@ -256,7 +263,7 @@ fn bench_nip29_operations(c: &mut Criterion) {
     for (name, event) in test_events {
         // Benchmark GroupsRelayLogic handle_event
         group.bench_function(format!("groups_logic_{name}"), |b| {
-            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key());
+            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
 
             b.to_async(&rt).iter(|| async {
                 let admin_pk = admin_keys.public_key();
@@ -329,7 +336,7 @@ fn bench_group_operations(c: &mut Criterion) {
             Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::H), "bench_group_0");
 
         b.to_async(&rt).iter(|| async {
-            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key());
+            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
 
             let admin_pk = admin_keys.public_key();
             let context = EventContext {

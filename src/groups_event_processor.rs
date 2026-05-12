@@ -360,6 +360,7 @@ mod tests {
                 database.clone(),
                 admin_keys.public_key(),
                 "wss://test.relay.com".to_string(),
+                false,
             )
             .await
             .unwrap(),
@@ -380,6 +381,7 @@ mod tests {
                 database.clone(),
                 admin_keys.public_key(),
                 "wss://test.relay.com".to_string(),
+                false,
             )
             .await
             .unwrap(),
@@ -412,6 +414,7 @@ mod tests {
                 database.clone(),
                 admin_keys.public_key(),
                 "wss://test.relay.com".to_string(),
+                false,
             )
             .await
             .unwrap(),

@@ -31,6 +31,7 @@ async fn test_join_request_generates_correct_events() {
             db.clone(),
             admin_keys.public_key(),
             "wss://test.relay.com".to_string(),
+            false,
         )
         .await
         .unwrap(),

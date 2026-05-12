@@ -28,6 +28,7 @@ async fn setup_bench() -> (tempfile::TempDir, Arc<RelayDatabase>, Arc<Groups>, K
             database.clone(),
             admin_keys.public_key(),
             "wss://test.relay.com".to_string(),
+            false,
         )
         .await
         .unwrap(),

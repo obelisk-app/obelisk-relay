@@ -25,6 +25,7 @@ async fn test_groups_relay_with_relay_builder() -> anyhow::Result<()> {
             groups_database.clone(),
             keys.public_key(),
             "wss://test.relay.com".to_string(),
+            false,
         )
         .await?,
     );

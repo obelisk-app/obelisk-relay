@@ -1,5 +1,11 @@
 services:
   groups_relay:
+    # Prebuilt multi-arch image published by .github/workflows/docker.yml.
+    # `docker compose pull groups_relay` fetches it (~30s) instead of compiling
+    # from source. Override RELAY_IMAGE_TAG to pin a version (e.g. v1.2.3 or a
+    # short SHA). Devs editing the relay can still build locally with:
+    #   docker compose build groups_relay
+    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -24,6 +30,7 @@ services:
   # tunnel as wss://public.obelisk.ar. Empty whitelist + 48h auto-prune + per-pubkey
   # rate limits — see public-config/settings.local.yml.
   public_relay:
+    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

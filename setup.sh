@@ -1,468 +1,361 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Intentionally NOT using `set -u`: bash 3.2 (macOS default) errors on empty
+# array expansions like "${!arr[@]}", which would abort the wizard.
+set -eo pipefail
 
-# ╔══════════════════════════════���═══════════════════════════════╗
-# ║          Nostr Relay — Interactive Setup Wizard              ║
+# ╔══════════════════════════════════════════════════════════════╗
+# ║          Obelisk Relay — Local Setup Wizard                  ║
 # ║                                                              ║
-# ║  Run this once after cloning. It will:                       ��
-# ║    1. Check prerequisites (Docker, ports)                    ║
-# ║    2. Configure your relay domain & admin npub               ║
-# ║    3. Generate relay keys                                    ║
-# ║    4. Add whitelisted pubkeys                                ║
-# ║    5. Build & start the relay                                ║
+# ║  One job: get the relay running on http://localhost:8080.    ║
+# ║  No domains, no TLS, no networking. Bulletproof.             ║
 # ║                                                              ║
-# ║  Usage:  ./setup.sh                                          ║
-# ╚══════════���══════════════════════════════���════════════════════╝
+# ║  Once this is green, run ./expose.sh to publish it to the    ║
+# ║  internet via Cloudflare Tunnel.                             ║
+# ║                                                              ║
+# ║  Works on macOS and Linux. Re-runnable at any time.          ║
+# ╚══════════════════════════════════════════════════════════════╝
 
 RELAY_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="${RELAY_DIR}/config"
 CONFIG_FILE="${CONFIG_DIR}/settings.local.yml"
 
+# Mode: by default we pull a prebuilt image (~30s). Pass --build to compile
+# from source (~5-10 min) — useful for forks or local code changes.
+BUILD_FROM_SOURCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --build) BUILD_FROM_SOURCE=true ;;
+    -h|--help)
+      echo "Usage: ./setup.sh [--build]"
+      echo "  --build   Compile the relay from source instead of pulling the published image"
+      exit 0 ;;
+  esac
+done
+
 cd "$RELAY_DIR"
 
-# ── Colors & formatting ──��───────────────────────────────────
+OS="$(uname -s)"
+IS_MAC=false
+[ "$OS" = "Darwin" ] && IS_MAC=true
 
-BOLD='\033[1m'
-DIM='\033[2m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
+# ── Colors ────────────────────────────────────────────────────
 
-# Box drawing
-BOX_TL='╭' BOX_TR='╮' BOX_BL='╰' BOX_BR='╯'
-BOX_H='─' BOX_V='│'
+if [ -t 1 ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'
+  GREEN=$'\033[0;32m'; CYAN=$'\033[0;36m'
+  YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'
+  MAGENTA=$'\033[0;35m'; NC=$'\033[0m'
+else
+  BOLD=""; DIM=""; GREEN=""; CYAN=""; YELLOW=""; RED=""; MAGENTA=""; NC=""
+fi
 
 banner() {
   local text="$1"
-  local len=${#text}
-  local pad=$(( (56 - len) / 2 ))
-  local right_pad=$(( 56 - len - pad ))
   echo ""
-  echo -e "${CYAN}${BOX_TL}$(printf '%0.s─' $(seq 1 58))${BOX_TR}${NC}"
-  echo -e "${CYAN}${BOX_V}${NC}$(printf '%*s' $pad '')${BOLD}${text}${NC}$(printf '%*s' $right_pad '')${CYAN}${BOX_V}${NC}"
-  echo -e "${CYAN}${BOX_BL}$(printf '%0.s─' $(seq 1 58))${BOX_BR}${NC}"
+  printf "${CYAN}╭"; printf '─%.0s' $(seq 1 58); printf "╮${NC}\n"
+  printf "${CYAN}│${NC}  ${BOLD}%s${NC}\n" "$text"
+  printf "${CYAN}╰"; printf '─%.0s' $(seq 1 58); printf "╯${NC}\n"
   echo ""
 }
 
 section() {
   echo ""
-  echo -e "${MAGENTA}━━━ ${BOLD}$1${NC} ${MAGENTA}$(printf '%0.s━' $(seq 1 $(( 52 - ${#1} ))))${NC}"
-  echo ""
+  printf "${MAGENTA}━━━ ${BOLD}%s${NC} ${MAGENTA}" "$1"
+  local n=$(( 52 - ${#1} )); [ $n -lt 1 ] && n=1
+  printf '━%.0s' $(seq 1 $n); printf "${NC}\n\n"
 }
 
-ok()    { echo -e "  ${GREEN}✓${NC} $1"; }
-warn()  { echo -e "  ${YELLOW}!${NC} $1"; }
-fail()  { echo -e "  ${RED}✗${NC} $1"; }
-info()  { echo -e "  ${DIM}$1${NC}"; }
-ask()   { echo -en "  ${CYAN}?${NC} ${BOLD}$1${NC} "; }
+ok()    { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
+warn()  { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
+fail()  { printf "  ${RED}✗${NC} %s\n" "$1"; }
+info()  { printf "  ${DIM}%s${NC}\n" "$1"; }
+ask()   { printf "  ${CYAN}?${NC} ${BOLD}%s${NC} " "$1"; }
 
-# Prompt with default value
 prompt_default() {
-  local prompt_text="$1"
-  local default="$2"
-  local var_name="$3"
-  ask "${prompt_text} ${DIM}[${default}]${NC}: "
-  read -r input
-  eval "${var_name}=\"${input:-$default}\""
+  local p="$1" d="$2" v="$3" input=""
+  ask "${p} ${DIM}[${d}]${NC}:"
+  read -r input || true
+  eval "${v}=\"${input:-$d}\""
 }
 
-# Yes/no prompt
 prompt_yn() {
-  local prompt_text="$1"
-  local default="${2:-y}"
-  local yn_hint
-  if [ "$default" = "y" ]; then yn_hint="Y/n"; else yn_hint="y/N"; fi
-  ask "${prompt_text} ${DIM}[${yn_hint}]${NC}: "
-  read -r input
-  input="${input:-$default}"
-  case "$input" in
-    [yY]*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local p="$1" d="${2:-y}" hint input=""
+  if [ "$d" = "y" ]; then hint="Y/n"; else hint="y/N"; fi
+  ask "${p} ${DIM}[${hint}]${NC}:"
+  read -r input || true
+  input="${input:-$d}"
+  case "$input" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
-# ── Bech32 decode (npub → hex) ────────────────────────────────
-# Pure bash bech32 decoder — no external tools needed
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# ── Bech32 (npub → hex) ───────────────────────────────────────
 
 BECH32_CHARSET="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
-bech32_polymod() {
-  local -a values=("$@")
-  local chk=1
-  local -a generator=(0x3b6a57b2 0x26508e6d 0x1ea119fa 0x3d4233dd 0x2a1462b3)
-  for v in "${values[@]}"; do
-    local top=$(( (chk >> 25) ))
-    chk=$(( ((chk & 0x1ffffff) << 5) ^ v ))
-    for i in 0 1 2 3 4; do
-      if (( (top >> i) & 1 )); then
-        chk=$(( chk ^ ${generator[$i]} ))
-      fi
-    done
-  done
-  echo "$chk"
-}
-
-bech32_hrp_expand() {
-  local hrp="$1"
-  local -a result=()
-  for (( i=0; i<${#hrp}; i++ )); do
-    result+=( $(( $(printf '%d' "'${hrp:$i:1}") >> 5 )) )
-  done
-  result+=( 0 )
-  for (( i=0; i<${#hrp}; i++ )); do
-    result+=( $(( $(printf '%d' "'${hrp:$i:1}") & 31 )) )
-  done
-  echo "${result[@]}"
-}
-
 npub_to_hex() {
   local npub="$1"
-
-  # Validate prefix
-  if [[ ! "$npub" =~ ^npub1 ]]; then
-    echo ""
-    return 1
-  fi
-
-  # Decode bech32 data part
-  local data_part="${npub:5}"  # skip "npub1"
+  [[ "$npub" =~ ^npub1 ]] || { echo ""; return 1; }
+  local data_part="${npub:5}"
   local -a data5=()
-
+  local i j ch idx
   for (( i=0; i<${#data_part}; i++ )); do
-    local ch="${data_part:$i:1}"
-    local idx=-1
+    ch="${data_part:$i:1}"; idx=-1
     for (( j=0; j<${#BECH32_CHARSET}; j++ )); do
-      if [ "${BECH32_CHARSET:$j:1}" = "$ch" ]; then
-        idx=$j
-        break
-      fi
+      if [ "${BECH32_CHARSET:$j:1}" = "$ch" ]; then idx=$j; break; fi
     done
-    if [ $idx -eq -1 ]; then
-      echo ""
-      return 1
-    fi
+    [ $idx -eq -1 ] && { echo ""; return 1; }
     data5+=( $idx )
   done
-
-  # Remove the 6-character checksum
   local data_len=$(( ${#data5[@]} - 6 ))
-  if [ $data_len -le 0 ]; then
-    echo ""
-    return 1
-  fi
-
-  # Convert from 5-bit to 8-bit groups
-  local acc=0
-  local bits=0
-  local hex=""
-
+  [ $data_len -le 0 ] && { echo ""; return 1; }
+  local acc=0 bits=0 hex="" byte
   for (( i=0; i<data_len; i++ )); do
     acc=$(( (acc << 5) | ${data5[$i]} ))
     bits=$(( bits + 5 ))
     while [ $bits -ge 8 ]; do
       bits=$(( bits - 8 ))
-      local byte=$(( (acc >> bits) & 0xff ))
+      byte=$(( (acc >> bits) & 0xff ))
       hex+=$(printf '%02x' $byte)
     done
   done
-
-  # A valid nostr pubkey is 32 bytes = 64 hex chars
-  if [ ${#hex} -eq 64 ]; then
-    echo "$hex"
-    return 0
-  else
-    echo ""
-    return 1
-  fi
+  if [ ${#hex} -eq 64 ]; then echo "$hex"; return 0; fi
+  echo ""; return 1
 }
 
-# Convert hex to npub for display
-hex_to_npub_display() {
-  local hex="$1"
-  echo "${hex:0:8}...${hex: -8}"
-}
-
-# Validate a pubkey input (npub or hex) and return hex
 validate_pubkey() {
-  local input="$1"
-
-  # Remove whitespace
-  input="$(echo "$input" | tr -d '[:space:]')"
-
-  # If it's an npub
+  local input
+  input="$(printf '%s' "$1" | tr -d '[:space:]')"
   if [[ "$input" =~ ^npub1 ]]; then
-    local hex
-    hex=$(npub_to_hex "$input")
-    if [ -n "$hex" ]; then
-      echo "$hex"
-      return 0
-    else
-      echo ""
-      return 1
-    fi
+    local hex; hex=$(npub_to_hex "$input") || true
+    [ -n "$hex" ] && { echo "$hex"; return 0; }
+    echo ""; return 1
   fi
-
-  # If it's already hex (64 chars, 0-9a-f)
   if [[ "$input" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    echo "${input,,}"  # lowercase
-    return 0
+    lower "$input"; return 0
   fi
-
-  echo ""
-  return 1
+  echo ""; return 1
 }
 
-# Generate a random 32-byte hex key
 generate_hex_key() {
-  if command -v openssl &>/dev/null; then
+  if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 32
   elif [ -r /dev/urandom ]; then
     head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
   else
-    # Fallback: use $RANDOM (not cryptographically secure, but works)
-    local key=""
-    for i in $(seq 1 32); do
-      key+=$(printf '%02x' $(( RANDOM % 256 )))
-    done
+    local key="" i
+    for i in $(seq 1 32); do key+=$(printf '%02x' $(( RANDOM % 256 ))); done
     echo "$key"
   fi
 }
 
+# ── Portable helpers ──────────────────────────────────────────
+
+port_in_use() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$" && return 0
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$" && return 0
+  fi
+  return 1
+}
+
+disk_avail_gb() {
+  df -k . 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024/1024 }'
+}
 
 # ══════════════════════════════════════════════════════════════
-#  START OF WIZARD
-# ═════════════��════════════════════���═══════════════════════════
-
 clear 2>/dev/null || true
+banner "Obelisk Relay — Local Setup"
 
-banner "Nostr Relay — Setup Wizard"
-
-echo -e "  Welcome! This wizard will configure your NIP-29 groups relay."
-echo -e "  It takes about ${BOLD}2 minutes${NC} and then your relay will be live."
+echo "  This installs and starts the relay on http://localhost:8080."
+echo "  Nothing is exposed to the internet — that's a separate step."
 echo ""
-echo -e "  ${DIM}You can re-run this wizard anytime to change settings.${NC}"
-echo -e "  ${DIM}Press Ctrl+C at any point to cancel.${NC}"
+printf "  ${DIM}When this finishes, run ./expose.sh to publish via Cloudflare.${NC}\n"
+printf "  ${DIM}Re-run setup.sh anytime to update config. Ctrl+C to cancel.${NC}\n"
 
-# ── Step 1: Prerequisites ─────────────��──────────────────────
+# ── Step 1: Docker ────────────────────────────────────────────
 
-section "Step 1/5 — Checking Prerequisites"
+section "Step 1/4 — Docker"
 
-# Docker
-if command -v docker &>/dev/null; then
-  DOCKER_VER=$(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
-  ok "Docker ${DOCKER_VER}"
-else
+if ! command -v docker >/dev/null 2>&1; then
   fail "Docker is not installed."
   echo ""
-  echo "  Install Docker first:"
-  echo "    curl -fsSL https://get.docker.com | sh"
+  if $IS_MAC; then
+    echo "  Install Docker Desktop: https://www.docker.com/products/docker-desktop"
+  else
+    echo "  Install:  curl -fsSL https://get.docker.com | sh"
+  fi
   echo ""
   exit 1
 fi
+ok "Docker $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
 
-# Docker Compose
-if docker compose version &>/dev/null; then
-  COMPOSE_VER=$(docker compose version --short 2>/dev/null)
-  ok "Docker Compose ${COMPOSE_VER}"
+if ! docker info >/dev/null 2>&1; then
+  warn "Docker daemon is not running."
+  # Try to start whatever Docker runtime is installed. Don't fail if none of
+  # these work — we'll fall through to a wait loop so the user can start it
+  # by hand and we'll detect it when it's up.
+  if $IS_MAC; then
+    for app in Docker OrbStack "Rancher Desktop"; do
+      if [ -d "/Applications/${app}.app" ]; then
+        info "Launching ${app}..."
+        open -a "$app" >/dev/null 2>&1 || true
+        break
+      fi
+    done
+    if command -v colima >/dev/null 2>&1 && ! pgrep -f colima >/dev/null 2>&1; then
+      info "Starting colima in background..."
+      (colima start >/dev/null 2>&1 &) || true
+    fi
+  else
+    if command -v systemctl >/dev/null 2>&1; then
+      info "Trying: sudo systemctl start docker"
+      sudo -n systemctl start docker >/dev/null 2>&1 || \
+        info "(needs password — run it manually if it doesn't come up)"
+    fi
+  fi
+
+  printf "  ${DIM}Waiting up to 2 min for Docker to be ready"
+  READY=false
+  for i in $(seq 1 60); do
+    if docker info >/dev/null 2>&1; then READY=true; break; fi
+    sleep 2; printf "."
+  done
+  printf "${NC}\n"
+
+  if $READY; then
+    ok "Docker daemon is running"
+  else
+    fail "Docker daemon is still not responding."
+    echo ""
+    if $IS_MAC; then
+      info "Start your Docker runtime manually (Docker Desktop / OrbStack / colima start),"
+      info "wait until its icon shows ready, then re-run ./setup.sh."
+    else
+      info "Start the docker service (e.g. sudo systemctl start docker) and re-run."
+    fi
+    exit 1
+  fi
+else
+  ok "Docker daemon is running"
+fi
+
+if docker compose version >/dev/null 2>&1; then
+  ok "Docker Compose $(docker compose version --short 2>/dev/null || echo)"
 else
   fail "Docker Compose plugin not found."
-  echo "  Install with: apt install docker-compose-plugin"
+  info "Install: https://docs.docker.com/compose/install/"
   exit 1
 fi
 
-# Port 8080
-if command -v ss &>/dev/null; then
-  if ss -tlnp 2>/dev/null | grep -q ':8080 '; then
-    warn "Port 8080 is already in use. The relay may fail to start."
-    info "Check with: ss -tlnp | grep 8080"
-  else
-    ok "Port 8080 is available"
-  fi
+# ── Step 2: Resources ─────────────────────────────────────────
+
+section "Step 2/4 — Resources"
+
+if port_in_use 8080; then
+  warn "Port 8080 is already in use. The relay may fail to bind."
+  command -v lsof >/dev/null 2>&1 && info "Check: lsof -nP -iTCP:8080 -sTCP:LISTEN"
+  prompt_yn "Continue anyway?" "n" || exit 1
+else
+  ok "Port 8080 is available"
 fi
 
-# Disk space
-DISK_AVAIL=$(df -BG . 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'G')
-if [ -n "$DISK_AVAIL" ] && [ "$DISK_AVAIL" -gt 2 ]; then
+DISK_AVAIL="$(disk_avail_gb)"
+if [ -n "$DISK_AVAIL" ] && [ "$DISK_AVAIL" -gt 3 ] 2>/dev/null; then
   ok "Disk space: ${DISK_AVAIL}GB available"
 else
-  warn "Low disk space (${DISK_AVAIL:-?}GB). Need at least 2GB for Docker build."
+  warn "Low disk space (${DISK_AVAIL:-?}GB). First build needs ~3GB."
+  prompt_yn "Continue anyway?" "n" || exit 1
 fi
 
-# ── Step 2: Relay Domain ─────────────────────────────────────
+# ── Step 3: Admin & whitelist ─────────────────────────────────
 
-section "Step 2/5 — Relay Domain"
+section "Step 3/4 — Admin & Whitelist"
 
-echo -e "  Your relay needs a domain name so Nostr clients can connect."
-echo -e "  ${DIM}Examples: relay.yourdomain.com, nostr.example.org${NC}"
+echo "  The admin pubkey controls the relay. It's the first whitelisted"
+echo "  identity and can create/manage groups."
 echo ""
-
-prompt_default "Relay domain" "localhost" RELAY_DOMAIN
-
-if [ "$RELAY_DOMAIN" = "localhost" ]; then
-  RELAY_URL="ws://localhost:8080"
-  RELAY_SCHEME="ws"
-  warn "Using localhost — relay will only be accessible locally."
-  info "You can change this later in config/settings.local.yml"
-else
-  RELAY_URL="wss://${RELAY_DOMAIN}"
-  RELAY_SCHEME="wss"
-  ok "Relay URL: ${RELAY_URL}"
-
-  # Check DNS
-  if command -v dig &>/dev/null; then
-    DNS=$(dig +short "$RELAY_DOMAIN" 2>/dev/null)
-    if [ -n "$DNS" ]; then
-      ok "DNS resolves to: ${DNS}"
-    else
-      warn "DNS not set up yet for ${RELAY_DOMAIN}"
-      info "Add an A record pointing to this server's public IP"
-      if command -v curl &>/dev/null; then
-        PUBLIC_IP=$(curl -sf --max-time 3 https://ifconfig.me 2>/dev/null || echo "")
-        if [ -n "$PUBLIC_IP" ]; then
-          info "This server's IP: ${PUBLIC_IP}"
-        fi
-      fi
-    fi
-  fi
-fi
-
-echo ""
-echo -e "  ${DIM}Tip: You'll also need a reverse proxy (Caddy, nginx) to handle"
-echo -e "  TLS and forward wss:// traffic to localhost:8080.${NC}"
-
-# ── Step 3: Admin pubkey ──���──────────────────────��───────────
-
-section "Step 3/5 — Admin Pubkey"
-
-echo -e "  Your admin pubkey controls the relay. It will be:"
-echo -e "    • Whitelisted to connect"
-echo -e "    • Able to create and manage groups"
-echo -e "    • The relay operator identity"
-echo ""
-echo -e "  ${DIM}Paste your npub (starts with npub1...) or hex pubkey (64 chars).${NC}"
-echo -e "  ${DIM}Find your npub in your Nostr client's profile settings.${NC}"
+printf "  ${DIM}Paste your npub (npub1...) or 64-char hex pubkey.${NC}\n"
 echo ""
 
 ADMIN_HEX=""
+ADMIN_NPUB=""
 while [ -z "$ADMIN_HEX" ]; do
-  ask "Admin npub or hex pubkey: "
-  read -r admin_input
-
-  if [ -z "$admin_input" ]; then
-    warn "Pubkey is required. The relay needs at least one admin."
-    continue
-  fi
-
+  ask "Admin npub or hex pubkey:"
+  read -r admin_input || true
+  [ -z "${admin_input:-}" ] && { warn "Required."; continue; }
   ADMIN_HEX=$(validate_pubkey "$admin_input") || true
-
   if [ -z "$ADMIN_HEX" ]; then
-    fail "Invalid pubkey format."
-    echo ""
-    info "npub should be 63 characters starting with npub1..."
-    info "hex should be exactly 64 hex characters (0-9, a-f)"
-    echo ""
+    fail "Invalid pubkey format. Need npub1... or 64 hex chars."
   else
     ok "Admin pubkey: ${ADMIN_HEX:0:16}...${ADMIN_HEX: -8}"
-    if [[ "$admin_input" =~ ^npub1 ]]; then
-      ADMIN_NPUB="$admin_input"
-      info "npub: ${admin_input:0:20}...${admin_input: -6}"
-    else
-      ADMIN_NPUB=""
-    fi
+    [[ "$admin_input" =~ ^npub1 ]] && ADMIN_NPUB="$admin_input"
   fi
 done
 
-# ── Step 4: Additional whitelisted pubkeys ────────────────────
-
-section "Step 4/5 — Whitelist"
-
-echo -e "  Add more pubkeys that can connect to your relay."
-echo -e "  ${DIM}You can always add more later via config/settings.local.yml${NC}"
-echo -e "  ${DIM}or through the admin panel (coming soon).${NC}"
 echo ""
-
-declare -a EXTRA_PUBKEYS=()
-declare -a EXTRA_NPUBS=()
-
-while true; do
-  if [ ${#EXTRA_PUBKEYS[@]} -eq 0 ]; then
-    if ! prompt_yn "Add more whitelisted pubkeys?" "n"; then
-      break
-    fi
-  else
-    ok "${#EXTRA_PUBKEYS[@]} extra pubkey(s) added"
-    if ! prompt_yn "Add another?" "n"; then
-      break
-    fi
-  fi
-
-  echo ""
-  ask "npub or hex pubkey: "
-  read -r extra_input
-
-  if [ -z "$extra_input" ]; then
-    continue
-  fi
-
-  extra_hex=$(validate_pubkey "$extra_input") || true
-
-  if [ -z "$extra_hex" ]; then
-    fail "Invalid pubkey. Skipping."
-  elif [ "$extra_hex" = "$ADMIN_HEX" ]; then
-    warn "That's your admin pubkey — already included."
-  else
-    EXTRA_PUBKEYS+=("$extra_hex")
-    if [[ "$extra_input" =~ ^npub1 ]]; then
-      EXTRA_NPUBS+=("$extra_input")
+EXTRA_PUBKEYS=()
+EXTRA_NPUBS=()
+if prompt_yn "Add more whitelisted pubkeys?" "n"; then
+  while true; do
+    echo ""
+    ask "npub or hex pubkey (empty to finish):"
+    read -r extra_input || true
+    [ -z "${extra_input:-}" ] && break
+    extra_hex=$(validate_pubkey "$extra_input") || true
+    if [ -z "$extra_hex" ]; then
+      fail "Invalid pubkey. Skipping."
+    elif [ "$extra_hex" = "$ADMIN_HEX" ]; then
+      warn "Already added as admin."
     else
-      EXTRA_NPUBS+=("")
+      EXTRA_PUBKEYS+=("$extra_hex")
+      [[ "$extra_input" =~ ^npub1 ]] && EXTRA_NPUBS+=("$extra_input") || EXTRA_NPUBS+=("")
+      ok "Added: ${extra_hex:0:16}...${extra_hex: -8}"
     fi
-    ok "Added: ${extra_hex:0:16}...${extra_hex: -8}"
-  fi
-done
+  done
+fi
 
-# ── Step 5: Generate relay key & write config ─────────────────
+# ── Step 4: Write config & launch ─────────────────────────────
 
-section "Step 5/5 — Generating Config"
+section "Step 4/4 — Build & Launch"
 
-echo -e "  Generating relay identity key..."
+if [ -f "$CONFIG_FILE" ]; then
+  BACKUP="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$CONFIG_FILE" "$BACKUP"
+  info "Existing config backed up to: ${BACKUP##*/}"
+fi
+
 RELAY_SECRET_KEY=$(generate_hex_key)
-ok "Relay secret key generated"
-
-# Build the YAML config
+mkdir -p "$CONFIG_DIR"
 {
   cat <<YAML
 relay:
   relay_secret_key: "${RELAY_SECRET_KEY}"
-  relay_url: "${RELAY_URL}"
+  # relay_url is set at runtime by ./expose.sh when you publish a domain.
+  # Until then, the relay identifies itself with this placeholder.
+  relay_url: "ws://localhost:8080"
   db_path: "/app/db"
   local_addr: "0.0.0.0:8080"
 
-  # Whitelisted pubkeys (hex) — only these can connect
   whitelisted_pubkeys:
 YAML
-
-  # Admin pubkey
   if [ -n "$ADMIN_NPUB" ]; then
     echo "    # ${ADMIN_NPUB} (admin)"
   else
     echo "    # Admin"
   fi
   echo "    - \"${ADMIN_HEX}\""
-
-  # Extra pubkeys
   for i in "${!EXTRA_PUBKEYS[@]}"; do
     npub="${EXTRA_NPUBS[$i]}"
-    hex="${EXTRA_PUBKEYS[$i]}"
-    if [ -n "$npub" ]; then
-      echo "    # ${npub}"
-    fi
-    echo "    - \"${hex}\""
+    [ -n "$npub" ] && echo "    # ${npub}"
+    echo "    - \"${EXTRA_PUBKEYS[$i]}\""
   done
-
   cat <<YAML
 
   max_subscriptions: 50
@@ -477,108 +370,66 @@ YAML
 
 ok "Config written to config/settings.local.yml"
 
-# Update compose.yml relay_url
-sed -i "s|NIP29__relay__relay_url:.*|NIP29__relay__relay_url: \"${RELAY_URL}\"|" compose.yml 2>/dev/null && \
-  ok "Updated compose.yml with relay URL" || true
-
-# ── Summary before launch ─────────────��──────────────────────
-
 echo ""
-echo -e "${CYAN}${BOX_TL}$(printf '%0.s─' $(seq 1 58))${BOX_TR}${NC}"
-echo -e "${CYAN}${BOX_V}${NC}  ${BOLD}Configuration Summary${NC}                                   ${CYAN}${BOX_V}${NC}"
-echo -e "${CYAN}${BOX_V}$(printf '%0.s─' $(seq 1 58))${BOX_V}${NC}"
-echo -e "${CYAN}${BOX_V}${NC}                                                          ${CYAN}${BOX_V}${NC}"
-printf "${CYAN}${BOX_V}${NC}  %-18s %-38s ${CYAN}${BOX_V}${NC}\n" "Relay URL:" "${RELAY_URL}"
-printf "${CYAN}${BOX_V}${NC}  %-18s %-38s ${CYAN}${BOX_V}${NC}\n" "Admin:" "${ADMIN_HEX:0:20}...${ADMIN_HEX: -8}"
-TOTAL_WL=$(( 1 + ${#EXTRA_PUBKEYS[@]} ))
-printf "${CYAN}${BOX_V}${NC}  %-18s %-38s ${CYAN}${BOX_V}${NC}\n" "Whitelisted:" "${TOTAL_WL} pubkey(s)"
-printf "${CYAN}${BOX_V}${NC}  %-18s %-38s ${CYAN}${BOX_V}${NC}\n" "Config:" "config/settings.local.yml"
-printf "${CYAN}${BOX_V}${NC}  %-18s %-38s ${CYAN}${BOX_V}${NC}\n" "Port:" "8080"
-echo -e "${CYAN}${BOX_V}${NC}                                                          ${CYAN}${BOX_V}${NC}"
-echo -e "${CYAN}${BOX_BL}$(printf '%0.s─' $(seq 1 58))${BOX_BR}${NC}"
-
-echo ""
-
-# ── Launch ────────────────��───────────────────────────────────
-
-if prompt_yn "Build and start the relay now?" "y"; then
+if $BUILD_FROM_SOURCE; then
+  printf "  ${BOLD}Building from source...${NC}\n"
+  printf "  ${DIM}(first build: 3-10 min — Rust + frontend)${NC}\n"
   echo ""
-  echo -e "  ${BOLD}Building the relay...${NC}"
-  echo -e "  ${DIM}(First build takes 3-10 min — compiling Rust + frontend)${NC}"
-  echo ""
-
-  docker compose up -d --build 2>&1 | while IFS= read -r line; do
-    echo -e "  ${DIM}${line}${NC}"
-  done
-
-  echo ""
-  echo -e "  Waiting for relay to be healthy..."
-
-  HEALTHY=false
-  for i in $(seq 1 40); do
-    if curl -sf --max-time 3 http://localhost:8080/health > /dev/null 2>&1; then
-      HEALTHY=true
-      break
-    fi
-    sleep 3
-    echo -n "."
-  done
-
-  echo ""
-  echo ""
-
-  if [ "$HEALTHY" = true ]; then
-    banner "Relay is live!"
-
-    echo -e "  ${GREEN}${BOLD}Your Nostr relay is running.${NC}"
+  if ! docker compose up -d --build groups_relay; then
     echo ""
-    echo -e "  ${BOLD}Connect with a Nostr client:${NC}"
-    echo -e "    ${CYAN}${RELAY_URL}${NC}"
-    echo ""
-    echo -e "  ${BOLD}Web UI (local):${NC}"
-    echo -e "    ${CYAN}http://localhost:8080/${NC}"
-    echo ""
-    echo -e "  ${BOLD}Health check:${NC}"
-    echo -e "    ${CYAN}http://localhost:8080/health${NC}"
-    echo ""
-
-    if [ "$RELAY_DOMAIN" != "localhost" ]; then
-      echo -e "  ${YELLOW}${BOLD}Next steps:${NC}"
-      echo -e "    1. Point DNS for ${BOLD}${RELAY_DOMAIN}${NC} to this server"
-      echo -e "    2. Set up a reverse proxy (Caddy/nginx) for TLS:"
-      echo ""
-      echo -e "       ${DIM}# Example Caddyfile entry:${NC}"
-      echo -e "       ${DIM}${RELAY_DOMAIN} {${NC}"
-      echo -e "       ${DIM}    reverse_proxy localhost:8080 {${NC}"
-      echo -e "       ${DIM}        header_up Connection {>Connection}${NC}"
-      echo -e "       ${DIM}        header_up Upgrade {>Upgrade}${NC}"
-      echo -e "       ${DIM}    }${NC}"
-      echo -e "       ${DIM}}${NC}"
-      echo ""
-    fi
-
-    echo -e "  ${BOLD}Management commands:${NC}"
-    echo -e "    ${DIM}./start.sh status${NC}    Check relay status"
-    echo -e "    ${DIM}./start.sh logs${NC}      View relay logs"
-    echo -e "    ${DIM}./start.sh restart${NC}   Restart the relay"
-    echo -e "    ${DIM}./start.sh stop${NC}      Stop the relay"
-    echo ""
-    echo -e "  ${BOLD}Edit whitelist:${NC}"
-    echo -e "    ${DIM}nano config/settings.local.yml${NC}"
-    echo -e "    ${DIM}./start.sh restart${NC}"
-    echo ""
-  else
-    fail "Relay did not become healthy in 2 minutes."
-    echo ""
-    echo "  Check logs for errors:"
-    echo "    docker compose logs groups_relay"
-    echo ""
+    fail "docker compose build/up failed."
+    echo "  Inspect with: docker compose logs groups_relay"
     exit 1
   fi
 else
+  printf "  ${BOLD}Pulling prebuilt relay image...${NC}\n"
+  printf "  ${DIM}(~30 sec; pass --build to compile from source instead)${NC}\n"
   echo ""
-  ok "Config saved. Start the relay anytime with:"
+  if ! docker compose pull groups_relay; then
+    warn "Image pull failed — falling back to building from source."
+    info "(This usually means the image hasn't been published yet for this commit.)"
+    if ! docker compose up -d --build groups_relay; then
+      fail "docker compose build/up failed."
+      echo "  Inspect with: docker compose logs groups_relay"
+      exit 1
+    fi
+  else
+    if ! docker compose up -d groups_relay; then
+      fail "docker compose up failed."
+      echo "  Inspect with: docker compose logs groups_relay"
+      exit 1
+    fi
+  fi
+fi
+
+echo ""
+printf "  Waiting for relay to be healthy"
+HEALTHY=false
+for i in $(seq 1 40); do
+  if curl -sf --max-time 3 http://localhost:8080/health >/dev/null 2>&1; then
+    HEALTHY=true; break
+  fi
+  sleep 3; printf "."
+done
+echo ""
+
+if $HEALTHY; then
+  banner "Relay is live on localhost"
+  printf "  ${BOLD}WebSocket:${NC}    ${CYAN}ws://localhost:8080${NC}\n"
+  printf "  ${BOLD}Web UI:${NC}       ${CYAN}http://localhost:8080/${NC}\n"
+  printf "  ${BOLD}Health:${NC}       ${CYAN}http://localhost:8080/health${NC}\n"
   echo ""
-  echo -e "    ${CYAN}./start.sh${NC}"
+  printf "  ${BOLD}Next:${NC} publish it to the internet with a domain.\n"
+  printf "    ${CYAN}./expose.sh${NC}\n"
   echo ""
+  printf "  ${BOLD}Manage:${NC}\n"
+  printf "    ${DIM}docker compose ps${NC}            status\n"
+  printf "    ${DIM}docker compose logs -f${NC}       logs\n"
+  printf "    ${DIM}docker compose restart${NC}       restart\n"
+  printf "    ${DIM}docker compose down${NC}          stop\n"
+  echo ""
+else
+  fail "Relay did not become healthy within 2 minutes."
+  echo "  Check: docker compose logs groups_relay"
+  exit 1
 fi

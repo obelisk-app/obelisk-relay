@@ -1,91 +1,82 @@
-import { useState } from 'preact/hooks'
-import { adminApi } from '../../services/AdminApiClient'
+import { useEffect, useRef, useState } from "preact/hooks"
+import {
+  LoginWidget,
+  clearPersistedNip46,
+  clearPersistedNsec,
+  useLogout,
+  useSigner,
+} from "@nostr-wot/ui"
+import type { NostrSigner } from "@nostr-wot/signers"
+import { adminApi } from "../../services/AdminApiClient"
 
 interface AdminAuthProps {
   onAuthenticated: () => void
 }
 
 export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
-  const [mode, setMode] = useState<'choose' | 'nsec'>('choose')
-  const [nsec, setNsec] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const signer = useSigner() as NostrSigner | null
+  const logout = useLogout()
+  const attemptedPubkeyRef = useRef<string | null>(null)
 
-  const signWithExtension = async () => {
+  const authenticateWithSigner = async (activeSigner: NostrSigner) => {
     setError(null)
     setLoading(true)
 
     try {
-      if (!(window as any).nostr) {
-        throw new Error('No NIP-07 extension found. Install a Nostr signer extension (nos2x, Alby, etc.)')
-      }
-
       const { challenge } = await adminApi.getChallenge()
-
-      const event = {
+      const signedEvent = await activeSigner.signEvent({
         kind: 22242,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['relay', window.location.origin.replace('http', 'ws')],
-          ['challenge', challenge],
+          ["relay", window.location.origin.replace("http", "ws")],
+          ["challenge", challenge],
         ],
-        content: '',
-      }
-
-      const signedEvent = await (window as any).nostr.signEvent(event)
+        content: "",
+      })
 
       await adminApi.authenticate(signedEvent)
       onAuthenticated()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Authentication failed')
+      const message = e instanceof Error ? e.message : "Authentication failed"
+      setError(message)
+      throw new Error(message)
     } finally {
       setLoading(false)
     }
   }
 
-  const signWithNsec = async () => {
-    setError(null)
-    setLoading(true)
+  useEffect(() => {
+    if (!signer) return
 
-    try {
-      const { finalizeEvent } = await import('nostr-tools')
-      const { decode } = await import('nostr-tools/nip19')
+    let cancelled = false
+    void (async () => {
+      const pubkey = await signer.getPublicKey()
+      if (cancelled || attemptedPubkeyRef.current === pubkey) return
+      attemptedPubkeyRef.current = pubkey
+      await authenticateWithSigner(signer).catch(() => undefined)
+    })()
 
-      let secretKeyBytes: Uint8Array
-      if (nsec.startsWith('nsec')) {
-        const decoded = decode(nsec)
-        if (decoded.type !== 'nsec') throw new Error('Invalid nsec')
-        secretKeyBytes = decoded.data
-      } else {
-        secretKeyBytes = new Uint8Array(nsec.match(/.{1,2}/g)!.map(b => parseInt(b, 16)))
-      }
-
-      const { challenge } = await adminApi.getChallenge()
-
-      const event = finalizeEvent({
-        kind: 22242,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['relay', window.location.origin.replace('http', 'ws')],
-          ['challenge', challenge],
-        ],
-        content: '',
-      }, secretKeyBytes)
-
-      await adminApi.authenticate(event)
-      onAuthenticated()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Authentication failed')
-    } finally {
-      setLoading(false)
+    return () => {
+      cancelled = true
     }
+  }, [signer])
+
+  const switchIdentity = () => {
+    attemptedPubkeyRef.current = null
+    setError(null)
+    void signer?.close?.()
+    void clearPersistedNip46()
+    void clearPersistedNsec()
+    void logout()
   }
 
   return (
-    <div class="min-h-screen flex items-center justify-center px-4" style={{ background: 'var(--color-bg-primary)' }}>
+    <div class="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--color-bg-primary)" }}>
       <div class="max-w-md w-full lc-card lc-glow p-8">
-        <h1 class="text-2xl font-bold mb-2 text-center lc-glow-text" style={{ color: '#b4f953' }}>Admin Panel</h1>
-        <p class="text-sm text-center mb-6" style={{ color: 'var(--color-text-secondary)' }}>
+        <h1 class="text-2xl font-bold mb-2 text-center lc-glow-text" style={{ color: "#b4f953" }}>Admin Panel</h1>
+        <p class="text-sm text-center mb-6" style={{ color: "var(--color-text-secondary)" }}>
           Sign in with your Nostr identity to manage the relay.
         </p>
 
@@ -95,65 +86,43 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
           </div>
         )}
 
-        {mode === 'choose' ? (
+        {!signer ? (
+          <LoginWidget
+            title="Sign in as relay admin"
+            subtitle="Use the operator Nostr key authorized for this relay."
+            methods={["nip07", "nip46", "import"]}
+            flatLayout
+            showRememberToggle
+            nip46Mode="qr"
+            nip46Relays={["wss://relay.nsec.app", "wss://relay.damus.io"]}
+            nip46Metadata={{
+              name: "Obelisk Relay Admin",
+              url: window.location.origin,
+              description: "Admin login for Obelisk relay",
+            }}
+          />
+        ) : (
           <div class="space-y-3">
-            <button
-              onClick={signWithExtension}
-              disabled={loading}
-              class="w-full lc-pill-primary py-3 text-base"
-              style={{ borderRadius: '10px' }}
-            >
-              {loading ? (
-                <span class="flex items-center justify-center gap-2">
-                  <span class="lc-spinner" style={{ width: '16px', height: '16px', borderTopColor: '#0a0a0a' }} />
-                  Signing...
-                </span>
-              ) : 'Sign in with Extension (NIP-07)'}
-            </button>
-            <button
-              onClick={() => setMode('nsec')}
-              disabled={loading}
-              class="w-full lc-pill-secondary py-3 text-base"
-              style={{ borderRadius: '10px' }}
-            >
-              Enter nsec manually
-            </button>
+            {!error && (
+              <div class="flex items-center justify-center gap-2 py-3 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+                <span class="lc-spinner" style={{ width: "16px", height: "16px", borderTopColor: "#b4f953" }} />
+                {loading ? "Authenticating..." : "Preparing signer..."}
+              </div>
+            )}
+            {error && (
+              <button
+                onClick={switchIdentity}
+                class="w-full lc-pill-secondary py-3 text-base"
+                style={{ borderRadius: "10px" }}
+              >
+                Use another signer
+              </button>
+            )}
             <div class="text-center pt-2">
-              <a href="/" class="text-sm hover:underline" style={{ color: 'var(--color-text-secondary)' }}>
+              <a href="/" class="text-sm hover:underline" style={{ color: "var(--color-text-secondary)" }}>
                 Back to home
               </a>
             </div>
-          </div>
-        ) : (
-          <div class="space-y-3">
-            <input
-              type="password"
-              value={nsec}
-              onInput={(e) => setNsec((e.target as HTMLInputElement).value)}
-              placeholder="nsec1... or hex private key"
-              class="w-full px-4 py-3 rounded-lg text-sm"
-              style={{ background: 'var(--color-bg-primary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
-            />
-            <button
-              onClick={signWithNsec}
-              disabled={loading || !nsec}
-              class="w-full lc-pill-primary py-3 text-base"
-              style={{ borderRadius: '10px' }}
-            >
-              {loading ? (
-                <span class="flex items-center justify-center gap-2">
-                  <span class="lc-spinner" style={{ width: '16px', height: '16px', borderTopColor: '#0a0a0a' }} />
-                  Signing...
-                </span>
-              ) : 'Sign in'}
-            </button>
-            <button
-              onClick={() => { setMode('choose'); setNsec('') }}
-              class="w-full py-2 text-sm hover:underline"
-              style={{ color: 'var(--color-text-secondary)' }}
-            >
-              Back
-            </button>
           </div>
         )}
       </div>

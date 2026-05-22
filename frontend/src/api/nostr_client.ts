@@ -4,7 +4,9 @@ import NDK, {
   NDKRelay,
   NDKPublishError,
   NDKUser,
+  type NDKSigner,
 } from "@nostr-dev-kit/ndk";
+import { nostrSignerAsNdkSigner, type NostrSigner } from "@nostr-wot/signers";
 import { nip19 } from "nostr-tools";
 import localforage from "localforage";
 
@@ -30,6 +32,8 @@ export enum GroupEventKind {
 export interface NostrClientConfig {
   relayUrl: string;
 }
+
+export type NostrClientSigner = string | NDKSigner;
 
 // Re-export Transaction type from wallet service
 export { type Transaction } from "../services/CashuWalletService";
@@ -57,7 +61,15 @@ export class NostrClient {
   private storageInitialized = false;
   private walletInitCallbacks: Set<() => void> = new Set();
 
-  constructor(key: string, config?: Partial<NostrClientConfig>) {
+  static async fromNostrSigner(
+    signer: NostrSigner,
+    config?: Partial<NostrClientConfig>
+  ): Promise<NostrClient> {
+    const ndkSigner = await nostrSignerAsNdkSigner(signer, { NDKUser });
+    return new NostrClient(ndkSigner as unknown as NDKSigner, config);
+  }
+
+  constructor(identity: NostrClientSigner, config?: Partial<NostrClientConfig>) {
     try {
       // Get WebSocket URL from environment variable or use current host
       const getWebSocketUrl = () => {
@@ -81,20 +93,7 @@ export class NostrClient {
         ...config,
       };
 
-      // Validate the key format before creating the signer
-      if (!key || typeof key !== "string") {
-        throw new Error("Private key is required and must be a string");
-      }
-
-      // Try to create the signer with better error handling
-      let signer;
-      try {
-        signer = new NDKPrivateKeySigner(key);
-      } catch (signerError) {
-        throw new Error(
-          "Invalid private key provided. Please check the format and try again."
-        );
-      }
+      const signer = this.resolveSigner(identity);
 
       // Groups NDK - only for group relay operations
       this.groupsNdk = new NDK({
@@ -174,6 +173,22 @@ export class NostrClient {
       throw new NostrGroupError(
         error instanceof Error ? error.message : String(error),
         "Failed to initialize NostrClient"
+      );
+    }
+  }
+
+  private resolveSigner(identity: NostrClientSigner): NDKSigner {
+    if (typeof identity !== "string") return identity;
+
+    if (!identity) {
+      throw new Error("Private key is required and must be a string");
+    }
+
+    try {
+      return new NDKPrivateKeySigner(identity);
+    } catch {
+      throw new Error(
+        "Invalid private key provided. Please check the format and try again."
       );
     }
   }

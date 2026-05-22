@@ -16,6 +16,8 @@
     "@cashu/cashu-ts": "^2.5.2",
     "@nostr-dev-kit/ndk": "^2.14.30",
     "@nostr-dev-kit/ndk-wallet": "^0.6.2",
+    "@nostr-wot/signers": "^0.4.0",
+    "@nostr-wot/ui": "^0.6.0",
     "@preact/preset-vite": "^2.8.1",
     "localforage": "^1.10.0",
     "nostr-tools": "^2.15.0",

@@ -31,9 +31,15 @@ pub struct RelaySettings {
     /// Optional advertised relay description (NIP-11 / admin info).
     #[serde(default)]
     pub relay_description: Option<String>,
-    /// If set, events of `prune_kinds` older than this duration are deleted by a background task.
+    /// If set, events of `prune_kinds` older than this duration can be deleted by
+    /// a background task, but only when `enable_event_pruner` is explicitly true.
+    /// Retention config alone is kept as inert policy metadata to prevent accidental
+    /// data loss from stale settings files.
     #[serde(default, with = "humantime_serde")]
     pub event_retention: Option<Duration>,
+    /// Explicit destructive switch for retention pruning. Defaults false.
+    #[serde(default)]
+    pub enable_event_pruner: bool,
     /// How often the pruner runs. Defaults to retention/48 (clamped 60s..6h) if not set.
     #[serde(default, with = "humantime_serde")]
     pub prune_interval: Option<Duration>,
@@ -170,6 +176,7 @@ pub struct Settings {
     pub relay_name: Option<String>,
     pub relay_description: Option<String>,
     pub event_retention: Option<Duration>,
+    pub enable_event_pruner: bool,
     pub prune_interval: Option<Duration>,
     pub prune_kinds: Option<Vec<u16>>,
     pub pubkey_rate_limit_per_minute: Option<u32>,

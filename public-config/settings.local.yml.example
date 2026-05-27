@@ -6,7 +6,7 @@ relay:
   local_addr: "0.0.0.0:8080"
 
   relay_name: "Obelisk Public Relay"
-  relay_description: "Public NIP-29 groups relay for Obelisk. Open to all pubkeys; messages auto-pruned after 48h; per-pubkey rate limited."
+  relay_description: "Public NIP-29 groups relay for Obelisk. Open to all pubkeys; per-pubkey rate limited. No automatic retention pruning."
 
   # Empty whitelist => no pubkey restriction (public mode).
   whitelisted_pubkeys: []
@@ -18,10 +18,12 @@ relay:
   # /api/retention) remain available. Restart the container to apply.
   admin_pubkeys: []
 
-  # Auto-prune events of these kinds older than `event_retention`.
-  # Defaults to NIP-29 chat-style kinds [9, 11, 12] when omitted.
-  event_retention: "48h"
-  prune_interval: "1h"
+  # Automatic retention pruning is destructive and disabled by default.
+  # Set enable_event_pruner: true together with event_retention only for an
+  # intentional, documented data-retention policy.
+  enable_event_pruner: false
+  # event_retention: "48h"
+  # prune_interval: "1h"
   # prune_kinds: [9, 11, 12]
 
   # Per-pubkey rate limit — keyed by signer pubkey, survives reconnects.

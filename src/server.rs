@@ -125,18 +125,32 @@ pub async fn run_server(
     }
 
     // Parse admin pubkeys
-    let admin_pubkeys: Vec<PublicKey> = settings
+    let mut admin_pubkeys: Vec<PublicKey> = settings
         .admin_keys
         .iter()
         .filter_map(|hex| PublicKey::from_hex(hex).ok())
         .collect();
+    for pk in admin::load_runtime_admin_pubkeys(config_dir) {
+        if !admin_pubkeys.contains(&pk) {
+            admin_pubkeys.push(pk);
+        }
+    }
     if !admin_pubkeys.is_empty() {
         info!("Admin panel enabled: {} admin pubkeys", admin_pubkeys.len());
     }
-    admin::init_admin_state(admin_pubkeys, settings.relay_url.clone());
+    admin::init_admin_state(
+        admin_pubkeys.clone(),
+        settings.relay_url.clone(),
+        "config".to_string(),
+    );
 
     let mut groups_processor =
-        GroupsRelayProcessor::new(groups.clone(), relay_keys.public_key, whitelist.clone());
+        GroupsRelayProcessor::with_admin_pubkeys(
+            groups.clone(),
+            relay_keys.public_key,
+            admin_pubkeys.clone(),
+            whitelist.clone(),
+        );
     if let Some(per_minute) = settings.pubkey_rate_limit_per_minute {
         if per_minute > 0 {
             info!("Per-pubkey rate limit enabled: {} events/minute", per_minute);

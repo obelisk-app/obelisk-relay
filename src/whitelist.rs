@@ -119,6 +119,12 @@ impl Whitelist {
         guard.len() < len_before
     }
 
+    /// Replace manually configured pubkeys.
+    pub fn replace_manual(&self, pubkeys: Vec<PublicKey>) {
+        let mut guard = self.inner.write();
+        *guard = pubkeys;
+    }
+
     /// Number of whitelisted pubkeys (manual + follow-derived, deduplicated, excluding blacklisted).
     pub fn len(&self) -> usize {
         self.list().len()

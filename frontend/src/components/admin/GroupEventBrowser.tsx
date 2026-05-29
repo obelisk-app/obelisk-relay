@@ -1,10 +1,5 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
-import { adminApi, EventInfo, MemberInfo } from '../../services/AdminApiClient'
-
-interface GroupInfo {
-  id: string
-  name: string
-}
+import { adminApi, EventInfo, MemberInfo, type GroupInfo } from '../../services/AdminApiClient'
 
 interface Props {
   group: GroupInfo
@@ -38,6 +33,12 @@ const relativeTime = (ts: number): string => {
 }
 
 const short = (s: string, n = 8) => `${s.slice(0, n)}…`
+
+const accessText = (group: GroupInfo) => {
+  const read = group.private ? 'Private' : 'Public'
+  const join = group.closed ? 'Closed' : 'Open'
+  return `${read} / ${join}`
+}
 
 export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [tab, setTab] = useState<Tab>('events')
@@ -171,15 +172,40 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div class="flex items-start justify-between mb-4">
-          <div>
-            <h3 class="text-lg font-bold">{group.name || group.id}</h3>
-            <div class="text-xs font-mono mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+        <div class="flex items-start justify-between gap-4 mb-4">
+          <div class="min-w-0">
+            <h3 class="text-lg font-bold break-words">{group.name || group.id}</h3>
+            <div class="text-xs font-mono mt-0.5 break-all" style={{ color: 'var(--color-text-secondary)' }}>
               {group.id}
+            </div>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <span class="px-2 py-0.5 rounded-full text-xs" style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}>
+                {accessText(group)}
+              </span>
+              {group.channel_kind && (
+                <span class="px-2 py-0.5 rounded-full text-xs" style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}>
+                  {group.channel_kind}
+                </span>
+              )}
+              {group.broadcast && (
+                <span class="px-2 py-0.5 rounded-full text-xs" style={{ background: 'rgba(180,249,83,0.10)', color: '#b4f953', border: '1px solid rgba(180,249,83,0.25)' }}>
+                  Broadcast
+                </span>
+              )}
             </div>
           </div>
           <button onClick={onClose} style={{ color: 'var(--color-text-secondary)', fontSize: '20px', lineHeight: 1 }}>✕</button>
         </div>
+
+        {(group.about || group.parent || group.picture || group.banner || group.metadata_tags.length > 0) && (
+          <div class="mb-4 p-3 text-xs grid md:grid-cols-2 gap-3" style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)', borderRadius: '8px', color: 'var(--color-text-secondary)' }}>
+            {group.about && <div class="md:col-span-2">{group.about}</div>}
+            {group.parent && <div><span>Parent: </span><span class="font-mono break-all">{group.parent}</span></div>}
+            {group.picture && <div><span>Picture: </span><a href={group.picture} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: '#b4f953' }}>{group.picture}</a></div>}
+            {group.banner && <div><span>Banner: </span><a href={group.banner} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: '#b4f953' }}>{group.banner}</a></div>}
+            {group.metadata_tags.length > 0 && <div>Extra tags: {group.metadata_tags.length}</div>}
+          </div>
+        )}
 
         {/* Toast */}
         {toast && (

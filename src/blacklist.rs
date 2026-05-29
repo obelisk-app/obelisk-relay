@@ -74,6 +74,12 @@ impl Blacklist {
         guard.len() < len_before
     }
 
+    /// Replace all blacklisted pubkeys.
+    pub fn replace_all(&self, pubkeys: Vec<PublicKey>) {
+        let mut guard = self.inner.write();
+        *guard = pubkeys;
+    }
+
     /// Number of blacklisted pubkeys.
     pub fn len(&self) -> usize {
         self.inner.read().len()

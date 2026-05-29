@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
 COPY frontend/package*.json ./
 COPY frontend/pnpm-lock.yaml ./
 
-RUN npm install -g pnpm && pnpm install
+RUN npm install -g pnpm@9.15.9 && pnpm install --frozen-lockfile
 
 COPY frontend/src ./src
 COPY frontend/public ./public

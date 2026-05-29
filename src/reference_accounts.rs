@@ -69,6 +69,12 @@ impl ReferenceAccounts {
         guard.len() < len_before
     }
 
+    /// Replace all reference accounts.
+    pub fn replace_all(&self, pubkeys: Vec<PublicKey>) {
+        let mut guard = self.inner.write();
+        *guard = pubkeys;
+    }
+
     /// Persist to config/reference_accounts.json.
     pub fn persist(&self, config_dir: &Path) -> Result<(), std::io::Error> {
         let hex_keys: Vec<String> = self.inner.read().iter().map(|pk| pk.to_hex()).collect();

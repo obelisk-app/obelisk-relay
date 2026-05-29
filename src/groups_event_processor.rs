@@ -33,6 +33,7 @@ pub type PubkeyLimiter = DefaultKeyedRateLimiter<PublicKey>;
 pub struct GroupsRelayProcessor {
     groups: Arc<Groups>,
     relay_pubkey: PublicKey,
+    admin_pubkeys: Vec<PublicKey>,
     whitelist: Whitelist,
     /// Optional per-pubkey rate limiter. None disables per-pubkey rate limiting.
     pubkey_limiter: Option<Arc<PubkeyLimiter>>,
@@ -42,6 +43,7 @@ impl std::fmt::Debug for GroupsRelayProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GroupsRelayProcessor")
             .field("relay_pubkey", &self.relay_pubkey)
+            .field("admin_pubkey_count", &self.admin_pubkeys.len())
             .field("whitelist_empty", &self.whitelist.is_empty())
             .field("pubkey_limiter", &self.pubkey_limiter.is_some())
             .finish()
@@ -55,9 +57,19 @@ impl GroupsRelayProcessor {
         relay_pubkey: PublicKey,
         whitelist: Whitelist,
     ) -> Self {
+        Self::with_admin_pubkeys(groups, relay_pubkey, Vec::new(), whitelist)
+    }
+
+    pub fn with_admin_pubkeys(
+        groups: Arc<Groups>,
+        relay_pubkey: PublicKey,
+        admin_pubkeys: Vec<PublicKey>,
+        whitelist: Whitelist,
+    ) -> Self {
         Self {
             groups,
             relay_pubkey,
+            admin_pubkeys,
             whitelist,
             pubkey_limiter: None,
         }
@@ -79,9 +91,13 @@ impl GroupsRelayProcessor {
             return true;
         }
         match pubkey {
-            Some(pk) => self.whitelist.contains(pk) || *pk == self.relay_pubkey,
+            Some(pk) => self.whitelist.contains(pk) || self.is_relay_admin(pk),
             None => false,
         }
+    }
+
+    fn is_relay_admin(&self, pubkey: &PublicKey) -> bool {
+        *pubkey == self.relay_pubkey || self.admin_pubkeys.contains(pubkey)
     }
 
     /// Get a reference to the groups state manager
@@ -153,7 +169,7 @@ impl EventProcessor for GroupsRelayProcessor {
                             // Private group - user must be a member or relay admin
                             if let Some(pubkey) = &context.authed_pubkey {
                                 // Relay admin has access to all groups
-                                if pubkey != &self.relay_pubkey && !group.is_member(pubkey) {
+                                if !self.is_relay_admin(pubkey) && !group.is_member(pubkey) {
                                     return Err(relay_builder::Error::restricted(
                                         "Access denied to private group".to_string(),
                                     ));

@@ -51,6 +51,23 @@ export class AdminApiClient {
     return this.request('/api/admin/challenge')
   }
 
+  async getSetupStatus(): Promise<SetupStatus> {
+    return this.request('/api/admin/setup/status')
+  }
+
+  async bootstrapSetup(options: {
+    signed_event: any
+    access_policy: 'owner_only' | 'open'
+    add_owner_reference: boolean
+  }): Promise<SetupResult> {
+    const result = await this.request<SetupResult>('/api/admin/setup', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    })
+    this.setToken(result.token)
+    return result
+  }
+
   async authenticate(signedEvent: any): Promise<{ token: string }> {
     const result = await this.request<{ token: string }>('/api/admin/auth', {
       method: 'POST',
@@ -83,10 +100,16 @@ export class AdminApiClient {
     id: string
     name: string
     about: string | null
+    picture: string | null
+    banner: string | null
+    parent: string | null
+    channel_kind: string | null
     member_count: number
+    admin_count: number
     private: boolean
     closed: boolean
     broadcast: boolean
+    metadata_tags: string[][]
   }>> {
     return this.request('/api/admin/groups')
   }
@@ -118,6 +141,17 @@ export class AdminApiClient {
 
   async syncFollows(): Promise<{ derived_count: number; message: string }> {
     return this.request('/api/admin/reference-accounts/sync', { method: 'POST' })
+  }
+
+  async resetRelayConfig(options: {
+    confirm: string
+    access_policy: 'owner_only' | 'open'
+    keep_owner_reference: boolean
+  }): Promise<ConfigResetResult> {
+    return this.request('/api/admin/config/reset', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    })
   }
 
   async getBlacklist(): Promise<Array<{ hex: string; npub: string }>> {
@@ -178,6 +212,48 @@ export interface EventInfo {
 export interface MemberInfo {
   pubkey: string
   roles: string[]
+}
+
+export interface SetupStatus {
+  needs_setup: boolean
+  admin_count: number
+  relay_url: string
+  whitelisted_count: number
+  reference_account_count: number
+}
+
+export interface SetupResult {
+  token: string
+  admin_pubkey: string
+  admin_npub: string
+  whitelisted_owner: boolean
+  reference_owner: boolean
+}
+
+export interface ConfigResetResult {
+  admin_pubkey: string
+  admin_npub: string
+  access_policy: 'owner_only' | 'open'
+  whitelisted_count: number
+  reference_account_count: number
+  backup_path: string
+  message: string
+}
+
+export interface GroupInfo {
+  id: string
+  name: string
+  about: string | null
+  picture: string | null
+  banner: string | null
+  parent: string | null
+  channel_kind: string | null
+  member_count: number
+  admin_count: number
+  private: boolean
+  closed: boolean
+  broadcast: boolean
+  metadata_tags: string[][]
 }
 
 export const adminApi = new AdminApiClient()

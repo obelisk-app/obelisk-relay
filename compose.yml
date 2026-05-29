@@ -14,10 +14,10 @@ services:
       - relay-db:/app/db
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
-      NIP29__relay__relay_url: "wss://relay.obelisk.ar"
+      NIP29__relay__relay_url: "${RELAY_URL:-wss://relay.obelisk.ar}"
       TOKIO_BLOCKING_THREADS: "2048"
     ports:
-      - "8080:8080"
+      - "${RELAY_HOST_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "-sf", "--max-time", "5", "http://localhost:8080/health"]
       interval: 30s

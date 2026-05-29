@@ -215,6 +215,31 @@ body {
   pointer-events: none;
 }
 
+.nui-open-signer {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .nui-open-signer {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 12px 18px;
+    border-radius: 8px;
+    background: var(--color-accent);
+    color: #0a0a0a;
+    font-size: 14px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .nui-open-signer:active {
+    background: var(--color-accent-hover);
+  }
+}
+
 /* ── Role badges ── */
 .role-badge {
   @apply px-1.5 py-0.5 rounded-full text-white;

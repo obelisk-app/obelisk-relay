@@ -29,17 +29,41 @@ export default defineConfig({
       },
       output: {
         manualChunks(id) {
-          // NDK and related packages
-          if (id.includes('@nostr-dev-kit/ndk') || 
-              id.includes('nostr-tools') || 
-              id.includes('tseep')) {
+          if (!id.includes('node_modules')) return;
+
+          // Keep the Preact runtime isolated. When it shares a chunk with
+          // packages that import nostr-tools, Rollup can create a circular
+          // vendor <-> ndk chunk dependency that runs JSX before Preact's
+          // options object is initialized.
+          if (
+            id.includes('/preact/') ||
+            id.includes('/preact-router/') ||
+            id.includes('/@preact/')
+          ) {
+            return 'preact';
+          }
+
+          if (
+            id.includes('/@nostr-wot/ui/') ||
+            id.includes('/@nostr-wot/data/') ||
+            id.includes('/@nostr-wot/signers/')
+          ) {
+            return 'nostr-wot';
+          }
+
+          if (
+            id.includes('/@nostr-dev-kit/ndk/') ||
+            id.includes('/nostr-tools/') ||
+            id.includes('/tseep/')
+          ) {
             return 'ndk';
           }
-          // Vendor packages
-          if (id.includes('node_modules') && 
-              (id.includes('preact') || 
-               id.includes('localforage') || 
-               id.includes('@cashu/cashu-ts'))) {
+
+          if (id.includes('/@cashu/cashu-ts/')) {
+            return 'cashu';
+          }
+
+          if (id.includes('/localforage/')) {
             return 'vendor';
           }
         }

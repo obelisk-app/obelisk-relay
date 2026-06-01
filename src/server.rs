@@ -162,26 +162,39 @@ pub async fn run_server(
     let cancellation_token = CancellationToken::new();
     let connection_counter = Arc::new(AtomicUsize::new(0));
 
-    // Spin up the background event pruner if retention is configured.
-    let (pruner_stats, pruner_config_opt) = if let Some(retention) = settings.event_retention {
-        if retention.as_secs() > 0 {
-            let cfg = PrunerConfig::from_settings(
-                retention,
-                settings.prune_interval,
-                settings.prune_kinds.clone(),
-            );
-            let stats = Arc::new(PrunerStats::default());
-            pruner::spawn(
-                database_for_pruner.clone(),
-                cfg.clone(),
-                stats.clone(),
-                cancellation_token.clone(),
-            );
-            (Some(stats), Some(cfg))
+    // Background event retention is destructive. It is disabled unless both
+    // event_retention is configured and enable_event_pruner is explicitly true.
+    // This keeps stale/example retention settings from silently deleting relay data.
+    let (pruner_stats, pruner_config_opt) = if settings.enable_event_pruner {
+        if let Some(retention) = settings.event_retention {
+            if retention.as_secs() > 0 {
+                let cfg = PrunerConfig::from_settings(
+                    retention,
+                    settings.prune_interval,
+                    settings.prune_kinds.clone(),
+                );
+                let stats = Arc::new(PrunerStats::default());
+                pruner::spawn(
+                    database_for_pruner.clone(),
+                    cfg.clone(),
+                    stats.clone(),
+                    cancellation_token.clone(),
+                );
+                (Some(stats), Some(cfg))
+            } else {
+                tracing::info!("Event pruner disabled: event_retention is zero");
+                (None, None)
+            }
         } else {
+            tracing::warn!("enable_event_pruner=true but event_retention is unset; pruner disabled");
             (None, None)
         }
     } else {
+        if settings.event_retention.is_some() {
+            tracing::warn!(
+                "Event retention is configured but enable_event_pruner=false; automatic deletion is disabled"
+            );
+        }
         (None, None)
     };
 

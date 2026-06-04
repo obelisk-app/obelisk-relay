@@ -107,6 +107,18 @@ dco down
 dco stop cloudflared
 ```
 
+## Release and deployment
+
+Prebuilt relay images are published to GHCR:
+
+```text
+ghcr.io/obelisk-app/obelisk-relay
+```
+
+Use [docs/release-deploy-ghcr.md](docs/release-deploy-ghcr.md) for the
+multi-arch Buildx release flow, arm64 repair flow, pinned deploy commands,
+verification, rollback, and private-file rules.
+
 ## Configuration
 
 Edit `config/settings.local.yml`:

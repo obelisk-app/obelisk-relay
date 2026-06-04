@@ -1,6 +1,11 @@
 # Relay Workstation Release Runbook
 
-This replaces the slow GitHub Actions build with a Docker image built on your workstation and pushed directly to GHCR.
+This replaces the slow GitHub Actions build with a Docker image built on your
+workstation and pushed directly to GHCR.
+
+The current multi-arch release procedure is documented in
+`docs/release-deploy-ghcr.md`. Use that file for new releases, especially when
+production hosts need `linux/arm64`.
 
 ## What This Publishes
 
@@ -113,6 +118,8 @@ curl -sf http://127.0.0.1:8083/health
 
 ## Notes
 
+- Current multi-arch tags and digests are tracked in
+  `docs/release-deploy-ghcr.md`.
 - You can still push source code to GitHub, but GitHub no longer needs to build the release image.
 - Keep tagging images by commit or version so rollback is easy.
 - Avoid deploying untagged `latest` blindly. Push it for convenience, but deploy with the immutable commit or version tag.

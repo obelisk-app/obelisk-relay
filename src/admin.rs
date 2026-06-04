@@ -1,5 +1,5 @@
 use crate::follow_sync;
-use crate::server::ServerState;
+use crate::server::{ServerState, SUPPORTED_NIPS};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -11,7 +11,7 @@ use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path as StdPath;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -21,10 +21,24 @@ use tracing::{debug, info, warn};
 const ADMIN_RUNTIME_FILE: &str = "admin_pubkeys_runtime.json";
 const SETTINGS_LOCAL_FILE: &str = "settings.local.yml";
 const SETTINGS_DEFAULT_FILE: &str = "settings.yml";
+const REFERENCE_ACCOUNTS_FILE: &str = "reference_accounts.json";
+const WHITELIST_RUNTIME_FILE: &str = "whitelist_runtime.json";
 const WHITELIST_FOLLOWS_FILE: &str = "whitelist_follows.json";
 const BLACKLIST_FILE: &str = "blacklist.json";
+const SETUP_OWNER_FILE: &str = "setup_owner_pubkey.json";
+const BACKUP_DIR: &str = "backups";
+const BACKUP_PREFIX: &str = "config-reset-";
 const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
+const BACKUP_FILE_NAMES: [&str; 7] = [
+    SETTINGS_LOCAL_FILE,
+    REFERENCE_ACCOUNTS_FILE,
+    WHITELIST_RUNTIME_FILE,
+    WHITELIST_FOLLOWS_FILE,
+    ADMIN_RUNTIME_FILE,
+    BLACKLIST_FILE,
+    SETUP_OWNER_FILE,
+];
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -68,6 +82,8 @@ struct SetupStatusResponse {
     relay_url: String,
     whitelisted_count: usize,
     reference_account_count: usize,
+    setup_owner_pubkey: Option<String>,
+    setup_owner_npub: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,18 +105,147 @@ struct SetupResponse {
 #[derive(Deserialize)]
 struct ConfigResetRequest {
     confirm: String,
-    access_policy: Option<String>,
-    keep_owner_reference: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct ConfigResetResponse {
-    admin_pubkey: String,
-    admin_npub: String,
-    access_policy: String,
+    setup_owner_pubkey: String,
+    setup_owner_npub: String,
+    needs_setup: bool,
     whitelisted_count: usize,
     reference_account_count: usize,
     backup_path: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct AccessSettingsRequest {
+    access_policy: String,
+    pubkey_rate_limit_per_minute: Option<u32>,
+    connection_rate_limit_per_minute: Option<u32>,
+    global_rate_limit_per_minute: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct AccessSettingsResponse {
+    access_policy: String,
+    pubkey_rate_limit_per_minute: u32,
+    connection_rate_limit_per_minute: u32,
+    global_rate_limit_per_minute: u32,
+    whitelisted_count: usize,
+    restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct StorageSettingsRequest {
+    pruning_enabled: bool,
+    retention_days: u32,
+    prune_interval_minutes: u32,
+    prune_kinds: Vec<u16>,
+}
+
+#[derive(Serialize)]
+struct StorageSettingsResponse {
+    db_path: String,
+    db_size_bytes: u64,
+    db_file_count: u64,
+    pruning_enabled: bool,
+    configured_pruning_enabled: bool,
+    retention_days: u32,
+    prune_interval_minutes: u32,
+    prune_kinds: Vec<u16>,
+    total_pruned: u64,
+    runs: u64,
+    last_run_unix: i64,
+    restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct RestartRelayRequest {
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct RestartRelayResponse {
+    message: String,
+    restart_in_ms: u64,
+}
+
+#[derive(Serialize)]
+struct AdminPubkeyEntry {
+    hex: String,
+    npub: String,
+    current_session: bool,
+}
+
+#[derive(Deserialize)]
+struct AddAdminPubkeyRequest {
+    pubkey: String,
+}
+
+#[derive(Serialize)]
+struct RelayIdentityResponse {
+    relay_name: String,
+    relay_description: String,
+    relay_url: String,
+    relay_pubkey: String,
+    restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct RelayIdentityRequest {
+    relay_name: String,
+    relay_description: String,
+    relay_url: String,
+}
+
+#[derive(Deserialize)]
+struct RotateRelayKeyRequest {
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct RotateRelayKeyResponse {
+    relay_pubkey: String,
+    restart_required: bool,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct BackupEntry {
+    id: String,
+    created_unix: u64,
+    path: String,
+    file_count: u64,
+    size_bytes: u64,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BackupDownloadFile {
+    name: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct BackupDownloadResponse {
+    id: String,
+    files: Vec<BackupDownloadFile>,
+}
+
+#[derive(Deserialize)]
+struct RestoreBackupRequest {
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct RestoreBackupResponse {
+    id: String,
+    backup_before_restore_path: String,
+    admin_count: usize,
+    whitelisted_count: usize,
+    reference_account_count: usize,
+    restart_required: bool,
     message: String,
 }
 
@@ -260,6 +405,17 @@ fn error_response(
     )
 }
 
+fn parse_pubkey_input(input: &str) -> Result<PublicKey, (StatusCode, Json<ErrorResponse>)> {
+    let trimmed = input.trim();
+    if trimmed.starts_with("npub") {
+        PublicKey::from_bech32(trimmed)
+            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid npub"))
+    } else {
+        PublicKey::from_hex(trimmed)
+            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid hex pubkey"))
+    }
+}
+
 fn parse_signed_event(
     signed_event: &serde_json::Value,
 ) -> Result<Event, (StatusCode, Json<ErrorResponse>)> {
@@ -394,11 +550,373 @@ fn read_yaml_scalar(config_dir: &StdPath, key: &str, default_value: &str) -> Str
     default_value.to_string()
 }
 
-fn write_owner_only_settings(
+fn read_yaml_u32(config_dir: &StdPath, key: &str, default_value: u32) -> u32 {
+    read_yaml_scalar(config_dir, key, "")
+        .parse::<u32>()
+        .unwrap_or(default_value)
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn upsert_relay_scalar(contents: String, key: &str, value: u32) -> String {
+    upsert_relay_value(contents, key, &value.to_string())
+}
+
+fn upsert_relay_value(contents: String, key: &str, value: &str) -> String {
+    let replacement = format!("  {key}: {value}");
+    let mut found = false;
+    let mut lines = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{key}:")) {
+            lines.push(replacement.clone());
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !found {
+        let insert_at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("websocket:"))
+            .unwrap_or(lines.len());
+        lines.insert(insert_at, replacement);
+    }
+
+    let mut next = lines.join("\n");
+    next.push('\n');
+    next
+}
+
+fn config_bool(config_dir: &StdPath, key: &str, default_value: bool) -> bool {
+    match read_yaml_scalar(config_dir, key, if default_value { "true" } else { "false" }).as_str()
+    {
+        "true" | "True" | "TRUE" => true,
+        "false" | "False" | "FALSE" => false,
+        _ => default_value,
+    }
+}
+
+fn parse_duration_days(value: &str, default_value: u32) -> u32 {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    if let Some(days) = trimmed.strip_suffix('d') {
+        return days.parse::<u32>().unwrap_or(default_value);
+    }
+    if let Some(hours) = trimmed.strip_suffix('h') {
+        return hours
+            .parse::<u32>()
+            .map(|h| (h / 24).max(1))
+            .unwrap_or(default_value);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(|seconds| ((seconds / 86_400) as u32).max(1))
+        .unwrap_or(default_value)
+}
+
+fn parse_duration_minutes(value: &str, default_value: u32) -> u32 {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    if let Some(minutes) = trimmed.strip_suffix('m') {
+        return minutes.parse::<u32>().unwrap_or(default_value);
+    }
+    if let Some(hours) = trimmed.strip_suffix('h') {
+        return hours
+            .parse::<u32>()
+            .map(|h| h.saturating_mul(60))
+            .unwrap_or(default_value);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(|seconds| ((seconds / 60) as u32).max(1))
+        .unwrap_or(default_value)
+}
+
+fn read_prune_kinds(config_dir: &StdPath) -> Vec<u16> {
+    let raw = read_yaml_scalar(config_dir, "prune_kinds", "");
+    if raw.is_empty() {
+        return crate::pruner::DEFAULT_PRUNE_KINDS.to_vec();
+    }
+
+    let parsed: Vec<u16> = raw
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .filter_map(|item| item.trim().parse::<u16>().ok())
+        .filter(|kind| !crate::pruner::NEVER_PRUNE_KINDS.contains(kind))
+        .collect();
+
+    if parsed.is_empty() {
+        crate::pruner::DEFAULT_PRUNE_KINDS.to_vec()
+    } else {
+        parsed
+    }
+}
+
+fn directory_stats(path: &StdPath) -> (u64, u64) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return (0, 0);
+    };
+
+    if metadata.is_file() {
+        return (metadata.len(), 1);
+    }
+
+    let mut size = 0u64;
+    let mut files = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else if metadata.is_file() {
+                size = size.saturating_add(metadata.len());
+                files = files.saturating_add(1);
+            }
+        }
+    }
+    (size, files)
+}
+
+fn read_pubkey_json_file(path: &StdPath) -> Vec<PublicKey> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(hex_keys) = serde_json::from_str::<Vec<String>>(&contents) else {
+        warn!("Failed to parse pubkey list from {}", path.display());
+        return Vec::new();
+    };
+
+    hex_keys
+        .iter()
+        .filter_map(|hex| PublicKey::from_hex(hex).ok())
+        .collect()
+}
+
+fn backup_id_to_dir(config_dir: &StdPath, id: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+    if !id.starts_with(BACKUP_PREFIX)
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid backup id"));
+    }
+
+    let path = config_dir.join(BACKUP_DIR).join(id);
+    if !path.is_dir() {
+        return Err(error_response(StatusCode::NOT_FOUND, "Backup not found"));
+    }
+
+    Ok(path)
+}
+
+fn backup_entry(path: &StdPath) -> Option<BackupEntry> {
+    let id = path.file_name()?.to_string_lossy().to_string();
+    if !id.starts_with(BACKUP_PREFIX) {
+        return None;
+    }
+
+    let created_unix = id
+        .strip_prefix(BACKUP_PREFIX)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_file() {
+                files.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    files.sort();
+    let (size_bytes, file_count) = directory_stats(path);
+
+    Some(BackupEntry {
+        id,
+        created_unix,
+        path: path.display().to_string(),
+        file_count,
+        size_bytes,
+        files,
+    })
+}
+
+fn list_backup_entries(config_dir: &StdPath) -> Vec<BackupEntry> {
+    let backup_root = config_dir.join(BACKUP_DIR);
+    let Ok(entries) = std::fs::read_dir(backup_root) else {
+        return Vec::new();
+    };
+
+    let mut backups: Vec<BackupEntry> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let Ok(metadata) = entry.metadata() else {
+                return None;
+            };
+            if metadata.is_dir() {
+                backup_entry(&entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+    backups.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
+    backups
+}
+
+fn apply_runtime_config_from_files(
+    state: &ServerState,
+    admin_state: &AdminState,
     config_dir: &StdPath,
-    owner: PublicKey,
-    owner_only: bool,
+) {
+    let restored_admins = read_pubkey_json_file(&config_dir.join(ADMIN_RUNTIME_FILE));
+    *admin_state.admin_pubkeys.write() = restored_admins;
+
+    state
+        .whitelist
+        .replace_manual(read_pubkey_json_file(&config_dir.join(WHITELIST_RUNTIME_FILE)));
+    state
+        .whitelist
+        .set_follow_derived(follow_sync::load_follow_derived(config_dir));
+    state
+        .reference_accounts
+        .replace_all(read_pubkey_json_file(&config_dir.join(REFERENCE_ACCOUNTS_FILE)));
+    state
+        .whitelist
+        .blacklist()
+        .replace_all(read_pubkey_json_file(&config_dir.join(BLACKLIST_FILE)));
+}
+
+fn relay_identity_response(state: &ServerState, restart_required: bool) -> RelayIdentityResponse {
+    let config_dir = StdPath::new(&state.config_dir);
+    RelayIdentityResponse {
+        relay_name: read_yaml_scalar(config_dir, "relay_name", &state.relay_name),
+        relay_description: read_yaml_scalar(
+            config_dir,
+            "relay_description",
+            &state.relay_description,
+        ),
+        relay_url: read_yaml_scalar(config_dir, "relay_url", &state.relay_url),
+        relay_pubkey: state.relay_pubkey.clone(),
+        restart_required,
+    }
+}
+
+fn persist_relay_identity_settings(
+    config_dir: &StdPath,
+    relay_name: &str,
+    relay_description: &str,
+    relay_url: &str,
 ) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let contents = upsert_relay_value(contents, "relay_name", &yaml_quote(relay_name));
+    let contents = upsert_relay_value(
+        contents,
+        "relay_description",
+        &yaml_quote(relay_description),
+    );
+    let contents = upsert_relay_value(contents, "relay_url", &yaml_quote(relay_url));
+    std::fs::write(path, contents)
+}
+
+fn persist_relay_secret_key(config_dir: &StdPath, secret_key_hex: &str) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let contents = upsert_relay_value(contents, "relay_secret_key", &yaml_quote(secret_key_hex));
+    std::fs::write(path, contents)
+}
+
+fn generate_relay_secret_key() -> (String, PublicKey) {
+    loop {
+        let secret_key_hex = random_hex(32);
+        let Ok(secret_key) = SecretKey::from_hex(&secret_key_hex) else {
+            continue;
+        };
+        let keys = Keys::new(secret_key);
+        return (secret_key_hex, keys.public_key());
+    }
+}
+
+fn storage_settings_response(
+    state: &ServerState,
+    restart_required: bool,
+) -> StorageSettingsResponse {
+    let config_dir = StdPath::new(&state.config_dir);
+    let retention_days = parse_duration_days(
+        &read_yaml_scalar(config_dir, "event_retention", "30d"),
+        30,
+    );
+    let prune_interval_minutes = parse_duration_minutes(
+        &read_yaml_scalar(config_dir, "prune_interval", "60m"),
+        60,
+    );
+    let configured_pruning_enabled = config_bool(config_dir, "enable_event_pruner", false);
+    let (db_size_bytes, db_file_count) = directory_stats(StdPath::new(&state.db_path));
+    let (total_pruned, runs, last_run_unix) = match &state.pruner_stats {
+        Some(s) => (
+            s.total_pruned.load(Ordering::Relaxed),
+            s.runs.load(Ordering::Relaxed),
+            s.last_run_unix.load(Ordering::Relaxed),
+        ),
+        None => (0, 0, 0),
+    };
+
+    StorageSettingsResponse {
+        db_path: state.db_path.clone(),
+        db_size_bytes,
+        db_file_count,
+        pruning_enabled: state.pruner_config.is_some(),
+        configured_pruning_enabled,
+        retention_days,
+        prune_interval_minutes,
+        prune_kinds: read_prune_kinds(config_dir),
+        total_pruned,
+        runs,
+        last_run_unix,
+        restart_required,
+    }
+}
+
+fn persist_rate_limit_settings(
+    config_dir: &StdPath,
+    pubkey_rate_limit: u32,
+    connection_rate_limit: u32,
+    global_rate_limit: u32,
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let contents = upsert_relay_scalar(
+        contents,
+        "pubkey_rate_limit_per_minute",
+        pubkey_rate_limit,
+    );
+    let contents = upsert_relay_scalar(
+        contents,
+        "connection_rate_limit_per_minute",
+        connection_rate_limit,
+    );
+    let contents = upsert_relay_scalar(contents, "global_rate_limit_per_minute", global_rate_limit);
+    std::fs::write(path, contents)
+}
+
+fn write_setup_mode_settings(config_dir: &StdPath) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(config_dir)?;
     let relay_secret_key = read_yaml_scalar(config_dir, "relay_secret_key", "");
     if relay_secret_key.len() != 64 || !relay_secret_key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -411,19 +929,38 @@ fn write_owner_only_settings(
     let relay_url = read_yaml_scalar(config_dir, "relay_url", "wss://relay.example.com");
     let db_path = read_yaml_scalar(config_dir, "db_path", "/app/db");
     let local_addr = read_yaml_scalar(config_dir, "local_addr", "0.0.0.0:8080");
-    let owner_hex = owner.to_hex();
-
-    let whitelist_block = if owner_only {
-        format!("  whitelisted_pubkeys:\n    - \"{owner_hex}\"\n")
-    } else {
-        "  whitelisted_pubkeys: []\n".to_string()
-    };
 
     let contents = format!(
-        "relay:\n  relay_secret_key: \"{relay_secret_key}\"\n  relay_url: \"{relay_url}\"\n  db_path: \"{db_path}\"\n  local_addr: \"{local_addr}\"\n\n{whitelist_block}\n  admin_pubkeys:\n    - \"{owner_hex}\"\n\n  max_subscriptions: 50\n  max_limit: 500\n\n  pubkey_rate_limit_per_minute: 6000\n  connection_rate_limit_per_minute: 12000\n  global_rate_limit_per_minute: 600000\n\n  websocket:\n    max_connection_duration: \"24h\"\n    idle_timeout: \"30m\"\n    max_connections: 300\n"
+        "relay:\n  relay_secret_key: \"{relay_secret_key}\"\n  relay_url: \"{relay_url}\"\n  db_path: \"{db_path}\"\n  local_addr: \"{local_addr}\"\n\n  whitelisted_pubkeys: []\n  admin_pubkeys: []\n\n  max_subscriptions: 50\n  max_limit: 500\n\n  pubkey_rate_limit_per_minute: 6000\n  connection_rate_limit_per_minute: 12000\n  global_rate_limit_per_minute: 600000\n\n  websocket:\n    max_connection_duration: \"24h\"\n    idle_timeout: \"30m\"\n    max_connections: 300\n"
     );
 
     std::fs::write(config_dir.join(SETTINGS_LOCAL_FILE), contents)
+}
+
+fn persist_setup_owner_pubkey(
+    owner: PublicKey,
+    config_dir: &StdPath,
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let json = serde_json::to_string_pretty(&owner.to_hex())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(config_dir.join(SETUP_OWNER_FILE), json)
+}
+
+fn load_setup_owner_pubkey(config_dir: &StdPath) -> Option<PublicKey> {
+    let path = config_dir.join(SETUP_OWNER_FILE);
+    let contents = std::fs::read_to_string(path).ok()?;
+    let hex = serde_json::from_str::<String>(&contents)
+        .unwrap_or_else(|_| contents.trim().trim_matches('"').to_string());
+    PublicKey::from_hex(&hex).ok()
+}
+
+fn clear_setup_owner_pubkey(config_dir: &StdPath) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(config_dir.join(SETUP_OWNER_FILE)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn backup_config_files(config_dir: &StdPath) -> Result<String, std::io::Error> {
@@ -434,14 +971,7 @@ fn backup_config_files(config_dir: &StdPath) -> Result<String, std::io::Error> {
     let backup_dir = config_dir.join("backups").join(format!("config-reset-{unix}"));
     std::fs::create_dir_all(&backup_dir)?;
 
-    for file_name in [
-        SETTINGS_LOCAL_FILE,
-        "reference_accounts.json",
-        "whitelist_runtime.json",
-        WHITELIST_FOLLOWS_FILE,
-        ADMIN_RUNTIME_FILE,
-        BLACKLIST_FILE,
-    ] {
+    for file_name in BACKUP_FILE_NAMES {
         let source = config_dir.join(file_name);
         if source.exists() {
             let _ = std::fs::copy(&source, backup_dir.join(file_name));
@@ -490,6 +1020,34 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/setup/status", get(handle_setup_status))
         .route("/setup", post(handle_setup))
         .route("/config/reset", post(handle_config_reset))
+        .route("/config/backups", get(handle_config_backups_list))
+        .route(
+            "/config/backups/{id}/download",
+            get(handle_config_backup_download),
+        )
+        .route(
+            "/config/backups/{id}/restore",
+            post(handle_config_backup_restore),
+        )
+        .route("/restart", post(handle_restart_relay))
+        .route(
+            "/admin-pubkeys",
+            get(handle_admin_pubkeys_list).post(handle_admin_pubkeys_add),
+        )
+        .route("/admin-pubkeys/{hex}", delete(handle_admin_pubkeys_remove))
+        .route(
+            "/relay-identity",
+            get(handle_relay_identity).post(handle_relay_identity_update),
+        )
+        .route("/relay-identity/rotate-key", post(handle_relay_key_rotate))
+        .route(
+            "/access-settings",
+            get(handle_access_settings).post(handle_access_settings_update),
+        )
+        .route(
+            "/storage-settings",
+            get(handle_storage_settings).post(handle_storage_settings_update),
+        )
         .route("/challenge", get(handle_challenge))
         .route("/auth", post(handle_auth))
         .route("/session", get(handle_session_check))
@@ -562,6 +1120,11 @@ async fn handle_challenge(
 async fn handle_setup_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let admin_state = get_admin_state(&state);
     let admin_count = admin_state.admin_pubkeys.read().len();
+    let setup_owner = if admin_count == 0 {
+        load_setup_owner_pubkey(StdPath::new(&admin_state.config_dir))
+    } else {
+        None
+    };
 
     Json(SetupStatusResponse {
         needs_setup: admin_count == 0,
@@ -569,6 +1132,8 @@ async fn handle_setup_status(State(state): State<Arc<ServerState>>) -> impl Into
         relay_url: admin_state.relay_url.clone(),
         whitelisted_count: state.whitelist.len(),
         reference_account_count: state.reference_accounts.len(),
+        setup_owner_pubkey: setup_owner.as_ref().map(|owner| owner.to_hex()),
+        setup_owner_npub: setup_owner.as_ref().and_then(|owner| owner.to_bech32().ok()),
     })
 }
 
@@ -587,6 +1152,15 @@ async fn handle_setup(
     let event = parse_signed_event(&req.signed_event)?;
     verify_auth_event(&event)?;
     consume_challenge(&admin_state, &event)?;
+
+    if let Some(setup_owner) = load_setup_owner_pubkey(StdPath::new(&admin_state.config_dir)) {
+        if event.pubkey != setup_owner {
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                "Setup is locked to the retained owner pubkey",
+            ));
+        }
+    }
 
     let access_policy = req.access_policy.as_deref().unwrap_or("owner_only");
     if access_policy != "owner_only" && access_policy != "open" {
@@ -640,6 +1214,9 @@ async fn handle_setup(
     }
 
     let token = create_session(&admin_state, event.pubkey);
+    if let Err(e) = clear_setup_owner_pubkey(StdPath::new(&admin_state.config_dir)) {
+        warn!("Failed to clear setup owner pubkey: {}", e);
+    }
     info!("Relay setup completed by {}", event.pubkey);
 
     Ok(Json(SetupResponse {
@@ -666,16 +1243,6 @@ async fn handle_config_reset(
         ));
     }
 
-    let access_policy = req.access_policy.as_deref().unwrap_or("owner_only");
-    if access_policy != "owner_only" && access_policy != "open" {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown access policy",
-        ));
-    }
-
-    let owner_only = access_policy == "owner_only";
-    let keep_owner_reference = req.keep_owner_reference.unwrap_or(true);
     let config_dir = StdPath::new(&state.config_dir);
     let backup_path = backup_config_files(config_dir).map_err(|e| {
         warn!("Failed to back up config before reset: {}", e);
@@ -685,8 +1252,16 @@ async fn handle_config_reset(
         )
     })?;
 
-    write_owner_only_settings(config_dir, owner, owner_only).map_err(|e| {
-        warn!("Failed to write owner-only settings: {}", e);
+    persist_setup_owner_pubkey(owner, config_dir).map_err(|e| {
+        warn!("Failed to persist setup owner pubkey: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to preserve setup owner pubkey",
+        )
+    })?;
+
+    write_setup_mode_settings(config_dir).map_err(|e| {
+        warn!("Failed to write setup-mode settings: {}", e);
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to write relay settings",
@@ -694,20 +1269,20 @@ async fn handle_config_reset(
     })?;
 
     {
-        let mut admins = admin_state.admin_pubkeys.write();
-        admins.clear();
-        admins.push(owner);
-        persist_runtime_admin_pubkeys(admins.as_slice(), config_dir).map_err(|e| {
+        let empty_admins: Vec<PublicKey> = Vec::new();
+        persist_runtime_admin_pubkeys(empty_admins.as_slice(), config_dir).map_err(|e| {
             warn!("Failed to persist reset admin pubkeys: {}", e);
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to persist admin pubkeys",
             )
         })?;
+        admin_state.admin_pubkeys.write().clear();
     }
+    admin_state.sessions.write().clear();
+    admin_state.challenges.write().clear();
 
-    let whitelist_entries = if owner_only { vec![owner] } else { Vec::new() };
-    state.whitelist.replace_manual(whitelist_entries);
+    state.whitelist.replace_manual(Vec::new());
     state.whitelist.set_follow_derived(Vec::new());
     state.whitelist.persist(config_dir).map_err(|e| {
         warn!("Failed to persist reset whitelist: {}", e);
@@ -724,8 +1299,7 @@ async fn handle_config_reset(
         )
     })?;
 
-    let reference_entries = if keep_owner_reference { vec![owner] } else { Vec::new() };
-    state.reference_accounts.replace_all(reference_entries);
+    state.reference_accounts.replace_all(Vec::new());
     state.reference_accounts.persist(config_dir).map_err(|e| {
         warn!("Failed to persist reset reference accounts: {}", e);
         error_response(
@@ -749,14 +1323,545 @@ async fn handle_config_reset(
     );
 
     Ok(Json(ConfigResetResponse {
-        admin_pubkey: owner.to_hex(),
-        admin_npub: owner.to_bech32().unwrap_or_default(),
-        access_policy: access_policy.to_string(),
+        setup_owner_pubkey: owner.to_hex(),
+        setup_owner_npub: owner.to_bech32().unwrap_or_default(),
+        needs_setup: true,
         whitelisted_count: state.whitelist.len(),
         reference_account_count: state.reference_accounts.len(),
         backup_path,
-        message: "Relay configuration reset. Event data was not removed.".to_string(),
+        message: "Relay configuration reset. Reopen setup to choose access policy. Event data was not removed.".to_string(),
     }))
+}
+
+async fn handle_config_backups_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(list_backup_entries(StdPath::new(&state.config_dir))))
+}
+
+async fn handle_config_backup_download(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let config_dir = StdPath::new(&state.config_dir);
+    let backup_dir = backup_id_to_dir(config_dir, &id)?;
+    let mut files = Vec::new();
+    for file_name in BACKUP_FILE_NAMES {
+        let path = backup_dir.join(file_name);
+        if !path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            warn!("Failed to read backup file {}: {}", path.display(), e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read backup")
+        })?;
+        files.push(BackupDownloadFile {
+            name: file_name.to_string(),
+            content,
+        });
+    }
+
+    Ok(Json(BackupDownloadResponse { id, files }))
+}
+
+async fn handle_config_backup_restore(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<RestoreBackupRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    if req.confirm.trim() != "RESTORE" {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type RESTORE to confirm",
+        ));
+    }
+
+    let config_dir = StdPath::new(&state.config_dir);
+    let backup_dir = backup_id_to_dir(config_dir, &id)?;
+    let backup_before_restore_path = backup_config_files(config_dir).map_err(|e| {
+        warn!("Failed to back up config before restore: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to back up current config",
+        )
+    })?;
+
+    for file_name in BACKUP_FILE_NAMES {
+        let source = backup_dir.join(file_name);
+        let destination = config_dir.join(file_name);
+        if source.exists() {
+            std::fs::copy(&source, &destination).map_err(|e| {
+                warn!(
+                    "Failed to restore {} from {}: {}",
+                    destination.display(),
+                    source.display(),
+                    e
+                );
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to restore backup")
+            })?;
+        } else if destination.exists() {
+            std::fs::remove_file(&destination).map_err(|e| {
+                warn!("Failed to clear {} during restore: {}", destination.display(), e);
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to restore backup")
+            })?;
+        }
+    }
+
+    apply_runtime_config_from_files(&state, &admin_state, config_dir);
+    info!("Restored relay config backup {}", id);
+
+    let admin_count = admin_state.admin_pubkeys.read().len();
+
+    Ok(Json(RestoreBackupResponse {
+        id,
+        backup_before_restore_path,
+        admin_count,
+        whitelisted_count: state.whitelist.len(),
+        reference_account_count: state.reference_accounts.len(),
+        restart_required: true,
+        message: "Backup restored. Restart the relay to apply startup-only settings.".to_string(),
+    }))
+}
+
+async fn handle_restart_relay(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<RestartRelayRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    if req.confirm.trim() != "RESTART" {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type RESTART to confirm",
+        ));
+    }
+
+    info!("Admin {} requested relay restart", admin_pubkey);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        std::process::exit(0);
+    });
+
+    Ok(Json(RestartRelayResponse {
+        message: "Relay restart scheduled".to_string(),
+        restart_in_ms: 750,
+    }))
+}
+
+async fn handle_admin_pubkeys_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let current_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    let entries: Vec<AdminPubkeyEntry> = admin_state
+        .admin_pubkeys
+        .read()
+        .iter()
+        .map(|pk| AdminPubkeyEntry {
+            hex: pk.to_hex(),
+            npub: pk.to_bech32().unwrap_or_default(),
+            current_session: *pk == current_pubkey,
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+async fn handle_admin_pubkeys_add(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<AddAdminPubkeyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let pk = parse_pubkey_input(&req.pubkey)?;
+    {
+        let mut admins = admin_state.admin_pubkeys.write();
+        if !admins.contains(&pk) {
+            admins.push(pk);
+        }
+        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir))
+            .map_err(|e| {
+                warn!("Failed to persist admin pubkeys: {}", e);
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to persist admin")
+            })?;
+    }
+
+    Ok(Json(AdminPubkeyEntry {
+        hex: pk.to_hex(),
+        npub: pk.to_bech32().unwrap_or_default(),
+        current_session: false,
+    }))
+}
+
+async fn handle_admin_pubkeys_remove(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(hex): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let current_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+    let pk = PublicKey::from_hex(&hex)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid hex pubkey"))?;
+
+    if pk == current_pubkey {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "You cannot remove the admin pubkey for your current session",
+        ));
+    }
+
+    {
+        let mut admins = admin_state.admin_pubkeys.write();
+        if admins.len() <= 1 {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "At least one admin pubkey is required",
+            ));
+        }
+        admins.retain(|candidate| candidate != &pk);
+        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir))
+            .map_err(|e| {
+                warn!("Failed to persist admin pubkeys: {}", e);
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to persist admin")
+            })?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn handle_relay_identity(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(relay_identity_response(&state, false)))
+}
+
+async fn handle_relay_identity_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<RelayIdentityRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    if req.relay_name.trim().is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Relay name is required",
+        ));
+    }
+    RelayUrl::parse(req.relay_url.trim()).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "Relay URL must be a valid ws:// or wss:// URL",
+        )
+    })?;
+
+    persist_relay_identity_settings(
+        StdPath::new(&state.config_dir),
+        req.relay_name.trim(),
+        req.relay_description.trim(),
+        req.relay_url.trim(),
+    )
+    .map_err(|e| {
+        warn!("Failed to persist relay identity settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist relay identity",
+        )
+    })?;
+
+    Ok(Json(RelayIdentityResponse {
+        relay_name: req.relay_name.trim().to_string(),
+        relay_description: req.relay_description.trim().to_string(),
+        relay_url: req.relay_url.trim().to_string(),
+        relay_pubkey: state.relay_pubkey.clone(),
+        restart_required: true,
+    }))
+}
+
+async fn handle_relay_key_rotate(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<RotateRelayKeyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    if req.confirm.trim() != "ROTATE" {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type ROTATE to confirm",
+        ));
+    }
+
+    let (secret_key_hex, relay_pubkey) = generate_relay_secret_key();
+    persist_relay_secret_key(StdPath::new(&state.config_dir), &secret_key_hex).map_err(|e| {
+        warn!("Failed to persist rotated relay secret key: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist relay key",
+        )
+    })?;
+
+    info!(
+        "Admin {} rotated relay key; new relay pubkey {}",
+        admin_pubkey, relay_pubkey
+    );
+
+    Ok(Json(RotateRelayKeyResponse {
+        relay_pubkey: relay_pubkey.to_hex(),
+        restart_required: true,
+        message: "Relay key rotated. Restart the relay to activate the new key.".to_string(),
+    }))
+}
+
+async fn handle_access_settings(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let config_dir = StdPath::new(&state.config_dir);
+    Ok(Json(AccessSettingsResponse {
+        access_policy: if state.whitelist.is_empty() {
+            "open".to_string()
+        } else {
+            "owner_only".to_string()
+        },
+        pubkey_rate_limit_per_minute: read_yaml_u32(
+            config_dir,
+            "pubkey_rate_limit_per_minute",
+            6000,
+        ),
+        connection_rate_limit_per_minute: read_yaml_u32(
+            config_dir,
+            "connection_rate_limit_per_minute",
+            12000,
+        ),
+        global_rate_limit_per_minute: read_yaml_u32(
+            config_dir,
+            "global_rate_limit_per_minute",
+            600000,
+        ),
+        whitelisted_count: state.whitelist.len(),
+        restart_required: false,
+    }))
+}
+
+async fn handle_access_settings_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<AccessSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    if req.access_policy != "owner_only" && req.access_policy != "open" {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Unknown access policy",
+        ));
+    }
+
+    let pubkey_rate_limit = req.pubkey_rate_limit_per_minute.unwrap_or(6000);
+    let connection_rate_limit = req.connection_rate_limit_per_minute.unwrap_or(12000);
+    let global_rate_limit = req.global_rate_limit_per_minute.unwrap_or(600000);
+
+    if req.access_policy == "open"
+        && (pubkey_rate_limit == 0 || connection_rate_limit == 0 || global_rate_limit == 0)
+    {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Open relay mode requires all rate limits to be greater than zero",
+        ));
+    }
+
+    let config_dir = StdPath::new(&state.config_dir);
+    persist_rate_limit_settings(
+        config_dir,
+        pubkey_rate_limit,
+        connection_rate_limit,
+        global_rate_limit,
+    )
+    .map_err(|e| {
+        warn!("Failed to persist access settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist access settings",
+        )
+    })?;
+
+    if req.access_policy == "open" {
+        state.whitelist.replace_manual(Vec::new());
+        state.whitelist.set_follow_derived(Vec::new());
+        state.whitelist.persist(config_dir).map_err(|e| {
+            warn!("Failed to persist open whitelist state: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist whitelist settings",
+            )
+        })?;
+        crate::follow_sync::persist_follow_derived(&[], config_dir).map_err(|e| {
+            warn!("Failed to clear follow-derived whitelist: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist whitelist settings",
+            )
+        })?;
+    } else if state.whitelist.is_empty() {
+        state.whitelist.add(admin_pubkey);
+        state.whitelist.persist(config_dir).map_err(|e| {
+            warn!("Failed to persist enforced whitelist state: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist whitelist settings",
+            )
+        })?;
+    }
+
+    Ok(Json(AccessSettingsResponse {
+        access_policy: req.access_policy,
+        pubkey_rate_limit_per_minute: pubkey_rate_limit,
+        connection_rate_limit_per_minute: connection_rate_limit,
+        global_rate_limit_per_minute: global_rate_limit,
+        whitelisted_count: state.whitelist.len(),
+        restart_required: true,
+    }))
+}
+
+async fn handle_storage_settings(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(storage_settings_response(&state, false)))
+}
+
+async fn handle_storage_settings_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<StorageSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    if req.pruning_enabled {
+        if req.retention_days == 0 {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Retention must be at least 1 day",
+            ));
+        }
+        if req.prune_interval_minutes == 0 {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Prune interval must be at least 1 minute",
+            ));
+        }
+        if req.prune_kinds.is_empty() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Choose at least one event kind to prune",
+            ));
+        }
+    }
+
+    let safe_kinds: Vec<u16> = req
+        .prune_kinds
+        .into_iter()
+        .filter(|kind| !crate::pruner::NEVER_PRUNE_KINDS.contains(kind))
+        .collect();
+
+    if req.pruning_enabled && safe_kinds.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Selected kinds are protected and cannot be pruned",
+        ));
+    }
+
+    let config_dir = StdPath::new(&state.config_dir);
+    std::fs::create_dir_all(config_dir).map_err(|e| {
+        warn!("Failed to create config dir for storage settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist storage settings",
+        )
+    })?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let contents = upsert_relay_value(
+        contents,
+        "enable_event_pruner",
+        if req.pruning_enabled { "true" } else { "false" },
+    );
+    let contents = upsert_relay_value(
+        contents,
+        "event_retention",
+        &format!("\"{}d\"", req.retention_days),
+    );
+    let contents = upsert_relay_value(
+        contents,
+        "prune_interval",
+        &format!("\"{}m\"", req.prune_interval_minutes),
+    );
+    let kind_list = safe_kinds
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let contents = upsert_relay_value(contents, "prune_kinds", &format!("[{kind_list}]"));
+    std::fs::write(path, contents).map_err(|e| {
+        warn!("Failed to persist storage settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist storage settings",
+        )
+    })?;
+
+    Ok(Json(storage_settings_response(&state, true)))
 }
 
 async fn handle_auth(
@@ -829,26 +1934,7 @@ async fn handle_whitelist_add(
         return Err(unauthorized());
     }
 
-    // Try to parse as npub first, then hex
-    let pk = if req.pubkey.starts_with("npub") {
-        PublicKey::from_bech32(&req.pubkey).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid npub".to_string(),
-                }),
-            )
-        })?
-    } else {
-        PublicKey::from_hex(&req.pubkey).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid hex pubkey".to_string(),
-                }),
-            )
-        })?
-    };
+    let pk = parse_pubkey_input(&req.pubkey)?;
 
     let added = state.whitelist.add(pk);
     if added {
@@ -1014,7 +2100,7 @@ async fn handle_relay_info(
         name: state.relay_name.clone(),
         description: state.relay_description.clone(),
         group_count,
-        supported_nips: vec![1, 9, 11, 29, 40, 42, 70],
+        supported_nips: SUPPORTED_NIPS.to_vec(),
     })
 }
 

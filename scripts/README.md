@@ -68,6 +68,9 @@ just test-nip29-analyze | claude /project:analyze-nip29
 
 - `groups_relay_performance_test.sh` - Performance testing script
 - `run_flamegraph.sh` - Generate flamegraphs for performance analysis
+- `release-local-to-github.sh` - Optional local release helper that builds the
+  Docker image, pushes GHCR tags, and uploads GitHub Release assets. For the
+  normal workstation-to-small-server path, follow `BUILD_ON_SERVER.md`.
 - `tag_latest_as_stable.sh` - Docker image tagging utility
 
 ## Test Data

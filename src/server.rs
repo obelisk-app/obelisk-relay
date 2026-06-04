@@ -7,7 +7,12 @@ use crate::{
     sampled_metrics_handler::SampledMetricsHandler, whitelist::Whitelist, RelayDatabase,
 };
 use anyhow::Result;
-use axum::{response::IntoResponse, routing::get, Router};
+use axum::{
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use governor::Quota;
 use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 use nostr_sdk::prelude::PublicKey;
@@ -27,22 +32,55 @@ use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
 use tracing::info;
 
+const NOSTR_JSON_CONTENT_TYPE: &str = "application/nostr+json";
+pub const SUPPORTED_NIPS: [u16; 7] = [1, 9, 11, 29, 40, 42, 70];
+
 pub struct ServerState {
     pub http_state: Arc<HttpServerState>,
     pub cancellation_token: CancellationToken,
     pub metrics_handle: metrics::PrometheusHandle,
     pub connection_counter: Arc<AtomicUsize>,
     pub relay_url: String,
+    pub relay_pubkey: String,
     pub whitelist: Whitelist,
     pub reference_accounts: ReferenceAccounts,
     pub start_time: std::time::Instant,
     pub config_dir: String,
+    pub db_path: String,
     /// Pruner stats; None when pruning is disabled.
     pub pruner_stats: Option<Arc<PrunerStats>>,
     /// Active pruner config; mirrors `pruner_stats` presence.
     pub pruner_config: Option<PrunerConfig>,
     pub relay_name: String,
     pub relay_description: String,
+}
+
+fn accepts_nostr_json(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            value.split(',').any(|part| {
+                part.split(';')
+                    .next()
+                    .map(str::trim)
+                    .is_some_and(|media_type| {
+                        media_type.eq_ignore_ascii_case(NOSTR_JSON_CONTENT_TYPE)
+                    })
+            })
+        })
+}
+
+fn relay_info_response(relay_info: &RelayInfo) -> Response {
+    match serde_json::to_string(relay_info) {
+        Ok(body) => ([(header::CONTENT_TYPE, NOSTR_JSON_CONTENT_TYPE)], body).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize relay information: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn run_server(
@@ -162,26 +200,41 @@ pub async fn run_server(
     let cancellation_token = CancellationToken::new();
     let connection_counter = Arc::new(AtomicUsize::new(0));
 
-    // Spin up the background event pruner if retention is configured.
-    let (pruner_stats, pruner_config_opt) = if let Some(retention) = settings.event_retention {
-        if retention.as_secs() > 0 {
-            let cfg = PrunerConfig::from_settings(
-                retention,
-                settings.prune_interval,
-                settings.prune_kinds.clone(),
-            );
-            let stats = Arc::new(PrunerStats::default());
-            pruner::spawn(
-                database_for_pruner.clone(),
-                cfg.clone(),
-                stats.clone(),
-                cancellation_token.clone(),
-            );
-            (Some(stats), Some(cfg))
+    // Background event retention is destructive. It is disabled unless both
+    // event_retention is configured and enable_event_pruner is explicitly true.
+    // This keeps stale/example retention settings from silently deleting relay data.
+    let (pruner_stats, pruner_config_opt) = if settings.enable_event_pruner {
+        if let Some(retention) = settings.event_retention {
+            if retention.as_secs() > 0 {
+                let cfg = PrunerConfig::from_settings(
+                    retention,
+                    settings.prune_interval,
+                    settings.prune_kinds.clone(),
+                );
+                let stats = Arc::new(PrunerStats::default());
+                pruner::spawn(
+                    database_for_pruner.clone(),
+                    cfg.clone(),
+                    stats.clone(),
+                    cancellation_token.clone(),
+                );
+                (Some(stats), Some(cfg))
+            } else {
+                tracing::info!("Event pruner disabled: event_retention is zero");
+                (None, None)
+            }
         } else {
+            tracing::warn!(
+                "enable_event_pruner=true but event_retention is unset; pruner disabled"
+            );
             (None, None)
         }
     } else {
+        if settings.event_retention.is_some() {
+            tracing::warn!(
+                "Event retention is configured but enable_event_pruner=false; automatic deletion is disabled"
+            );
+        }
         (None, None)
     };
 
@@ -202,7 +255,7 @@ pub async fn run_server(
         description: relay_description.clone(),
         pubkey: relay_keys.public_key.to_string(),
         contact: "npub1m9vsm9d8sy0pevcjhenwm4ny6l37dm2hsg4dnusna43ql3n5305qy4zlg4".to_string(),
-        supported_nips: vec![1, 9, 11, 29, 40, 42, 70],
+        supported_nips: SUPPORTED_NIPS.to_vec(),
         software: "groups_relay".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
@@ -259,10 +312,12 @@ pub async fn run_server(
         metrics_handle: metrics_handle.clone(),
         connection_counter: connection_counter.clone(),
         relay_url: settings.relay_url.clone(),
+        relay_pubkey: relay_keys.public_key.to_hex(),
         whitelist: whitelist.clone(),
         reference_accounts: reference_accounts.clone(),
         start_time: std::time::Instant::now(),
         config_dir: "config".to_string(),
+        db_path: settings.db_path.clone(),
         pruner_stats,
         pruner_config: pruner_config_opt,
         relay_name: relay_name.clone(),
@@ -296,12 +351,8 @@ pub async fn run_server(
                     }
                     None => {
                         // Check for NIP-11 JSON request
-                        if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
-                            if let Ok(value) = accept.to_str() {
-                                if value == "application/nostr+json" {
-                                    return axum::Json(&relay_info).into_response();
-                                }
-                            }
+                        if accepts_nostr_json(&headers) {
+                            return relay_info_response(&relay_info);
                         }
 
                         // Serve frontend
@@ -364,4 +415,54 @@ pub async fn run_server(
         .unwrap();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn test_relay_info() -> RelayInfo {
+        RelayInfo {
+            name: "Test Relay".to_string(),
+            description: "Test relay information".to_string(),
+            pubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            contact: "mailto:ops@example.com".to_string(),
+            supported_nips: SUPPORTED_NIPS.to_vec(),
+            software: "https://example.com/relay".to_string(),
+            version: "0.0.0-test".to_string(),
+            icon: None,
+        }
+    }
+
+    #[test]
+    fn accepts_nostr_json_media_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/html, application/nostr+json; q=1"),
+        );
+
+        assert!(accepts_nostr_json(&headers));
+    }
+
+    #[test]
+    fn rejects_non_nostr_json_accept_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+
+        assert!(!accepts_nostr_json(&headers));
+    }
+
+    #[test]
+    fn relay_info_response_uses_nip11_content_type() {
+        let response = relay_info_response(&test_relay_info());
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static(NOSTR_JSON_CONTENT_TYPE))
+        );
+    }
 }

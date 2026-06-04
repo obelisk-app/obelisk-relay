@@ -119,6 +119,9 @@ export const LandingPage = (_props: { path?: string }) => {
             <a href="https://dex.obelisk.ar" target="_blank" rel="noopener noreferrer" class="lc-pill-primary text-base">
               Open Chat
             </a>
+            <a href="/docs" class="lc-pill-secondary text-base">
+              Docs
+            </a>
             <a href="/admin" class="lc-pill-secondary text-base">
               Admin Panel
             </a>

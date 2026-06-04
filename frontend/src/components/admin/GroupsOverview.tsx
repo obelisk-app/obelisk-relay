@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks'
 import { adminApi, type GroupInfo } from '../../services/AdminApiClient'
 import { GroupEventBrowser } from './GroupEventBrowser'
+import { SearchIcon } from './SearchIcon'
 
 const short = (value: string, head = 10, tail = 6) => (
   value.length > head + tail + 3 ? `${value.slice(0, head)}...${value.slice(-tail)}` : value
@@ -138,14 +139,14 @@ export const GroupsOverview = () => {
         ))}
       </div>
 
-      <div class="mb-4">
+      <div class="admin-search-field mb-4">
+        <SearchIcon class="admin-search-icon" />
         <input
           type="text"
           value={search}
           onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
           placeholder="Search name, ID, parent, or channel kind"
-          class="w-full px-4 py-2 rounded-lg text-sm"
-          style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
+          class="admin-search-input"
         />
       </div>
 

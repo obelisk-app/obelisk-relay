@@ -1,9 +1,10 @@
 name: Build & publish Docker image
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
+  # Release images are built and pushed from the deployment host with
+  # scripts/release-local-to-github.sh so tag releases do not spend CI minutes.
+  # Keep this workflow as an explicit fallback when a GitHub-hosted rebuild is
+  # wanted.
   workflow_dispatch:
 
 concurrency:

@@ -124,6 +124,38 @@ export class AdminApiClient {
     return this.request('/api/admin/stats')
   }
 
+  async getAccessSettings(): Promise<AccessSettings> {
+    return this.request('/api/admin/access-settings')
+  }
+
+  async updateAccessSettings(settings: {
+    access_policy: 'owner_only' | 'open'
+    pubkey_rate_limit_per_minute: number
+    connection_rate_limit_per_minute: number
+    global_rate_limit_per_minute: number
+  }): Promise<AccessSettings> {
+    return this.request('/api/admin/access-settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
+  async getStorageSettings(): Promise<StorageSettings> {
+    return this.request('/api/admin/storage-settings')
+  }
+
+  async updateStorageSettings(settings: {
+    pruning_enabled: boolean
+    retention_days: number
+    prune_interval_minutes: number
+    prune_kinds: number[]
+  }): Promise<StorageSettings> {
+    return this.request('/api/admin/storage-settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
   async getReferenceAccounts(): Promise<Array<{ hex: string; npub: string }>> {
     return this.request('/api/admin/reference-accounts')
   }
@@ -145,12 +177,69 @@ export class AdminApiClient {
 
   async resetRelayConfig(options: {
     confirm: string
-    access_policy: 'owner_only' | 'open'
-    keep_owner_reference: boolean
   }): Promise<ConfigResetResult> {
     return this.request('/api/admin/config/reset', {
       method: 'POST',
       body: JSON.stringify(options),
+    })
+  }
+
+  async restartRelay(confirm: string): Promise<RestartRelayResult> {
+    return this.request('/api/admin/restart', {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
+    })
+  }
+
+  async getAdminPubkeys(): Promise<AdminPubkeyEntry[]> {
+    return this.request('/api/admin/admin-pubkeys')
+  }
+
+  async addAdminPubkey(pubkey: string): Promise<AdminPubkeyEntry> {
+    return this.request('/api/admin/admin-pubkeys', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey }),
+    })
+  }
+
+  async removeAdminPubkey(hex: string): Promise<void> {
+    return this.request(`/api/admin/admin-pubkeys/${hex}`, { method: 'DELETE' })
+  }
+
+  async getRelayIdentity(): Promise<RelayIdentity> {
+    return this.request('/api/admin/relay-identity')
+  }
+
+  async updateRelayIdentity(options: {
+    relay_name: string
+    relay_description: string
+    relay_url: string
+  }): Promise<RelayIdentity> {
+    return this.request('/api/admin/relay-identity', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    })
+  }
+
+  async rotateRelayKey(confirm: string): Promise<RotateRelayKeyResult> {
+    return this.request('/api/admin/relay-identity/rotate-key', {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
+    })
+  }
+
+  async getConfigBackups(): Promise<BackupEntry[]> {
+    return this.request('/api/admin/config/backups')
+  }
+
+  async downloadConfigBackup(id: string): Promise<BackupDownload> {
+    return this.request(`/api/admin/config/backups/${encodeURIComponent(id)}/download`)
+  }
+
+  async restoreConfigBackup(id: string, confirm: string): Promise<RestoreBackupResult> {
+    return this.request(`/api/admin/config/backups/${encodeURIComponent(id)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
     })
   }
 
@@ -220,6 +309,8 @@ export interface SetupStatus {
   relay_url: string
   whitelisted_count: number
   reference_account_count: number
+  setup_owner_pubkey?: string | null
+  setup_owner_npub?: string | null
 }
 
 export interface SetupResult {
@@ -231,13 +322,86 @@ export interface SetupResult {
 }
 
 export interface ConfigResetResult {
-  admin_pubkey: string
-  admin_npub: string
-  access_policy: 'owner_only' | 'open'
+  setup_owner_pubkey: string
+  setup_owner_npub: string
+  needs_setup: boolean
   whitelisted_count: number
   reference_account_count: number
   backup_path: string
   message: string
+}
+
+export interface RestartRelayResult {
+  message: string
+  restart_in_ms: number
+}
+
+export interface AdminPubkeyEntry {
+  hex: string
+  npub: string
+  current_session: boolean
+}
+
+export interface RelayIdentity {
+  relay_name: string
+  relay_description: string
+  relay_url: string
+  relay_pubkey: string
+  restart_required: boolean
+}
+
+export interface RotateRelayKeyResult {
+  relay_pubkey: string
+  restart_required: boolean
+  message: string
+}
+
+export interface BackupEntry {
+  id: string
+  created_unix: number
+  path: string
+  file_count: number
+  size_bytes: number
+  files: string[]
+}
+
+export interface BackupDownload {
+  id: string
+  files: Array<{ name: string; content: string }>
+}
+
+export interface RestoreBackupResult {
+  id: string
+  backup_before_restore_path: string
+  admin_count: number
+  whitelisted_count: number
+  reference_account_count: number
+  restart_required: boolean
+  message: string
+}
+
+export interface AccessSettings {
+  access_policy: 'owner_only' | 'open'
+  pubkey_rate_limit_per_minute: number
+  connection_rate_limit_per_minute: number
+  global_rate_limit_per_minute: number
+  whitelisted_count: number
+  restart_required: boolean
+}
+
+export interface StorageSettings {
+  db_path: string
+  db_size_bytes: number
+  db_file_count: number
+  pruning_enabled: boolean
+  configured_pruning_enabled: boolean
+  retention_days: number
+  prune_interval_minutes: number
+  prune_kinds: number[]
+  total_pruned: number
+  runs: number
+  last_run_unix: number
+  restart_required: boolean
 }
 
 export interface GroupInfo {

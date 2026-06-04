@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi, EventInfo, MemberInfo, type GroupInfo } from '../../services/AdminApiClient'
+import { SearchIcon } from './SearchIcon'
 
 interface Props {
   group: GroupInfo
@@ -231,14 +232,16 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
           <div class="flex flex-col" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
             {/* Search + author filter row */}
             <div class="flex gap-2 mb-3" style={{ flexShrink: 0 }}>
+              <div class="admin-search-field flex-1">
+                <SearchIcon class="admin-search-icon" />
               <input
                 type="text"
                 value={search}
                 onInput={e => setSearch((e.target as HTMLInputElement).value)}
                 placeholder="Search content, pubkey, event ID…"
-                class="flex-1 px-3 py-2 rounded-lg text-sm"
-                style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
+                class="admin-search-input"
               />
+              </div>
               {search && (
                 <button
                   onClick={() => setSearch('')}

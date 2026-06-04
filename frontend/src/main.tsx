@@ -22,6 +22,7 @@ import { LoadingState } from "./components/LoadingState.tsx"
 import { ErrorState } from "./components/ErrorState.tsx"
 import { AuthPrompt } from "./components/AuthPrompt.tsx"
 import { LandingPage } from "./components/LandingPage.tsx"
+import { DocsPage } from "./components/DocsPage.tsx"
 import { AdminPanel } from "./components/admin/AdminPanel.tsx"
 import "./style.css"
 
@@ -199,6 +200,7 @@ const Root = () => {
     <NostrSessionProvider theme="la-crypta" autoRestore>
       <Router>
         <LandingPage path="/" />
+        <DocsPage path="/docs" />
         <ChatApp path="/app" />
         <AdminPanel path="/admin" />
       </Router>

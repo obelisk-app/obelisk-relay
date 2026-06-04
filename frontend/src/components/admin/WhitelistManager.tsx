@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'preact/hooks'
-import { adminApi } from '../../services/AdminApiClient'
+import { adminApi, type AccessSettings } from '../../services/AdminApiClient'
 import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
 import { ProfileCard, CopyNpubButton } from './ProfileCard'
+import { SearchIcon } from './SearchIcon'
 
 interface WhitelistEntry {
   hex: string
@@ -37,6 +38,9 @@ export const WhitelistManager = () => {
   const [profilesLoading, setProfilesLoading] = useState(false)
   const [adding, setAdding] = useState(false)
   const [search, setSearch] = useState('')
+  const [accessSettings, setAccessSettings] = useState<AccessSettings | null>(null)
+  const [accessLoading, setAccessLoading] = useState(true)
+  const [savingAccess, setSavingAccess] = useState(false)
 
   // Blacklist state
   const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([])
@@ -44,6 +48,7 @@ export const WhitelistManager = () => {
   const [newBlacklistPubkey, setNewBlacklistPubkey] = useState('')
   const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [blacklistLoading, setBlacklistLoading] = useState(false)
+  const [blacklistAdding, setBlacklistAdding] = useState(false)
   const [confirmBlacklistRemove, setConfirmBlacklistRemove] = useState<string | null>(null)
 
   // Profile card state
@@ -96,7 +101,40 @@ export const WhitelistManager = () => {
     }
   }
 
-  useEffect(() => { fetchWhitelist(); fetchBlacklist() }, [])
+  const fetchAccessSettings = () => {
+    setAccessLoading(true)
+    adminApi.getAccessSettings()
+      .then(settings => setAccessSettings(settings))
+      .catch(e => setError(e.message))
+      .finally(() => setAccessLoading(false))
+  }
+
+  useEffect(() => { fetchWhitelist(); fetchBlacklist(); fetchAccessSettings() }, [])
+
+  const updateAccessField = (field: keyof AccessSettings, value: AccessSettings[keyof AccessSettings]) => {
+    setAccessSettings(prev => prev ? { ...prev, [field]: value } : prev)
+  }
+
+  const handleSaveAccess = async () => {
+    if (!accessSettings) return
+    setSavingAccess(true)
+    setError(null)
+    try {
+      const next = await adminApi.updateAccessSettings({
+        access_policy: accessSettings.access_policy,
+        pubkey_rate_limit_per_minute: accessSettings.pubkey_rate_limit_per_minute,
+        connection_rate_limit_per_minute: accessSettings.connection_rate_limit_per_minute,
+        global_rate_limit_per_minute: accessSettings.global_rate_limit_per_minute,
+      })
+      setAccessSettings(next)
+      showToast(next.restart_required ? 'Access settings saved. Restart relay to apply rate-limit changes.' : 'Access settings saved')
+      fetchWhitelist()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save access settings')
+    } finally {
+      setSavingAccess(false)
+    }
+  }
 
   const handleAdd = async () => {
     const value = newPubkey.trim()
@@ -146,6 +184,7 @@ export const WhitelistManager = () => {
   const handleBlacklistAdd = async () => {
     if (!newBlacklistPubkey.trim()) return
     setError(null)
+    setBlacklistAdding(true)
     try {
       const entry = await adminApi.addToBlacklist(newBlacklistPubkey.trim())
       setBlacklist(prev => [...prev.filter(e => e.hex !== entry.hex), entry])
@@ -161,6 +200,8 @@ export const WhitelistManager = () => {
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add to blacklist')
+    } finally {
+      setBlacklistAdding(false)
     }
   }
 
@@ -201,7 +242,10 @@ export const WhitelistManager = () => {
 
   return (
     <div>
-      <h2 class="text-xl font-bold mb-6">Whitelist Management</h2>
+      <h2 class="text-xl font-bold mb-2">Access Management</h2>
+      <p class="text-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
+        Choose who can use the relay, then manage allowed and blocked pubkeys.
+      </p>
 
       {toast && (
         <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
@@ -215,42 +259,163 @@ export const WhitelistManager = () => {
         </div>
       )}
 
-      {/* Add form */}
-      <div class="flex gap-2 mb-2">
-        <input
-          type="text"
-          value={newPubkey}
-          onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
-          placeholder="npub1…, hex pubkey, or name@domain.com"
-          class="flex-1 px-4 py-2 rounded-lg text-sm"
-          style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-        />
-        <button
-          onClick={handleAdd}
-          disabled={!newPubkey.trim() || adding}
-          class="lc-pill-primary text-sm"
-          style={{ padding: '8px 20px', borderRadius: '10px' }}
-        >
-          {adding ? '…' : 'Add'}
-        </button>
-      </div>
-      {isNip05Input && (
-        <div class="mb-4 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-          NIP-05 identifier detected — will resolve to pubkey on add
+      <section class="admin-settings-card mb-5">
+        <div class="admin-settings-card-header">
+          <div>
+            <h3>Relay Access Mode</h3>
+            <p>Open access requires rate limits. Enforced access uses the whitelist below.</p>
+          </div>
+          {accessSettings?.restart_required && (
+            <span class="admin-status-badge admin-status-badge-warn">Restart required</span>
+          )}
         </div>
-      )}
+
+        {accessLoading || !accessSettings ? (
+          <div class="lc-skeleton h-28 w-full" />
+        ) : (
+          <>
+            <div class="admin-mode-grid">
+              <button
+                type="button"
+                onClick={() => updateAccessField('access_policy', 'owner_only')}
+                class={`admin-mode-option ${accessSettings.access_policy === 'owner_only' ? 'admin-mode-option-active' : ''}`}
+              >
+                <span class="admin-mode-title">Enforce whitelist</span>
+                <span class="admin-mode-copy">Only whitelisted pubkeys can connect and publish.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => updateAccessField('access_policy', 'open')}
+                class={`admin-mode-option ${accessSettings.access_policy === 'open' ? 'admin-mode-option-active' : ''}`}
+              >
+                <span class="admin-mode-title">Open relay</span>
+                <span class="admin-mode-copy">Any authenticated pubkey can use the relay.</span>
+              </button>
+            </div>
+
+            {accessSettings.access_policy === 'open' && (
+              <div class="admin-rate-grid mt-4">
+                <label>
+                  <span>Per pubkey / min</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={accessSettings.pubkey_rate_limit_per_minute}
+                    onInput={e => updateAccessField('pubkey_rate_limit_per_minute', Number((e.target as HTMLInputElement).value))}
+                  />
+                </label>
+                <label>
+                  <span>Per connection / min</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={accessSettings.connection_rate_limit_per_minute}
+                    onInput={e => updateAccessField('connection_rate_limit_per_minute', Number((e.target as HTMLInputElement).value))}
+                  />
+                </label>
+                <label>
+                  <span>Global / min</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={accessSettings.global_rate_limit_per_minute}
+                    onInput={e => updateAccessField('global_rate_limit_per_minute', Number((e.target as HTMLInputElement).value))}
+                  />
+                </label>
+              </div>
+            )}
+
+            <div class="admin-settings-actions">
+              <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                {accessSettings.access_policy === 'open'
+                  ? 'Saving open mode clears active whitelist entries.'
+                  : `${entries.length} pubkey${entries.length !== 1 ? 's' : ''} currently whitelisted.`
+                }
+              </div>
+              <button
+                type="button"
+                onClick={handleSaveAccess}
+                disabled={savingAccess}
+                class="lc-pill-primary text-sm"
+                style={{ borderRadius: '8px', padding: '9px 18px' }}
+              >
+                {savingAccess ? 'Saving...' : 'Save access mode'}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+
+      <div class="admin-access-actions mb-5">
+        <section class="admin-access-panel admin-access-panel-allow">
+          <div class="admin-access-panel-header">
+            <div>
+              <h3>Allow Pubkey</h3>
+              <p>Whitelist access</p>
+            </div>
+            <span class="admin-access-count">{entries.length}</span>
+          </div>
+          <div class="admin-access-input-row">
+            <input
+              type="text"
+              value={newPubkey}
+              onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
+              placeholder="npub1..., hex, or name@domain.com"
+              class="admin-access-input"
+              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+            />
+            <button
+              onClick={handleAdd}
+              disabled={!newPubkey.trim() || adding}
+              class="admin-access-button admin-access-button-allow"
+            >
+              {adding ? '...' : 'Add'}
+            </button>
+          </div>
+          <div class="admin-access-hint">
+            {isNip05Input ? 'NIP-05 will resolve on add' : 'Accepts npub, hex, or NIP-05'}
+          </div>
+        </section>
+
+        <section class="admin-access-panel admin-access-panel-block">
+          <div class="admin-access-panel-header">
+            <div>
+              <h3>Block Pubkey</h3>
+              <p>Override access</p>
+            </div>
+            <span class="admin-access-count admin-access-count-danger">{blacklist.length}</span>
+          </div>
+          <div class="admin-access-input-row">
+            <input
+              type="text"
+              value={newBlacklistPubkey}
+              onInput={(e) => setNewBlacklistPubkey((e.target as HTMLInputElement).value)}
+              placeholder="npub1... or hex pubkey"
+              class="admin-access-input"
+              onKeyDown={(e) => e.key === 'Enter' && handleBlacklistAdd()}
+            />
+            <button
+              onClick={handleBlacklistAdd}
+              disabled={!newBlacklistPubkey.trim() || blacklistAdding}
+              class="admin-access-button admin-access-button-block"
+            >
+              {blacklistAdding ? '...' : 'Block'}
+            </button>
+          </div>
+          <div class="admin-access-hint">Blocked keys cannot connect or publish</div>
+        </section>
+      </div>
 
       {/* Search */}
       {entries.length > 0 && (
-        <div class="mb-4">
+        <div class="admin-search-field mb-4">
+          <SearchIcon class="admin-search-icon" />
           <input
             type="text"
             value={search}
             onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
             placeholder="Search by name, npub, NIP-05…"
-            class="w-full px-4 py-2 rounded-lg text-sm"
-            style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
+            class="admin-search-input"
           />
         </div>
       )}
@@ -386,26 +551,6 @@ export const WhitelistManager = () => {
             <p class="text-sm mb-4" style={{ color: 'var(--color-text-secondary)' }}>
               Blacklisted pubkeys are blocked even if they appear in the whitelist or follow-derived list.
             </p>
-
-            <div class="flex gap-2 mb-4">
-              <input
-                type="text"
-                value={newBlacklistPubkey}
-                onInput={(e) => setNewBlacklistPubkey((e.target as HTMLInputElement).value)}
-                placeholder="npub1... or hex pubkey"
-                class="flex-1 px-4 py-2 rounded-lg text-sm"
-                style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
-                onKeyDown={(e) => e.key === 'Enter' && handleBlacklistAdd()}
-              />
-              <button
-                onClick={handleBlacklistAdd}
-                disabled={!newBlacklistPubkey.trim()}
-                class="text-sm px-5 py-2 rounded-lg transition-colors"
-                style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}
-              >
-                Block
-              </button>
-            </div>
 
             {blacklistLoading ? (
               <div class="space-y-2">

@@ -26,6 +26,11 @@ const shortKey = (value: string) => (
   value.length > 20 ? `${value.slice(0, 10)}...${value.slice(-10)}` : value
 )
 
+const normalizePubkey = (value: string | null | undefined) => value?.toLowerCase() ?? null
+const accessPolicyTitle = (policy: AccessPolicy) => (
+  policy === 'owner_only' ? 'Whitelist required' : 'Open relay'
+)
+
 export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps) => {
   const signer = useSigner() as NostrSigner | null
   const logout = useLogout()
@@ -37,6 +42,25 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fallbackSigner = useRef<NostrSigner | null>(null)
+  const setupOwnerPubkey = normalizePubkey(status.setup_owner_pubkey)
+  const setupOwnerLabel = status.setup_owner_npub ?? status.setup_owner_pubkey
+
+  const ownerMatchesSetup = (pubkey: string) => (
+    !setupOwnerPubkey || normalizePubkey(pubkey) === setupOwnerPubkey
+  )
+
+  const acceptOwnerPubkey = (pubkey: string) => {
+    setOwnerPubkey(pubkey)
+    if (!ownerMatchesSetup(pubkey)) {
+      setError(
+        `Setup is locked to ${setupOwnerLabel ? shortKey(setupOwnerLabel) : 'the retained owner'}. Use that owner signer to continue.`,
+      )
+      setStep('owner')
+      return
+    }
+    setError(null)
+    setStep('access')
+  }
 
   useEffect(() => {
     if (!signer) {
@@ -53,8 +77,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
     )
       .then(pubkey => {
         if (cancelled) return
-        setOwnerPubkey(pubkey)
-        setStep(prev => prev === 'owner' ? 'access' : prev)
+        acceptOwnerPubkey(pubkey)
       })
       .catch(e => {
         if (cancelled) return
@@ -84,8 +107,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
           'Signer did not respond. Use another signer or reconnect your Nostr app.',
         )
         if (cancelled) return
-        setOwnerPubkey(pubkey)
-        setStep(prev => prev === 'owner' ? 'access' : prev)
+        acceptOwnerPubkey(pubkey)
       })
       .catch(() => undefined)
       .finally(() => {
@@ -99,8 +121,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
 
   const handleWidgetLogin = async ({ signer: sdkSigner, pubkey }: { signer: NostrSigner; pubkey: string }) => {
     fallbackSigner.current = sdkSigner
-    setOwnerPubkey(pubkey)
-    setStep('access')
+    acceptOwnerPubkey(pubkey)
   }
 
   const switchIdentity = async () => {
@@ -115,6 +136,13 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
   const launchRelay = async () => {
     const activeSigner = signer ?? fallbackSigner.current
     if (!activeSigner || !ownerPubkey) return
+    if (!ownerMatchesSetup(ownerPubkey)) {
+      setError(
+        `Setup is locked to ${setupOwnerLabel ? shortKey(setupOwnerLabel) : 'the retained owner'}. Use that owner signer to continue.`,
+      )
+      setStep('owner')
+      return
+    }
 
     setLaunching(true)
     setError(null)
@@ -141,14 +169,14 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
 
   const steps: Array<{ id: Step; label: string; meta: string }> = [
     { id: 'owner', label: 'Owner', meta: ownerPubkey ? shortKey(ownerPubkey) : 'Connect signer' },
-    { id: 'access', label: 'Access', meta: accessPolicy === 'owner_only' ? 'Owner only' : 'Open relay' },
+    { id: 'access', label: 'Access', meta: accessPolicyTitle(accessPolicy) },
     { id: 'launch', label: 'Launch', meta: status.relay_url || window.location.origin },
   ]
 
   const stepIndex = steps.findIndex(item => item.id === step)
 
-  const canOpenAccess = Boolean(ownerPubkey)
-  const canOpenLaunch = Boolean(ownerPubkey)
+  const canOpenAccess = Boolean(ownerPubkey && ownerMatchesSetup(ownerPubkey))
+  const canOpenLaunch = Boolean(ownerPubkey && ownerMatchesSetup(ownerPubkey))
 
   return (
     <div class="min-h-screen lc-grid-bg flex items-center justify-center px-4 py-8" style={{ backgroundColor: 'var(--color-bg-primary)' }}>
@@ -214,9 +242,11 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
 
           <main class="p-5 md:p-8">
             <div class="mb-7">
-              <div class="text-xs uppercase" style={{ color: 'var(--color-text-secondary)' }}>Relay owner setup</div>
+              <div class="text-xs uppercase" style={{ color: 'var(--color-text-secondary)' }}>
+                {setupOwnerPubkey ? 'Relay setup reset' : 'Relay owner setup'}
+              </div>
               <h1 class="mt-2 text-2xl md:text-3xl font-bold" style={{ color: 'var(--color-text-primary)' }}>
-                Claim this relay
+                {setupOwnerPubkey ? 'Reconnect the owner' : 'Claim this relay'}
               </h1>
             </div>
 
@@ -228,6 +258,11 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
 
             {step === 'owner' && (
               <section>
+                {setupOwnerLabel && (
+                  <div class="mb-5 p-4 text-sm" style={{ background: 'rgba(180,249,83,0.08)', border: '1px solid rgba(180,249,83,0.22)', borderRadius: '8px' }}>
+                    This reset kept the owner pubkey. Only <span class="font-mono">{shortKey(setupOwnerLabel)}</span> can finish setup.
+                  </div>
+                )}
                 {ownerPubkey ? (
                   <div class="space-y-5">
                     <div class="p-4" style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}>
@@ -235,7 +270,12 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                       <div class="mt-2 font-mono text-sm break-all">{ownerPubkey}</div>
                     </div>
                     <div class="flex flex-wrap gap-3">
-                      <button onClick={() => setStep('access')} class="lc-pill-primary" style={{ borderRadius: '8px' }}>
+                      <button
+                        onClick={() => canOpenAccess && setStep('access')}
+                        disabled={!canOpenAccess}
+                        class="lc-pill-primary"
+                        style={{ borderRadius: '8px' }}
+                      >
                         Continue
                       </button>
                       <button onClick={switchIdentity} class="lc-pill-secondary" style={{ borderRadius: '8px' }}>
@@ -252,8 +292,8 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                       </div>
                     )}
                     <LoginWidget
-                      title="Connect relay owner"
-                      subtitle="This identity becomes the first admin."
+                      title={setupOwnerPubkey ? 'Connect retained owner' : 'Connect relay owner'}
+                      subtitle={setupOwnerPubkey ? 'This reset can only be completed by the retained owner.' : 'This identity becomes the first admin.'}
                       methods={['nip07', 'nip46', 'import']}
                       flatLayout
                       showRememberToggle
@@ -283,8 +323,10 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                       border: accessPolicy === 'owner_only' ? '1px solid rgba(180,249,83,0.35)' : '1px solid var(--color-border)',
                     }}
                   >
-                    <div class="font-semibold" style={{ color: accessPolicy === 'owner_only' ? '#b4f953' : 'var(--color-text-primary)' }}>Owner only</div>
-                    <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>Start locked to the owner account.</div>
+                    <div class="font-semibold" style={{ color: accessPolicy === 'owner_only' ? '#b4f953' : 'var(--color-text-primary)' }}>Whitelist required</div>
+                    <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                      Only pubkeys in the whitelist can use the relay. Setup starts with the owner pubkey whitelisted.
+                    </div>
                   </button>
                   <button
                     onClick={() => setAccessPolicy('open')}
@@ -296,7 +338,9 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                     }}
                   >
                     <div class="font-semibold" style={{ color: accessPolicy === 'open' ? '#b4f953' : 'var(--color-text-primary)' }}>Open relay</div>
-                    <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>Allow any authenticated pubkey.</div>
+                    <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                      Any authenticated pubkey can use the relay. Use this only with per-pubkey, per-connection, and global rate limits enforced.
+                    </div>
                   </button>
                 </div>
 
@@ -308,8 +352,10 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                     class="mt-1"
                   />
                   <span>
-                    <span class="block text-sm font-semibold">Use owner as reference account</span>
-                    <span class="block text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>The default reference list starts with this owner only.</span>
+                    <span class="block text-sm font-semibold">Add owner as follow-sync reference</span>
+                    <span class="block text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
+                      Reference accounts seed follow-derived whitelist entries. Enable this only if the owner account should be used as a follow source.
+                    </span>
                   </span>
                 </label>
 
@@ -333,7 +379,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                   </div>
                   <div class="p-4" style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}>
                     <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>Access</div>
-                    <div class="mt-2 font-semibold">{accessPolicy === 'owner_only' ? 'Owner only' : 'Open relay'}</div>
+                    <div class="mt-2 font-semibold">{accessPolicyTitle(accessPolicy)}</div>
                   </div>
                   <div class="p-4" style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}>
                     <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>Reference account</div>

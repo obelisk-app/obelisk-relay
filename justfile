@@ -63,6 +63,10 @@ check: fmt-check clippy test
 build-release:
     cargo build --release --workspace
 
+# Build locally, push GHCR image, and upload GitHub Release assets
+release-local tag:
+    ./scripts/release-local-to-github.sh {{tag}}
+
 # Run benchmarks
 bench:
     cargo bench --workspace

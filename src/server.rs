@@ -1,10 +1,21 @@
 use crate::{
-    admin, app_state::HttpServerState, blacklist::Blacklist, config, follow_sync, groups::Groups,
-    groups_event_processor::GroupsRelayProcessor, handler, metrics,
+    admin,
+    app_state::HttpServerState,
+    blacklist::Blacklist,
+    config, follow_sync,
+    groups::Groups,
+    groups_event_processor::GroupsRelayProcessor,
+    handler, metrics,
     metrics_handler::PrometheusSubscriptionMetricsHandler,
+    obelisk_api,
+    obelisk_api::ObeliskHttpLimiter,
+    obelisk_index::ObeliskIndex,
     pruner::{self, PrunerConfig, PrunerStats},
     reference_accounts::ReferenceAccounts,
-    sampled_metrics_handler::SampledMetricsHandler, whitelist::Whitelist, RelayDatabase,
+    sampled_metrics_handler::SampledMetricsHandler,
+    search_capability_middleware::SearchCapabilityMiddleware,
+    whitelist::Whitelist,
+    RelayDatabase,
 };
 use anyhow::Result;
 use axum::{
@@ -14,14 +25,15 @@ use axum::{
     Router,
 };
 use governor::Quota;
-use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 use nostr_sdk::prelude::PublicKey;
+use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 use relay_builder::{
     middlewares::RateLimitMiddleware, CryptoHelper, Nip40ExpirationMiddleware, Nip70Middleware,
     RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig,
 };
-use std::num::NonZeroU32;
+use serde::Serialize;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,10 +42,12 @@ use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 const NOSTR_JSON_CONTENT_TYPE: &str = "application/nostr+json";
 pub const SUPPORTED_NIPS: [u16; 7] = [1, 9, 11, 29, 40, 42, 70];
+const NIP50_INDEXED_SEARCH: u16 = 50;
+const NIP98_HTTP_AUTH: u16 = 98;
 
 pub struct ServerState {
     pub http_state: Arc<HttpServerState>,
@@ -42,6 +56,8 @@ pub struct ServerState {
     pub connection_counter: Arc<AtomicUsize>,
     pub relay_url: String,
     pub relay_pubkey: String,
+    pub relay_public_key: PublicKey,
+    pub admin_pubkeys: Vec<PublicKey>,
     pub whitelist: Whitelist,
     pub reference_accounts: ReferenceAccounts,
     pub start_time: std::time::Instant,
@@ -53,6 +69,29 @@ pub struct ServerState {
     pub pruner_config: Option<PrunerConfig>,
     pub relay_name: String,
     pub relay_description: String,
+    pub supported_nips: Vec<u16>,
+    pub obelisk_index: Option<Arc<ObeliskIndex>>,
+    pub obelisk_http_limiter: Arc<ObeliskHttpLimiter>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ObeliskNip11Capability {
+    indexed_bootstrap: IndexedBootstrapCapability,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct IndexedBootstrapCapability {
+    version: u8,
+    url: &'static str,
+    auth: &'static str,
+}
+
+#[derive(Serialize)]
+struct RelayInfoWithObelisk<'a> {
+    #[serde(flatten)]
+    relay_info: &'a RelayInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obelisk: Option<&'a ObeliskNip11Capability>,
 }
 
 fn accepts_nostr_json(headers: &HeaderMap) -> bool {
@@ -72,8 +111,15 @@ fn accepts_nostr_json(headers: &HeaderMap) -> bool {
         })
 }
 
-fn relay_info_response(relay_info: &RelayInfo) -> Response {
-    match serde_json::to_string(relay_info) {
+fn relay_info_response(
+    relay_info: &RelayInfo,
+    obelisk: Option<&ObeliskNip11Capability>,
+) -> Response {
+    let body = RelayInfoWithObelisk {
+        relay_info,
+        obelisk,
+    };
+    match serde_json::to_string(&body) {
         Ok(body) => ([(header::CONTENT_TYPE, NOSTR_JSON_CONTENT_TYPE)], body).into_response(),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -81,6 +127,24 @@ fn relay_info_response(relay_info: &RelayInfo) -> Response {
         )
             .into_response(),
     }
+}
+
+fn configured_supported_nips(
+    advertise_indexed_search: bool,
+    obelisk_index_enabled: bool,
+) -> Vec<u16> {
+    let mut supported_nips = SUPPORTED_NIPS.to_vec();
+
+    if advertise_indexed_search {
+        supported_nips.push(NIP50_INDEXED_SEARCH);
+    }
+    if obelisk_index_enabled {
+        supported_nips.push(NIP98_HTTP_AUTH);
+    }
+
+    supported_nips.sort_unstable();
+    supported_nips.dedup();
+    supported_nips
 }
 
 pub async fn run_server(
@@ -117,6 +181,7 @@ pub async fn run_server(
     let _crypto_helper = CryptoHelper::new(Arc::new(relay_keys.clone()));
     // Keep a handle to the database for the background pruner before moving it into RelayConfig.
     let database_for_pruner = Arc::clone(&database);
+    let database_for_index = Arc::clone(&database);
     let mut relay_config =
         RelayConfig::new(settings.relay_url.clone(), database, relay_keys.clone())
             .with_subdomains_from_url(&settings.relay_url)
@@ -182,16 +247,51 @@ pub async fn run_server(
         "config".to_string(),
     );
 
-    let mut groups_processor =
-        GroupsRelayProcessor::with_admin_pubkeys(
-            groups.clone(),
-            relay_keys.public_key,
-            admin_pubkeys.clone(),
-            whitelist.clone(),
+    let obelisk_index = if settings.obelisk_index.enabled {
+        info!(
+            "Obelisk indexed bootstrap enabled: recent_per_group={}, max_bootstrap_groups={}, max_page_limit={}",
+            settings.obelisk_index.recent_per_group,
+            settings.obelisk_index.max_bootstrap_groups,
+            settings.obelisk_index.max_page_limit
         );
+        Some(Arc::new(
+            ObeliskIndex::new(
+                database_for_index.clone(),
+                groups.clone(),
+                settings.obelisk_index.clone(),
+                relay_keys.clone(),
+            )
+            .await?,
+        ))
+    } else {
+        info!("Obelisk indexed bootstrap disabled");
+        None
+    };
+    let advertise_indexed_search = settings.should_advertise_indexed_search();
+    if settings.enable_indexed_search {
+        info!(
+            "NIP-50 indexed search enabled; advertised={}",
+            advertise_indexed_search
+        );
+    } else {
+        info!("NIP-50 indexed search disabled; search filters will be rejected");
+    }
+
+    let mut groups_processor = GroupsRelayProcessor::with_admin_pubkeys(
+        groups.clone(),
+        relay_keys.public_key,
+        admin_pubkeys.clone(),
+        whitelist.clone(),
+    );
+    if let Some(index) = &obelisk_index {
+        groups_processor = groups_processor.with_obelisk_index(index.clone());
+    }
     if let Some(per_minute) = settings.pubkey_rate_limit_per_minute {
         if per_minute > 0 {
-            info!("Per-pubkey rate limit enabled: {} events/minute", per_minute);
+            info!(
+                "Per-pubkey rate limit enabled: {} events/minute",
+                per_minute
+            );
             groups_processor = groups_processor.with_pubkey_rate_limit(per_minute);
         }
     }
@@ -250,16 +350,29 @@ pub async fn run_server(
             "NIP-29 groups relay for Obelisk. Auth-required, whitelisted access.".to_string()
         }
     });
+    let supported_nips =
+        configured_supported_nips(advertise_indexed_search, settings.obelisk_index.enabled);
+
     let _relay_info = RelayInfo {
         name: relay_name.clone(),
         description: relay_description.clone(),
         pubkey: relay_keys.public_key.to_string(),
         contact: "npub1m9vsm9d8sy0pevcjhenwm4ny6l37dm2hsg4dnusna43ql3n5305qy4zlg4".to_string(),
-        supported_nips: SUPPORTED_NIPS.to_vec(),
+        supported_nips: supported_nips.clone(),
         software: "groups_relay".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };
+    let obelisk_capability = settings
+        .obelisk_index
+        .enabled
+        .then_some(ObeliskNip11Capability {
+            indexed_bootstrap: IndexedBootstrapCapability {
+                version: 1,
+                url: "/api/obelisk/v1/bootstrap",
+                auth: "nip98",
+            },
+        });
 
     // Build per-connection + global event rate limits. We always install the
     // middleware (with effectively-unlimited defaults) so the static middleware
@@ -287,6 +400,7 @@ pub async fn run_server(
         info!("Global rate limit: {} events/minute", n);
     }
     let rate_limiter = RateLimitMiddleware::<()>::with_global_limit(per_conn_quota, global_quota);
+    let search_capability = SearchCapabilityMiddleware::new(settings.enable_indexed_search);
 
     // Build the relay service
     let handler_factory = Arc::new(
@@ -299,6 +413,7 @@ pub async fn run_server(
             .relay_info(_relay_info.clone())
             .build_with(|chain| {
                 chain
+                    .with(search_capability)
                     .with(rate_limiter)
                     .with(Nip40ExpirationMiddleware::new())
                     .with(Nip70Middleware)
@@ -313,6 +428,8 @@ pub async fn run_server(
         connection_counter: connection_counter.clone(),
         relay_url: settings.relay_url.clone(),
         relay_pubkey: relay_keys.public_key.to_hex(),
+        relay_public_key: relay_keys.public_key,
+        admin_pubkeys: admin_pubkeys.clone(),
         whitelist: whitelist.clone(),
         reference_accounts: reference_accounts.clone(),
         start_time: std::time::Instant::now(),
@@ -322,6 +439,9 @@ pub async fn run_server(
         pruner_config: pruner_config_opt,
         relay_name: relay_name.clone(),
         relay_description: relay_description.clone(),
+        supported_nips: supported_nips.clone(),
+        obelisk_index: obelisk_index.clone(),
+        obelisk_http_limiter: Arc::new(ObeliskHttpLimiter::default()),
     });
 
     let cors = CorsLayer::new()
@@ -341,6 +461,7 @@ pub async fn run_server(
               headers: axum::http::HeaderMap| {
             let handler_factory = handler_factory.clone();
             let relay_info = relay_info.clone();
+            let obelisk_capability = obelisk_capability.clone();
 
             async move {
                 match ws {
@@ -352,7 +473,7 @@ pub async fn run_server(
                     None => {
                         // Check for NIP-11 JSON request
                         if accepts_nostr_json(&headers) {
-                            return relay_info_response(&relay_info);
+                            return relay_info_response(&relay_info, obelisk_capability.as_ref());
                         }
 
                         // Serve frontend
@@ -368,6 +489,15 @@ pub async fn run_server(
     let api_routes = Router::new()
         .route("/api/subdomains", get(handler::handle_subdomains))
         .route("/api/config", get(handler::handle_config))
+        .nest(
+            "/api/obelisk/v1",
+            Router::new()
+                .route("/bootstrap", get(obelisk_api::handle_bootstrap))
+                .route(
+                    "/groups/{group_id}/messages",
+                    get(obelisk_api::handle_messages),
+                ),
+        )
         .nest("/api/admin", admin::admin_routes())
         .nest("/api", admin::public_api_routes())
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
@@ -379,19 +509,40 @@ pub async fn run_server(
         .route("/health", get(|| async { "OK" }))
         .route("/metrics", get(metrics_handler))
         .merge(api_routes)
-        .fallback_service(ServeDir::new("frontend/dist").fallback(tower_http::services::ServeFile::new("frontend/dist/index.html")))
+        .fallback_service(ServeDir::new("frontend/dist").fallback(
+            tower_http::services::ServeFile::new("frontend/dist/index.html"),
+        ))
         .layer(cors);
 
     let addr = settings.local_addr.parse::<SocketAddr>()?;
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
+    let shutdown_token = cancellation_token.clone();
 
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.unwrap();
         info!("Shutdown signal received");
         handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-        cancellation_token.cancel();
+        shutdown_token.cancel();
     });
+
+    if let Some(index) = obelisk_index.clone() {
+        let cancellation_token = cancellation_token.clone();
+        let reconcile_interval = settings.obelisk_index.reconcile_interval;
+        tokio::spawn(async move {
+            let mut interval = time::interval(reconcile_interval);
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        if let Err(err) = index.rebuild().await {
+                            warn!("Obelisk index reconcile failed: {}", err);
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // Start metrics loop
     let groups_for_metrics = Arc::clone(&groups);
@@ -426,14 +577,29 @@ mod tests {
         RelayInfo {
             name: "Test Relay".to_string(),
             description: "Test relay information".to_string(),
-            pubkey: "0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
+            pubkey: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             contact: "mailto:ops@example.com".to_string(),
             supported_nips: SUPPORTED_NIPS.to_vec(),
             software: "https://example.com/relay".to_string(),
             version: "0.0.0-test".to_string(),
             icon: None,
         }
+    }
+
+    #[test]
+    fn configured_supported_nips_adds_configurable_nips() {
+        assert_eq!(
+            configured_supported_nips(true, true),
+            vec![1, 9, 11, 29, 40, 42, 50, 70, 98]
+        );
+    }
+
+    #[test]
+    fn configured_supported_nips_omits_search_and_http_auth_when_disabled() {
+        assert_eq!(
+            configured_supported_nips(false, false),
+            vec![1, 9, 11, 29, 40, 42, 70]
+        );
     }
 
     #[test]
@@ -457,12 +623,35 @@ mod tests {
 
     #[test]
     fn relay_info_response_uses_nip11_content_type() {
-        let response = relay_info_response(&test_relay_info());
+        let response = relay_info_response(&test_relay_info(), None);
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static(NOSTR_JSON_CONTENT_TYPE))
         );
+    }
+
+    #[test]
+    fn relay_info_response_can_include_obelisk_capability() {
+        let capability = ObeliskNip11Capability {
+            indexed_bootstrap: IndexedBootstrapCapability {
+                version: 1,
+                url: "/api/obelisk/v1/bootstrap",
+                auth: "nip98",
+            },
+        };
+        let relay_info = test_relay_info();
+        let body = RelayInfoWithObelisk {
+            relay_info: &relay_info,
+            obelisk: Some(&capability),
+        };
+        let json = serde_json::to_value(body).unwrap();
+
+        assert_eq!(
+            json["obelisk"]["indexed_bootstrap"]["url"],
+            "/api/obelisk/v1/bootstrap"
+        );
+        assert_eq!(json["obelisk"]["indexed_bootstrap"]["auth"], "nip98");
     }
 }

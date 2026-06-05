@@ -13,6 +13,8 @@ pub mod groups_event_processor;
 pub mod handler;
 pub mod metrics;
 pub mod metrics_handler;
+pub mod obelisk_api;
+pub mod obelisk_index;
 pub mod pruner;
 pub mod reference_accounts;
 #[cfg(test)]
@@ -20,6 +22,7 @@ pub mod relay_middleware_integration_tests;
 #[cfg(test)]
 pub mod relay_middleware_tests;
 pub mod sampled_metrics_handler;
+pub mod search_capability_middleware;
 pub mod server;
 pub mod utils;
 pub mod validation_middleware;

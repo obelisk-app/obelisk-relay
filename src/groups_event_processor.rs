@@ -4,6 +4,7 @@ use crate::groups::{
     KIND_GROUP_EDIT_METADATA_9002, KIND_GROUP_REMOVE_USER_9001, KIND_GROUP_SET_ROLES_9006,
     KIND_GROUP_USER_JOIN_REQUEST_9021, KIND_GROUP_USER_LEAVE_REQUEST_9022, NON_GROUP_ALLOWED_KINDS,
 };
+use crate::obelisk_index::ObeliskIndex;
 use crate::whitelist::Whitelist;
 use crate::Groups;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
@@ -37,6 +38,9 @@ pub struct GroupsRelayProcessor {
     whitelist: Whitelist,
     /// Optional per-pubkey rate limiter. None disables per-pubkey rate limiting.
     pubkey_limiter: Option<Arc<PubkeyLimiter>>,
+    /// Optional optimized Obelisk read index. Normal relay behavior does not
+    /// depend on this; it is updated only after events pass relay validation.
+    obelisk_index: Option<Arc<ObeliskIndex>>,
 }
 
 impl std::fmt::Debug for GroupsRelayProcessor {
@@ -46,17 +50,14 @@ impl std::fmt::Debug for GroupsRelayProcessor {
             .field("admin_pubkey_count", &self.admin_pubkeys.len())
             .field("whitelist_empty", &self.whitelist.is_empty())
             .field("pubkey_limiter", &self.pubkey_limiter.is_some())
+            .field("obelisk_index", &self.obelisk_index.is_some())
             .finish()
     }
 }
 
 impl GroupsRelayProcessor {
     /// Create a new groups event processor instance.
-    pub fn new(
-        groups: Arc<Groups>,
-        relay_pubkey: PublicKey,
-        whitelist: Whitelist,
-    ) -> Self {
+    pub fn new(groups: Arc<Groups>, relay_pubkey: PublicKey, whitelist: Whitelist) -> Self {
         Self::with_admin_pubkeys(groups, relay_pubkey, Vec::new(), whitelist)
     }
 
@@ -72,6 +73,7 @@ impl GroupsRelayProcessor {
             admin_pubkeys,
             whitelist,
             pubkey_limiter: None,
+            obelisk_index: None,
         }
     }
 
@@ -81,6 +83,11 @@ impl GroupsRelayProcessor {
             let quota = Quota::per_minute(n);
             self.pubkey_limiter = Some(Arc::new(RateLimiter::keyed(quota)));
         }
+        self
+    }
+
+    pub fn with_obelisk_index(mut self, obelisk_index: Arc<ObeliskIndex>) -> Self {
+        self.obelisk_index = Some(obelisk_index);
         self
     }
 
@@ -352,6 +359,10 @@ impl EventProcessor for GroupsRelayProcessor {
             }
         };
 
+        if let Some(obelisk_index) = &self.obelisk_index {
+            obelisk_index.apply_store_commands(&events_to_save);
+        }
+
         debug!(target: "groups_relay_logic", "Returning {} store commands from handle_event", events_to_save.len());
         Ok(events_to_save)
     }
@@ -382,7 +393,11 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
+        let processor = GroupsRelayProcessor::new(
+            groups.clone(),
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
 
         // Verify the logic was created correctly
         assert_eq!(processor.relay_pubkey(), &admin_keys.public_key());
@@ -403,7 +418,11 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
+        let processor = GroupsRelayProcessor::new(
+            groups,
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
         let (_admin_keys, member_keys, _non_member_keys) = create_test_keys().await;
 
         // Create a non-group event (no 'h' tag)
@@ -436,7 +455,11 @@ mod tests {
             .unwrap(),
         );
 
-        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)));
+        let processor = GroupsRelayProcessor::new(
+            groups,
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
         let (_admin_keys, member_keys, _non_member_keys) = create_test_keys().await;
 
         // Create an unmanaged group event (has 'h' tag but group doesn't exist)

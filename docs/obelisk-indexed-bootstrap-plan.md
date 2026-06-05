@@ -10,7 +10,8 @@ serves normal Nostr/NIP-29 events over WebSocket for all standard clients. In
 parallel, `obelisk-relay` maintains a grouped, time-ordered, rebuildable index
 derived from those same events. Obelisk clients detect the optimized capability
 through NIP-11 and fetch a single authenticated bootstrap snapshot instead of
-opening many per-group subscriptions during startup.
+opening many per-group subscriptions during startup. After that snapshot, they
+keep one small live relay subscription for catch-up and new events.
 
 Implementation starts on May 30, 2026.
 
@@ -26,6 +27,27 @@ Implementation starts on May 30, 2026.
   remains the compatibility layer.
 
 ## Public Interface
+
+### Compatibility Contract
+
+The optimized path is an additive Obelisk capability, not a replacement for
+normal relay behavior.
+
+- Obelisk-aware clients may make one bootstrap request to obtain the relay state
+  they need for startup.
+- The bootstrap response carries raw Nostr events, grouped for transport
+  efficiency, so the client can ingest them through the same code path used for
+  events received from ordinary relays.
+- After bootstrap, the client opens one standard WebSocket `REQ` for live
+  catch-up from the returned cursor/high-water timestamp.
+- Standard Nostr clients ignore the Obelisk capability and continue using
+  ordinary WebSocket `REQ`s.
+- Obelisk clients must still tolerate normal relays that do not advertise this
+  capability by falling back to their existing multi-query/subscription flow.
+
+This keeps interoperability in both directions: Obelisk can optimize against an
+Obelisk relay, while messages stored on ordinary relays still remain readable by
+the Obelisk client.
 
 ### NIP-11 Capability
 
@@ -53,7 +75,7 @@ Add authenticated HTTP endpoints:
 
 ```http
 GET /api/obelisk/v1/bootstrap?limit_per_group=50
-GET /api/obelisk/v1/groups/{group_id}/messages?before=<unix>&limit=50
+GET /api/obelisk/v1/groups/{group_id}/messages?scope=<scope>&before=<unix>&limit=50
 ```
 
 The bootstrap response should group raw Nostr events by scope and group. The
@@ -61,14 +83,23 @@ first version should include:
 
 - Group metadata events: `39000`
 - Group admin/member events: `39001`, `39002`
+- Group creation events: `9007`
 - Recent group messages: kind `9`
 - Reactions: kind `7`
 - Author deletions and moderation deletions: kinds `5`, `9005`
-- Active call announcements currently used by the client
 - Cursors/high-water timestamps for follow-up live subscriptions
 
 The message pagination endpoint should return older raw message events for one
-group, newest-first, using `before` and `limit`.
+group, newest-first, using exclusive `before` and `limit`. `scope` is optional
+when the group id is unambiguous or exists in the default scope.
+
+Optimized HTTP reads do not consume normal WebSocket connection,
+subscription, or `REQ` fan-out quota. They use separate per-pubkey HTTP quotas
+and hard response caps:
+
+- Bootstrap default: 30 requests per minute.
+- Message pages default: 120 requests per minute.
+- Rate-limit responses return HTTP `429` with `Retry-After`.
 
 ### Authentication
 
@@ -107,6 +138,9 @@ relay:
     enabled: true
     recent_per_group: 50
     max_bootstrap_groups: 500
+    max_page_limit: 100
+    bootstrap_requests_per_minute: 30
+    message_requests_per_minute: 120
     reconcile_interval: "5m"
 ```
 
@@ -173,6 +207,9 @@ Manual validation:
   and avoids per-group message fan-out.
 - A standard Nostr client can still subscribe and publish normally.
 - Obelisk can still connect to non-Obelisk relays.
+- `docs/obelisk-indexed-bootstrap-v1.md` contains enough discovery, auth,
+  response, pagination, rate-limit, and fallback detail for compatible clients
+  to implement without reading relay internals.
 
 ## Assumptions
 

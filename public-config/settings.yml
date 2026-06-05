@@ -14,6 +14,24 @@ relay:
   # Default/maximum limit for database queries (REQ filters)
   max_limit: 500
 
+  # NIP-50 indexed search support for REQ/COUNT filters with `search`.
+  # Set enable_indexed_search: false to reject search filters and stop
+  # advertising NIP-50. Override advertise_indexed_search only if the relay
+  # should accept search filters without advertising NIP-50.
+  enable_indexed_search: true
+  # advertise_indexed_search: true
+
+  # Obelisk optimized HTTP bootstrap and pagination. These limits are separate
+  # from normal Nostr WebSocket REQ/subscription limits.
+  obelisk_index:
+    enabled: true
+    recent_per_group: 50
+    max_bootstrap_groups: 500
+    max_page_limit: 100
+    bootstrap_requests_per_minute: 30
+    message_requests_per_minute: 120
+    reconcile_interval: "5m"
+
   # WebSocket settings
   websocket:
     # Maximum time a connection can stay open (optional)

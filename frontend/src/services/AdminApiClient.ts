@@ -156,6 +156,17 @@ export class AdminApiClient {
     })
   }
 
+  async getObeliskIndexSettings(): Promise<ObeliskIndexSettings> {
+    return this.request('/api/admin/obelisk-index-settings')
+  }
+
+  async updateObeliskIndexSettings(settings: ObeliskIndexSettingsRequest): Promise<ObeliskIndexSettings> {
+    return this.request('/api/admin/obelisk-index-settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
   async getReferenceAccounts(): Promise<Array<{ hex: string; npub: string }>> {
     return this.request('/api/admin/reference-accounts')
   }
@@ -402,6 +413,28 @@ export interface StorageSettings {
   runs: number
   last_run_unix: number
   restart_required: boolean
+}
+
+export interface ObeliskIndexSettings {
+  enabled: boolean
+  active_enabled: boolean
+  recent_per_group: number
+  max_bootstrap_groups: number
+  max_page_limit: number
+  bootstrap_requests_per_minute: number
+  message_requests_per_minute: number
+  reconcile_interval_minutes: number
+  restart_required: boolean
+}
+
+export interface ObeliskIndexSettingsRequest {
+  enabled: boolean
+  recent_per_group: number
+  max_bootstrap_groups: number
+  max_page_limit: number
+  bootstrap_requests_per_minute: number
+  message_requests_per_minute: number
+  reconcile_interval_minutes: number
 }
 
 export interface GroupInfo {

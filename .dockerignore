@@ -1,0 +1,15 @@
+.git
+target
+dist
+
+frontend/node_modules
+frontend/dist
+
+.env
+.cloudflared.env
+config/settings.local.yml
+config/backups
+config/admin_pubkeys_runtime.json
+config/blacklist.json
+public-config/settings.local.yml
+public-config/backups

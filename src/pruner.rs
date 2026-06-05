@@ -23,8 +23,8 @@ pub const DEFAULT_PRUNE_KINDS: &[u16] = &[9, 11, 12];
 /// Misconfigured `prune_kinds` entries that overlap this set are dropped at
 /// startup with a warning — defense in depth.
 pub const NEVER_PRUNE_KINDS: &[u16] = &[
-    9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011,
-    39000, 39001, 39002, 39003,
+    9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 39000, 39001, 39002,
+    39003,
 ];
 
 #[derive(Debug, Default)]
@@ -168,7 +168,9 @@ async fn run_once(database: &RelayDatabase, config: &PrunerConfig, stats: &Prune
         }
     }
 
-    stats.total_pruned.fetch_add(deleted_total, Ordering::Relaxed);
+    stats
+        .total_pruned
+        .fetch_add(deleted_total, Ordering::Relaxed);
     stats.runs.fetch_add(1, Ordering::Relaxed);
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

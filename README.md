@@ -134,7 +134,9 @@ Restart after changes: `docker compose restart` (or `dco restart` if the tunnel 
 
 ## Supported NIPs
 
-NIP-29 (relay-based groups) · NIP-09 (deletion) · NIP-40 (expiration) · NIP-42 (auth) · NIP-70 (protected events)
+NIP-29 (relay-based groups) · NIP-09 (deletion) · NIP-40 (expiration) · NIP-42 (auth) · configurable NIP-50 (indexed search) · NIP-70 (protected events)
+
+Set `relay.enable_indexed_search: false` to reject NIP-50 `search` filters and stop advertising NIP-50.
 
 ## Architecture
 

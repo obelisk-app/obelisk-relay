@@ -4,6 +4,7 @@ import {
   type AdminPubkeyEntry,
   type BackupEntry,
   type ConfigResetResult,
+  type ObeliskIndexSettings,
   type RelayIdentity,
 } from '../../services/AdminApiClient'
 
@@ -32,6 +33,7 @@ const formatUnix = (unix: number) => {
 
 export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps) => {
   const [identity, setIdentity] = useState<RelayIdentity | null>(null)
+  const [obeliskIndex, setObeliskIndex] = useState<ObeliskIndexSettings | null>(null)
   const [identityForm, setIdentityForm] = useState({
     relay_name: '',
     relay_description: '',
@@ -60,10 +62,11 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
     setLoading(true)
     setError(null)
     try {
-      const [identityData, adminData, backupData] = await Promise.all([
+      const [identityData, adminData, backupData, obeliskIndexData] = await Promise.all([
         adminApi.getRelayIdentity(),
         adminApi.getAdminPubkeys(),
         adminApi.getConfigBackups(),
+        adminApi.getObeliskIndexSettings(),
       ])
       setIdentity(identityData)
       setIdentityForm({
@@ -73,6 +76,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       })
       setAdmins(adminData)
       setBackups(backupData)
+      setObeliskIndex(obeliskIndexData)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load relay settings')
     } finally {
@@ -108,6 +112,33 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       showToast(response.message)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to rotate relay key')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const updateObeliskIndex = (patch: Partial<ObeliskIndexSettings>) => {
+    setObeliskIndex(prev => prev ? { ...prev, ...patch } : prev)
+  }
+
+  const saveObeliskIndex = async () => {
+    if (!obeliskIndex) return
+    setBusy('obelisk-index')
+    setError(null)
+    try {
+      const response = await adminApi.updateObeliskIndexSettings({
+        enabled: obeliskIndex.enabled,
+        recent_per_group: obeliskIndex.recent_per_group,
+        max_bootstrap_groups: obeliskIndex.max_bootstrap_groups,
+        max_page_limit: obeliskIndex.max_page_limit,
+        bootstrap_requests_per_minute: obeliskIndex.bootstrap_requests_per_minute,
+        message_requests_per_minute: obeliskIndex.message_requests_per_minute,
+        reconcile_interval_minutes: obeliskIndex.reconcile_interval_minutes,
+      })
+      setObeliskIndex(response)
+      showToast('Obelisk bootstrap settings saved. Restart relay to apply them.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save Obelisk bootstrap settings')
     } finally {
       setBusy(null)
     }
@@ -340,6 +371,109 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               </div>
             </div>
           </section>
+
+          {obeliskIndex && (
+            <section class="admin-settings-card">
+              <div class="admin-settings-card-header">
+                <div>
+                  <h3>Obelisk Bootstrap</h3>
+                  <p>Controls the optimized HTTP snapshot and message pagination used by compatible clients.</p>
+                </div>
+                <div class="admin-row-actions">
+                  <span class={`admin-status-badge ${obeliskIndex.active_enabled ? 'admin-status-badge-ok' : ''}`}>
+                    {obeliskIndex.active_enabled ? 'Active' : 'Inactive'}
+                  </span>
+                  {obeliskIndex.restart_required && (
+                    <span class="admin-status-badge admin-status-badge-warn">Restart required</span>
+                  )}
+                </div>
+              </div>
+
+              <label class="admin-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={obeliskIndex.enabled}
+                  onChange={e => updateObeliskIndex({ enabled: (e.target as HTMLInputElement).checked })}
+                />
+                <span>
+                  <strong>Advertise indexed bootstrap after restart</strong>
+                  <small>Compatible clients use one HTTP bootstrap read, then one live WebSocket subscription.</small>
+                </span>
+              </label>
+
+              <div class="admin-rate-grid mt-4">
+                <label>
+                  <span>Recent / group</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.recent_per_group}
+                    onInput={e => updateObeliskIndex({ recent_per_group: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+                <label>
+                  <span>Max groups</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.max_bootstrap_groups}
+                    onInput={e => updateObeliskIndex({ max_bootstrap_groups: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+                <label>
+                  <span>Page limit</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.max_page_limit}
+                    onInput={e => updateObeliskIndex({ max_page_limit: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+                <label>
+                  <span>Bootstraps / min</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.bootstrap_requests_per_minute}
+                    onInput={e => updateObeliskIndex({ bootstrap_requests_per_minute: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+                <label>
+                  <span>Pages / min</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.message_requests_per_minute}
+                    onInput={e => updateObeliskIndex({ message_requests_per_minute: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+                <label>
+                  <span>Reconcile minutes</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={obeliskIndex.reconcile_interval_minutes}
+                    onInput={e => updateObeliskIndex({ reconcile_interval_minutes: Number((e.target as HTMLInputElement).value) })}
+                  />
+                </label>
+              </div>
+
+              <div class="admin-settings-actions">
+                <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                  Changes apply after relay restart because the index and HTTP quotas are initialized at startup.
+                </div>
+                <button
+                  type="button"
+                  onClick={saveObeliskIndex}
+                  disabled={busy === 'obelisk-index'}
+                  class="lc-pill-primary text-sm"
+                  style={{ borderRadius: '8px', padding: '9px 18px' }}
+                >
+                  {busy === 'obelisk-index' ? 'Saving...' : 'Save bootstrap settings'}
+                </button>
+              </div>
+            </section>
+          )}
 
           <section class="admin-settings-card">
             <div class="admin-settings-card-header">

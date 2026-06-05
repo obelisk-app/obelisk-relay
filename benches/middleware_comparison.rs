@@ -163,8 +163,11 @@ fn bench_visibility_direct(c: &mut Criterion) {
                 BenchmarkId::new(format!("groups_logic_{name}"), i),
                 event,
                 |b, event| {
-                    let processor =
-                        GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
+                    let processor = GroupsRelayProcessor::new(
+                        groups.clone(),
+                        admin_keys.public_key(),
+                        bench_whitelist(),
+                    );
 
                     b.to_async(&rt).iter(|| async {
                         let context = EventContext {
@@ -263,7 +266,11 @@ fn bench_nip29_operations(c: &mut Criterion) {
     for (name, event) in test_events {
         // Benchmark GroupsRelayLogic handle_event
         group.bench_function(format!("groups_logic_{name}"), |b| {
-            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
+            let processor = GroupsRelayProcessor::new(
+                groups.clone(),
+                admin_keys.public_key(),
+                bench_whitelist(),
+            );
 
             b.to_async(&rt).iter(|| async {
                 let admin_pk = admin_keys.public_key();
@@ -336,7 +343,11 @@ fn bench_group_operations(c: &mut Criterion) {
             Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::H), "bench_group_0");
 
         b.to_async(&rt).iter(|| async {
-            let processor = GroupsRelayProcessor::new(groups.clone(), admin_keys.public_key(), bench_whitelist());
+            let processor = GroupsRelayProcessor::new(
+                groups.clone(),
+                admin_keys.public_key(),
+                bench_whitelist(),
+            );
 
             let admin_pk = admin_keys.public_key();
             let context = EventContext {

@@ -1,5 +1,5 @@
 use crate::follow_sync;
-use crate::server::{ServerState, SUPPORTED_NIPS};
+use crate::server::ServerState;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -157,6 +157,30 @@ struct StorageSettingsResponse {
     total_pruned: u64,
     runs: u64,
     last_run_unix: i64,
+    restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct ObeliskIndexSettingsRequest {
+    enabled: bool,
+    recent_per_group: u32,
+    max_bootstrap_groups: u32,
+    max_page_limit: u32,
+    bootstrap_requests_per_minute: u32,
+    message_requests_per_minute: u32,
+    reconcile_interval_minutes: u32,
+}
+
+#[derive(Serialize)]
+struct ObeliskIndexSettingsResponse {
+    enabled: bool,
+    active_enabled: bool,
+    recent_per_group: u32,
+    max_bootstrap_groups: u32,
+    max_page_limit: u32,
+    bootstrap_requests_per_minute: u32,
+    message_requests_per_minute: u32,
+    reconcile_interval_minutes: u32,
     restart_required: bool,
 }
 
@@ -556,6 +580,62 @@ fn read_yaml_u32(config_dir: &StdPath, key: &str, default_value: u32) -> u32 {
         .unwrap_or(default_value)
 }
 
+fn read_obelisk_index_scalar(config_dir: &StdPath, key: &str, default_value: &str) -> String {
+    for file_name in [SETTINGS_LOCAL_FILE, SETTINGS_DEFAULT_FILE] {
+        let path = config_dir.join(file_name);
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = contents.lines().collect();
+        let Some(start) = lines
+            .iter()
+            .position(|line| line.trim_start() == "obelisk_index:")
+        else {
+            continue;
+        };
+
+        for line in lines.iter().skip(start + 1) {
+            let indent = line.len().saturating_sub(line.trim_start().len());
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && indent <= 2 && !trimmed.starts_with('#') {
+                break;
+            }
+            let Some(rest) = trimmed.strip_prefix(key) else {
+                continue;
+            };
+            let Some(value) = rest.trim_start().strip_prefix(':') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+
+    default_value.to_string()
+}
+
+fn read_obelisk_index_u32(config_dir: &StdPath, key: &str, default_value: u32) -> u32 {
+    read_obelisk_index_scalar(config_dir, key, "")
+        .parse::<u32>()
+        .unwrap_or(default_value)
+}
+
+fn read_obelisk_index_bool(config_dir: &StdPath, key: &str, default_value: bool) -> bool {
+    match read_obelisk_index_scalar(
+        config_dir,
+        key,
+        if default_value { "true" } else { "false" },
+    )
+    .as_str()
+    {
+        "true" | "True" | "TRUE" => true,
+        "false" | "False" | "FALSE" => false,
+        _ => default_value,
+    }
+}
+
 fn yaml_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -592,8 +672,57 @@ fn upsert_relay_value(contents: String, key: &str, value: &str) -> String {
     next
 }
 
+fn upsert_obelisk_index_value(contents: String, key: &str, value: &str) -> String {
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let block_start = lines
+        .iter()
+        .position(|line| line.trim_start() == "obelisk_index:")
+        .unwrap_or_else(|| {
+            let insert_at = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("websocket:"))
+                .unwrap_or(lines.len());
+            lines.insert(insert_at, "  obelisk_index:".to_string());
+            insert_at
+        });
+
+    let block_end = lines
+        .iter()
+        .enumerate()
+        .skip(block_start + 1)
+        .find_map(|(idx, line)| {
+            let indent = line.len().saturating_sub(line.trim_start().len());
+            let trimmed = line.trim();
+            (!trimmed.is_empty() && indent <= 2 && !trimmed.starts_with('#')).then_some(idx)
+        })
+        .unwrap_or(lines.len());
+
+    let replacement = format!("    {key}: {value}");
+    let mut found = false;
+    for line in lines.iter_mut().take(block_end).skip(block_start + 1) {
+        if line.trim_start().starts_with(&format!("{key}:")) {
+            *line = replacement.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        lines.insert(block_end, replacement);
+    }
+
+    let mut next = lines.join("\n");
+    next.push('\n');
+    next
+}
+
 fn config_bool(config_dir: &StdPath, key: &str, default_value: bool) -> bool {
-    match read_yaml_scalar(config_dir, key, if default_value { "true" } else { "false" }).as_str()
+    match read_yaml_scalar(
+        config_dir,
+        key,
+        if default_value { "true" } else { "false" },
+    )
+    .as_str()
     {
         "true" | "True" | "TRUE" => true,
         "false" | "False" | "FALSE" => false,
@@ -703,7 +832,10 @@ fn read_pubkey_json_file(path: &StdPath) -> Vec<PublicKey> {
         .collect()
 }
 
-fn backup_id_to_dir(config_dir: &StdPath, id: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+fn backup_id_to_dir(
+    config_dir: &StdPath,
+    id: &str,
+) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
     if !id.starts_with(BACKUP_PREFIX)
         || !id
             .chars()
@@ -785,15 +917,15 @@ fn apply_runtime_config_from_files(
     let restored_admins = read_pubkey_json_file(&config_dir.join(ADMIN_RUNTIME_FILE));
     *admin_state.admin_pubkeys.write() = restored_admins;
 
-    state
-        .whitelist
-        .replace_manual(read_pubkey_json_file(&config_dir.join(WHITELIST_RUNTIME_FILE)));
+    state.whitelist.replace_manual(read_pubkey_json_file(
+        &config_dir.join(WHITELIST_RUNTIME_FILE),
+    ));
     state
         .whitelist
         .set_follow_derived(follow_sync::load_follow_derived(config_dir));
-    state
-        .reference_accounts
-        .replace_all(read_pubkey_json_file(&config_dir.join(REFERENCE_ACCOUNTS_FILE)));
+    state.reference_accounts.replace_all(read_pubkey_json_file(
+        &config_dir.join(REFERENCE_ACCOUNTS_FILE),
+    ));
     state
         .whitelist
         .blacklist()
@@ -834,7 +966,10 @@ fn persist_relay_identity_settings(
     std::fs::write(path, contents)
 }
 
-fn persist_relay_secret_key(config_dir: &StdPath, secret_key_hex: &str) -> Result<(), std::io::Error> {
+fn persist_relay_secret_key(
+    config_dir: &StdPath,
+    secret_key_hex: &str,
+) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(config_dir)?;
     let path = config_dir.join(SETTINGS_LOCAL_FILE);
     let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
@@ -858,14 +993,10 @@ fn storage_settings_response(
     restart_required: bool,
 ) -> StorageSettingsResponse {
     let config_dir = StdPath::new(&state.config_dir);
-    let retention_days = parse_duration_days(
-        &read_yaml_scalar(config_dir, "event_retention", "30d"),
-        30,
-    );
-    let prune_interval_minutes = parse_duration_minutes(
-        &read_yaml_scalar(config_dir, "prune_interval", "60m"),
-        60,
-    );
+    let retention_days =
+        parse_duration_days(&read_yaml_scalar(config_dir, "event_retention", "30d"), 30);
+    let prune_interval_minutes =
+        parse_duration_minutes(&read_yaml_scalar(config_dir, "prune_interval", "60m"), 60);
     let configured_pruning_enabled = config_bool(config_dir, "enable_event_pruner", false);
     let (db_size_bytes, db_file_count) = directory_stats(StdPath::new(&state.db_path));
     let (total_pruned, runs, last_run_unix) = match &state.pruner_stats {
@@ -893,6 +1024,37 @@ fn storage_settings_response(
     }
 }
 
+fn obelisk_index_settings_response(
+    state: &ServerState,
+    restart_required: bool,
+) -> ObeliskIndexSettingsResponse {
+    let config_dir = StdPath::new(&state.config_dir);
+    let reconcile_interval_minutes = parse_duration_minutes(
+        &read_obelisk_index_scalar(config_dir, "reconcile_interval", "5m"),
+        5,
+    );
+
+    ObeliskIndexSettingsResponse {
+        enabled: read_obelisk_index_bool(config_dir, "enabled", true),
+        active_enabled: state.obelisk_index.is_some(),
+        recent_per_group: read_obelisk_index_u32(config_dir, "recent_per_group", 50),
+        max_bootstrap_groups: read_obelisk_index_u32(config_dir, "max_bootstrap_groups", 500),
+        max_page_limit: read_obelisk_index_u32(config_dir, "max_page_limit", 100),
+        bootstrap_requests_per_minute: read_obelisk_index_u32(
+            config_dir,
+            "bootstrap_requests_per_minute",
+            30,
+        ),
+        message_requests_per_minute: read_obelisk_index_u32(
+            config_dir,
+            "message_requests_per_minute",
+            120,
+        ),
+        reconcile_interval_minutes,
+        restart_required,
+    }
+}
+
 fn persist_rate_limit_settings(
     config_dir: &StdPath,
     pubkey_rate_limit: u32,
@@ -902,17 +1064,55 @@ fn persist_rate_limit_settings(
     std::fs::create_dir_all(config_dir)?;
     let path = config_dir.join(SETTINGS_LOCAL_FILE);
     let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
-    let contents = upsert_relay_scalar(
-        contents,
-        "pubkey_rate_limit_per_minute",
-        pubkey_rate_limit,
-    );
+    let contents = upsert_relay_scalar(contents, "pubkey_rate_limit_per_minute", pubkey_rate_limit);
     let contents = upsert_relay_scalar(
         contents,
         "connection_rate_limit_per_minute",
         connection_rate_limit,
     );
     let contents = upsert_relay_scalar(contents, "global_rate_limit_per_minute", global_rate_limit);
+    std::fs::write(path, contents)
+}
+
+fn persist_obelisk_index_settings(
+    config_dir: &StdPath,
+    req: &ObeliskIndexSettingsRequest,
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "enabled",
+        if req.enabled { "true" } else { "false" },
+    );
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "recent_per_group",
+        &req.recent_per_group.to_string(),
+    );
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "max_bootstrap_groups",
+        &req.max_bootstrap_groups.to_string(),
+    );
+    let contents =
+        upsert_obelisk_index_value(contents, "max_page_limit", &req.max_page_limit.to_string());
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "bootstrap_requests_per_minute",
+        &req.bootstrap_requests_per_minute.to_string(),
+    );
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "message_requests_per_minute",
+        &req.message_requests_per_minute.to_string(),
+    );
+    let contents = upsert_obelisk_index_value(
+        contents,
+        "reconcile_interval",
+        &yaml_quote(&format!("{}m", req.reconcile_interval_minutes)),
+    );
     std::fs::write(path, contents)
 }
 
@@ -931,7 +1131,7 @@ fn write_setup_mode_settings(config_dir: &StdPath) -> Result<(), std::io::Error>
     let local_addr = read_yaml_scalar(config_dir, "local_addr", "0.0.0.0:8080");
 
     let contents = format!(
-        "relay:\n  relay_secret_key: \"{relay_secret_key}\"\n  relay_url: \"{relay_url}\"\n  db_path: \"{db_path}\"\n  local_addr: \"{local_addr}\"\n\n  whitelisted_pubkeys: []\n  admin_pubkeys: []\n\n  max_subscriptions: 50\n  max_limit: 500\n\n  pubkey_rate_limit_per_minute: 6000\n  connection_rate_limit_per_minute: 12000\n  global_rate_limit_per_minute: 600000\n\n  websocket:\n    max_connection_duration: \"24h\"\n    idle_timeout: \"30m\"\n    max_connections: 300\n"
+        "relay:\n  relay_secret_key: \"{relay_secret_key}\"\n  relay_url: \"{relay_url}\"\n  db_path: \"{db_path}\"\n  local_addr: \"{local_addr}\"\n\n  whitelisted_pubkeys: []\n  admin_pubkeys: []\n\n  max_subscriptions: 50\n  max_limit: 500\n\n  pubkey_rate_limit_per_minute: 6000\n  connection_rate_limit_per_minute: 12000\n  global_rate_limit_per_minute: 600000\n\n  obelisk_index:\n    enabled: true\n    recent_per_group: 50\n    max_bootstrap_groups: 500\n    max_page_limit: 100\n    bootstrap_requests_per_minute: 30\n    message_requests_per_minute: 120\n    reconcile_interval: \"5m\"\n\n  websocket:\n    max_connection_duration: \"24h\"\n    idle_timeout: \"30m\"\n    max_connections: 300\n"
     );
 
     std::fs::write(config_dir.join(SETTINGS_LOCAL_FILE), contents)
@@ -968,7 +1168,9 @@ fn backup_config_files(config_dir: &StdPath) -> Result<String, std::io::Error> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let backup_dir = config_dir.join("backups").join(format!("config-reset-{unix}"));
+    let backup_dir = config_dir
+        .join("backups")
+        .join(format!("config-reset-{unix}"));
     std::fs::create_dir_all(&backup_dir)?;
 
     for file_name in BACKUP_FILE_NAMES {
@@ -1048,6 +1250,10 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
             "/storage-settings",
             get(handle_storage_settings).post(handle_storage_settings_update),
         )
+        .route(
+            "/obelisk-index-settings",
+            get(handle_obelisk_index_settings).post(handle_obelisk_index_settings_update),
+        )
         .route("/challenge", get(handle_challenge))
         .route("/auth", post(handle_auth))
         .route("/session", get(handle_session_check))
@@ -1093,9 +1299,7 @@ pub fn public_api_routes() -> Router<Arc<ServerState>> {
 
 // --- Handlers ---
 
-async fn handle_challenge(
-    State(state): State<Arc<ServerState>>,
-) -> impl IntoResponse {
+async fn handle_challenge(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let challenge = random_hex(32);
     let admin_state = get_admin_state(&state);
 
@@ -1133,7 +1337,9 @@ async fn handle_setup_status(State(state): State<Arc<ServerState>>) -> impl Into
         whitelisted_count: state.whitelist.len(),
         reference_account_count: state.reference_accounts.len(),
         setup_owner_pubkey: setup_owner.as_ref().map(|owner| owner.to_hex()),
-        setup_owner_npub: setup_owner.as_ref().and_then(|owner| owner.to_bech32().ok()),
+        setup_owner_npub: setup_owner
+            .as_ref()
+            .and_then(|owner| owner.to_bech32().ok()),
     })
 }
 
@@ -1180,10 +1386,7 @@ async fn handle_setup(
         }
         admins.push(event.pubkey);
         if let Err(e) =
-            persist_runtime_admin_pubkeys(
-                admins.as_slice(),
-                StdPath::new(&admin_state.config_dir),
-            )
+            persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&admin_state.config_dir))
         {
             admins.retain(|pk| pk != &event.pubkey);
             warn!("Failed to persist runtime admin pubkeys: {}", e);
@@ -1309,13 +1512,17 @@ async fn handle_config_reset(
     })?;
 
     state.whitelist.blacklist().replace_all(Vec::new());
-    state.whitelist.blacklist().persist(config_dir).map_err(|e| {
-        warn!("Failed to clear blacklist: {}", e);
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to clear blacklist",
-        )
-    })?;
+    state
+        .whitelist
+        .blacklist()
+        .persist(config_dir)
+        .map_err(|e| {
+            warn!("Failed to clear blacklist: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to clear blacklist",
+            )
+        })?;
 
     info!(
         "Admin {} reset relay configuration without deleting event data",
@@ -1415,12 +1622,22 @@ async fn handle_config_backup_restore(
                     source.display(),
                     e
                 );
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to restore backup")
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to restore backup",
+                )
             })?;
         } else if destination.exists() {
             std::fs::remove_file(&destination).map_err(|e| {
-                warn!("Failed to clear {} during restore: {}", destination.display(), e);
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to restore backup")
+                warn!(
+                    "Failed to clear {} during restore: {}",
+                    destination.display(),
+                    e
+                );
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to restore backup",
+                )
             })?;
         }
     }
@@ -1505,11 +1722,12 @@ async fn handle_admin_pubkeys_add(
         if !admins.contains(&pk) {
             admins.push(pk);
         }
-        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir))
-            .map_err(|e| {
+        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir)).map_err(
+            |e| {
                 warn!("Failed to persist admin pubkeys: {}", e);
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to persist admin")
-            })?;
+            },
+        )?;
     }
 
     Ok(Json(AdminPubkeyEntry {
@@ -1545,11 +1763,12 @@ async fn handle_admin_pubkeys_remove(
             ));
         }
         admins.retain(|candidate| candidate != &pk);
-        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir))
-            .map_err(|e| {
+        persist_runtime_admin_pubkeys(admins.as_slice(), StdPath::new(&state.config_dir)).map_err(
+            |e| {
                 warn!("Failed to persist admin pubkeys: {}", e);
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to persist admin")
-            })?;
+            },
+        )?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -1864,6 +2083,62 @@ async fn handle_storage_settings_update(
     Ok(Json(storage_settings_response(&state, true)))
 }
 
+async fn handle_obelisk_index_settings(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(obelisk_index_settings_response(&state, false)))
+}
+
+async fn handle_obelisk_index_settings_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<ObeliskIndexSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    if req.recent_per_group == 0
+        || req.max_bootstrap_groups == 0
+        || req.max_page_limit == 0
+        || req.bootstrap_requests_per_minute == 0
+        || req.message_requests_per_minute == 0
+        || req.reconcile_interval_minutes == 0
+    {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Obelisk index limits and intervals must be greater than zero",
+        ));
+    }
+
+    persist_obelisk_index_settings(StdPath::new(&state.config_dir), &req).map_err(|e| {
+        warn!("Failed to persist Obelisk index settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist Obelisk index settings",
+        )
+    })?;
+
+    Ok(Json(ObeliskIndexSettingsResponse {
+        enabled: req.enabled,
+        active_enabled: state.obelisk_index.is_some(),
+        recent_per_group: req.recent_per_group,
+        max_bootstrap_groups: req.max_bootstrap_groups,
+        max_page_limit: req.max_page_limit,
+        bootstrap_requests_per_minute: req.bootstrap_requests_per_minute,
+        message_requests_per_minute: req.message_requests_per_minute,
+        reconcile_interval_minutes: req.reconcile_interval_minutes,
+        restart_required: true,
+    }))
+}
+
 async fn handle_auth(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<AuthRequest>,
@@ -1938,7 +2213,10 @@ async fn handle_whitelist_add(
 
     let added = state.whitelist.add(pk);
     if added {
-        if let Err(e) = state.whitelist.persist(std::path::Path::new(&state.config_dir)) {
+        if let Err(e) = state
+            .whitelist
+            .persist(std::path::Path::new(&state.config_dir))
+        {
             warn!("Failed to persist whitelist: {}", e);
         }
     }
@@ -1973,7 +2251,10 @@ async fn handle_whitelist_remove(
 
     let removed = state.whitelist.remove(&pk);
     if removed {
-        if let Err(e) = state.whitelist.persist(std::path::Path::new(&state.config_dir)) {
+        if let Err(e) = state
+            .whitelist
+            .persist(std::path::Path::new(&state.config_dir))
+        {
             warn!("Failed to persist whitelist: {}", e);
         }
     }
@@ -2086,9 +2367,7 @@ async fn handle_stats(
     }))
 }
 
-async fn handle_relay_info(
-    State(state): State<Arc<ServerState>>,
-) -> impl IntoResponse {
+async fn handle_relay_info(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let groups = &state.http_state.groups;
     let mut group_count = 0usize;
 
@@ -2100,7 +2379,7 @@ async fn handle_relay_info(
         name: state.relay_name.clone(),
         description: state.relay_description.clone(),
         group_count,
-        supported_nips: SUPPORTED_NIPS.to_vec(),
+        supported_nips: state.supported_nips.clone(),
     })
 }
 
@@ -2117,9 +2396,7 @@ struct RetentionStatus {
     last_run_unix: i64,
 }
 
-async fn handle_retention_status(
-    State(state): State<Arc<ServerState>>,
-) -> impl IntoResponse {
+async fn handle_retention_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let (enabled, retention_secs, interval_secs, prune_kinds) = match &state.pruner_config {
         Some(cfg) => (
             true,
@@ -2300,16 +2577,21 @@ async fn handle_reference_accounts_sync(
         }));
     }
 
-    info!("Starting follow sync for {} reference accounts", ref_accounts.len());
+    info!(
+        "Starting follow sync for {} reference accounts",
+        ref_accounts.len()
+    );
 
-    let follows = follow_sync::sync_follows(&ref_accounts).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Sync failed: {}", e),
-            }),
-        )
-    })?;
+    let follows = follow_sync::sync_follows(&ref_accounts)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Sync failed: {}", e),
+                }),
+            )
+        })?;
 
     let count = follows.len();
 
@@ -2626,10 +2908,7 @@ fn get_admin_state(_state: &ServerState) -> AdminState {
     });
 
     // We actually need per-server state. Use a global for now since there's one server.
-    ADMIN_SHARED
-        .get()
-        .cloned()
-        .unwrap()
+    ADMIN_SHARED.get().cloned().unwrap()
 }
 
 use once_cell::sync::OnceCell;

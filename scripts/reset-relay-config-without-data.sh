@@ -224,6 +224,15 @@ relay:
   connection_rate_limit_per_minute: 12000
   global_rate_limit_per_minute: 600000
 
+  obelisk_index:
+    enabled: true
+    recent_per_group: 50
+    max_bootstrap_groups: 500
+    max_page_limit: 100
+    bootstrap_requests_per_minute: 30
+    message_requests_per_minute: 120
+    reconcile_interval: "5m"
+
   websocket:
     max_connection_duration: "24h"
     idle_timeout: "30m"

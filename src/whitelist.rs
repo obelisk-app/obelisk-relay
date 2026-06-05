@@ -143,7 +143,11 @@ impl Whitelist {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let path = config_dir.join(RUNTIME_FILE);
         std::fs::write(&path, json)?;
-        info!("Persisted {} whitelist entries to {}", hex_keys.len(), path.display());
+        info!(
+            "Persisted {} whitelist entries to {}",
+            hex_keys.len(),
+            path.display()
+        );
         Ok(())
     }
 }

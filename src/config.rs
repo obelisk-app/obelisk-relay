@@ -63,6 +63,18 @@ pub struct RelaySettings {
     /// keeps full NIP-29 semantics.
     #[serde(default)]
     pub force_public_groups: bool,
+    /// NIP-50 search filters. When false, incoming REQ/COUNT filters that
+    /// include `search` are rejected before they reach storage.
+    #[serde(default = "default_enable_indexed_search")]
+    pub enable_indexed_search: bool,
+    /// Optional advertisement override. Defaults to `enable_indexed_search`.
+    /// A disabled search capability is never advertised.
+    #[serde(default)]
+    pub advertise_indexed_search: Option<bool>,
+    /// Obelisk-specific optimized HTTP bootstrap index. Additive to normal
+    /// Nostr WebSocket behavior.
+    #[serde(default)]
+    pub obelisk_index: ObeliskIndexSettings,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -73,6 +85,41 @@ pub struct WebSocketSettings {
     pub idle_timeout: Option<Duration>,
     #[serde(default = "default_max_connections")]
     pub max_connections: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ObeliskIndexSettings {
+    #[serde(default = "default_obelisk_index_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_obelisk_recent_per_group")]
+    pub recent_per_group: usize,
+    #[serde(default = "default_obelisk_max_bootstrap_groups")]
+    pub max_bootstrap_groups: usize,
+    #[serde(default = "default_obelisk_max_page_limit")]
+    pub max_page_limit: usize,
+    #[serde(default = "default_obelisk_bootstrap_requests_per_minute")]
+    pub bootstrap_requests_per_minute: u32,
+    #[serde(default = "default_obelisk_message_requests_per_minute")]
+    pub message_requests_per_minute: u32,
+    #[serde(
+        with = "humantime_serde",
+        default = "default_obelisk_reconcile_interval"
+    )]
+    pub reconcile_interval: Duration,
+}
+
+impl Default for ObeliskIndexSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_obelisk_index_enabled(),
+            recent_per_group: default_obelisk_recent_per_group(),
+            max_bootstrap_groups: default_obelisk_max_bootstrap_groups(),
+            max_page_limit: default_obelisk_max_page_limit(),
+            bootstrap_requests_per_minute: default_obelisk_bootstrap_requests_per_minute(),
+            message_requests_per_minute: default_obelisk_message_requests_per_minute(),
+            reconcile_interval: default_obelisk_reconcile_interval(),
+        }
+    }
 }
 
 fn default_max_connection_duration() -> Option<Duration> {
@@ -93,6 +140,38 @@ fn default_max_limit() -> usize {
 
 fn default_max_subscriptions() -> usize {
     50 // Default max subscriptions per connection
+}
+
+fn default_obelisk_index_enabled() -> bool {
+    true
+}
+
+fn default_enable_indexed_search() -> bool {
+    true
+}
+
+fn default_obelisk_recent_per_group() -> usize {
+    50
+}
+
+fn default_obelisk_max_bootstrap_groups() -> usize {
+    500
+}
+
+fn default_obelisk_max_page_limit() -> usize {
+    100
+}
+
+fn default_obelisk_bootstrap_requests_per_minute() -> u32 {
+    30
+}
+
+fn default_obelisk_message_requests_per_minute() -> u32 {
+    120
+}
+
+fn default_obelisk_reconcile_interval() -> Duration {
+    Duration::from_secs(5 * 60)
 }
 
 impl RelaySettings {
@@ -183,6 +262,15 @@ pub struct Settings {
     pub connection_rate_limit_per_minute: Option<u32>,
     pub global_rate_limit_per_minute: Option<u32>,
     pub force_public_groups: bool,
+    pub enable_indexed_search: bool,
+    pub advertise_indexed_search: Option<bool>,
+    pub obelisk_index: ObeliskIndexSettings,
+}
+
+impl Settings {
+    pub fn should_advertise_indexed_search(&self) -> bool {
+        self.enable_indexed_search && self.advertise_indexed_search.unwrap_or(true)
+    }
 }
 
 pub use nostr_sdk::Keys;

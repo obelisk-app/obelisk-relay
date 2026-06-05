@@ -723,10 +723,14 @@ impl Groups {
         }
 
         for (scope, _) in &keys {
-            let h_filter = Filter::new()
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), group_id.to_string());
-            let d_filter = Filter::new()
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), group_id.to_string());
+            let h_filter = Filter::new().custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                group_id.to_string(),
+            );
+            let d_filter = Filter::new().custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                group_id.to_string(),
+            );
 
             self.db
                 .delete(h_filter, scope)
@@ -740,7 +744,11 @@ impl Groups {
             self.groups.remove(&(scope.clone(), group_id.to_string()));
         }
 
-        info!("Admin deleted group '{}' ({} scope(s))", group_id, keys.len());
+        info!(
+            "Admin deleted group '{}' ({} scope(s))",
+            group_id,
+            keys.len()
+        );
         Ok(())
     }
 
@@ -760,7 +768,10 @@ impl Groups {
             .ok_or_else(|| Error::notice("Group not found"))?;
 
         let mut filter = Filter::new()
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), group_id.to_string())
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                group_id.to_string(),
+            )
             .limit(limit)
             .since(Timestamp::from(0));
 
@@ -803,8 +814,8 @@ impl Groups {
 
     /// Admin-only: delete a single event by ID across all scopes.
     pub async fn admin_delete_event(&self, event_id_hex: &str) -> Result<(), Error> {
-        let event_id = EventId::from_hex(event_id_hex)
-            .map_err(|_| Error::notice("Invalid event ID"))?;
+        let event_id =
+            EventId::from_hex(event_id_hex).map_err(|_| Error::notice("Invalid event ID"))?;
 
         let scopes: Vec<Scope> = self
             .groups
@@ -827,10 +838,7 @@ impl Groups {
     }
 
     /// Admin-only: list members of a group with their roles.
-    pub fn admin_get_group_members(
-        &self,
-        group_id: &str,
-    ) -> Result<Vec<serde_json::Value>, Error> {
+    pub fn admin_get_group_members(&self, group_id: &str) -> Result<Vec<serde_json::Value>, Error> {
         let entry = self
             .groups
             .iter()
@@ -855,8 +863,8 @@ impl Groups {
 
     /// Admin-only: delete ALL events by a pubkey across all scopes (relay-wide wipe).
     pub async fn admin_delete_user_events(&self, pubkey_hex: &str) -> Result<(), Error> {
-        let pubkey = PublicKey::from_hex(pubkey_hex)
-            .map_err(|_| Error::notice("Invalid pubkey"))?;
+        let pubkey =
+            PublicKey::from_hex(pubkey_hex).map_err(|_| Error::notice("Invalid pubkey"))?;
 
         let scopes: Vec<Scope> = self
             .groups
@@ -884,8 +892,8 @@ impl Groups {
         group_id: &str,
         pubkey_hex: &str,
     ) -> Result<(), Error> {
-        let pubkey = PublicKey::from_hex(pubkey_hex)
-            .map_err(|_| Error::notice("Invalid pubkey"))?;
+        let pubkey =
+            PublicKey::from_hex(pubkey_hex).map_err(|_| Error::notice("Invalid pubkey"))?;
 
         // Find key
         let key = self
@@ -912,14 +920,23 @@ impl Groups {
         // Remove add-user events for this member from DB
         let filter = Filter::new()
             .kind(KIND_GROUP_ADD_USER_9000)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), group_id.to_string())
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey_hex.to_string());
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                group_id.to_string(),
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::P),
+                pubkey_hex.to_string(),
+            );
         self.db
             .delete(filter, scope)
             .await
             .map_err(|e| Error::internal(e.to_string()))?;
 
-        info!("Admin removed member '{}' from group '{}'", pubkey_hex, group_id);
+        info!(
+            "Admin removed member '{}' from group '{}'",
+            pubkey_hex, group_id
+        );
         Ok(())
     }
 

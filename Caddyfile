@@ -1,6 +1,1 @@
-relay.obelisk.ar {
-	reverse_proxy groups_relay:8080 {
-		header_up Connection {>Connection}
-		header_up Upgrade {>Upgrade}
-	}
-}
+# relay.obelisk.ar retired 2026-07-23; public relay remains tunnelled on port 8081.

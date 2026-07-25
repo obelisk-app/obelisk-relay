@@ -134,14 +134,24 @@ pub struct GroupMetadata {
     /// `parent`: every 39000 needs to carry it or the client will see
     /// e.g. a forum container as a regular text channel.
     pub channel_kind: Option<String>,
+    /// NIP-29: hide relay-generated group metadata from non-members.
+    #[serde(default)]
+    pub hidden: bool,
     /// Private = needs authentication to read
     pub private: bool,
+    /// NIP-29: only members may publish group content.
+    #[serde(default = "default_restricted")]
+    pub restricted: bool,
     /// Closed = automatic creation of 9000 events when a 9021 comes
     pub closed: bool,
     /// Broadcast = only admins can publish content events (except join/leave)
     pub is_broadcast: bool,
     /// Store any unknown tags for preservation
     pub unknown_tags: Vec<Tag>,
+}
+
+fn default_restricted() -> bool {
+    true
 }
 
 impl GroupMetadata {
@@ -153,7 +163,9 @@ impl GroupMetadata {
             banner: None,
             parent: None,
             channel_kind: None,
+            hidden: false,
             private: true,
+            restricted: true,
             closed: true,
             is_broadcast: false,
             unknown_tags: Vec::new(),
@@ -163,6 +175,11 @@ impl GroupMetadata {
     /// Apply event tags to update metadata fields.
     pub fn apply_tags(&mut self, event: &Event) {
         let mut found_tags = std::collections::HashMap::new();
+        let mut access_updated = false;
+        let mut saw_hidden = false;
+        let mut saw_restricted = false;
+        let mut saw_open = false;
+        let mut saw_closed = false;
 
         // Process all tags in one pass
         for tag in event.tags.iter() {
@@ -184,10 +201,24 @@ impl GroupMetadata {
                                 self.picture = Some(content.to_string());
                             }
                         }
-                        "private" => self.private = true,
-                        "public" => self.private = false,
-                        "open" => self.closed = false,
-                        "closed" => self.closed = true,
+                        "private" => {
+                            self.private = true;
+                            access_updated = true;
+                        }
+                        "public" => {
+                            self.private = false;
+                            access_updated = true;
+                        }
+                        "hidden" => saw_hidden = true,
+                        "restricted" => saw_restricted = true,
+                        "open" => {
+                            self.closed = false;
+                            saw_open = true;
+                        }
+                        "closed" => {
+                            self.closed = true;
+                            saw_closed = true;
+                        }
                         "broadcast" => self.is_broadcast = true,
                         "nonbroadcast" => self.is_broadcast = false,
                         "banner" => {
@@ -234,6 +265,21 @@ impl GroupMetadata {
                     // Other tag types are treated as unknown
                     found_tags.insert(tag.kind(), tag.clone());
                 }
+            }
+        }
+
+        if access_updated {
+            // Legacy Obelisk clients used `private` without the newer explicit
+            // access flags. Migrate that privacy-safe; `open` only controlled
+            // joining and must not expose the group's metadata.
+            self.hidden = saw_hidden || (self.private && !saw_restricted);
+            self.restricted = saw_restricted || (saw_closed && !saw_open);
+        } else {
+            if saw_hidden {
+                self.hidden = true;
+            }
+            if saw_restricted {
+                self.restricted = true;
             }
         }
 
@@ -1098,12 +1144,14 @@ impl Group {
             None,
         )];
 
-        // For private and closed groups, only members can post
-        if self.metadata.private && self.metadata.closed && !is_member {
-            return Err(Error::notice("User is not a member of this group"));
+        if self.metadata.restricted && !is_member {
+            return Err(Error::restricted(
+                "Only members can post in this group",
+            ));
         }
 
-        // Open groups auto-join the author when posting
+        // Preserve legacy open-group auto-join behavior. Unrestricted closed
+        // groups accept content without silently changing membership.
         if !self.metadata.closed && !is_member {
             self.add_pubkey(event_pubkey)?;
             commands.extend(
@@ -1111,9 +1159,6 @@ impl Group {
                     .into_iter()
                     .map(|e| StoreCommand::SaveUnsignedEvent(e, self.scope.clone(), None)),
             );
-        } else if !is_member {
-            // For closed groups, non-members can't post
-            return Err(Error::notice("User is not a member of this group"));
         }
 
         Ok(commands)
@@ -1629,6 +1674,14 @@ impl Group {
             tags.push(Tag::custom(TagKind::custom("t"), [channel_kind.clone()]));
         }
 
+        if self.metadata.hidden {
+            tags.push(Tag::custom(TagKind::custom("hidden"), &[] as &[String]));
+        }
+
+        if self.metadata.restricted {
+            tags.push(Tag::custom(TagKind::custom("restricted"), &[] as &[String]));
+        }
+
         // Add any unknown tags
         tags.extend(self.metadata.unknown_tags.iter().cloned());
 
@@ -1780,8 +1833,15 @@ impl Group {
         relay_pubkey: &PublicKey,
         event: &Event,
     ) -> Result<bool, Error> {
-        // Public groups are always visible
-        if !self.metadata.private {
+        // `hidden` controls relay-generated metadata discovery independently
+        // from `private`, which controls group content reads.
+        if ADDRESSABLE_EVENT_KINDS.contains(&event.kind) {
+            if !self.metadata.hidden
+                && (event.kind == KIND_GROUP_METADATA_39000 || !self.metadata.private)
+            {
+                return Ok(true);
+            }
+        } else if !self.metadata.private {
             debug!(
                 "Public group, can see event {}, kind {}",
                 event.id, event.kind
@@ -2068,6 +2128,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_metadata_access_tags_round_trip() {
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+
+        let legacy_private_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("private"), &[] as &[String]),
+                Tag::custom(TagKind::custom("closed"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&legacy_private_event, &admin_keys.public_key())
+            .unwrap();
+        assert!(group.metadata.hidden);
+        assert!(group.metadata.restricted);
+
+        let legacy_private_open_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("private"), &[] as &[String]),
+                Tag::custom(TagKind::custom("open"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&legacy_private_open_event, &admin_keys.public_key())
+            .unwrap();
+        assert!(group.metadata.hidden);
+        assert!(!group.metadata.restricted);
+
+        let private_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("private"), &[] as &[String]),
+                Tag::custom(TagKind::custom("hidden"), &[] as &[String]),
+                Tag::custom(TagKind::custom("restricted"), &[] as &[String]),
+                Tag::custom(TagKind::custom("closed"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&private_event, &admin_keys.public_key())
+            .unwrap();
+
+        assert!(group.metadata.private);
+        assert!(group.metadata.hidden);
+        assert!(group.metadata.restricted);
+        let generated =
+            group.generate_metadata_event(&admin_keys.public_key(), "wss://relay.example");
+        assert!(generated
+            .tags
+            .iter()
+            .any(|tag| tag.kind() == TagKind::custom("hidden")));
+        assert!(generated
+            .tags
+            .iter()
+            .any(|tag| tag.kind() == TagKind::custom("restricted")));
+
+        let public_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("public"), &[] as &[String]),
+                Tag::custom(TagKind::custom("open"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&public_event, &admin_keys.public_key())
+            .unwrap();
+
+        assert!(!group.metadata.private);
+        assert!(!group.metadata.hidden);
+        assert!(!group.metadata.restricted);
+    }
+
+    #[tokio::test]
     async fn test_metadata_management_handles_unknown_tags() {
         let (admin_keys, _, _) = create_test_keys().await;
         let (mut group, group_id) = create_test_group(&admin_keys).await;
@@ -2305,6 +2451,95 @@ mod tests {
                 &test_event
             )
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_hidden_metadata_is_independent_from_private_content() {
+        let (admin_keys, member_keys, non_member_keys) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+        let metadata_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_METADATA_39000.as_u16(),
+            vec![Tag::custom(TagKind::d(), [&group_id])],
+        )
+        .await;
+
+        assert!(group
+            .can_see_event(
+                &Some(non_member_keys.public_key()),
+                &admin_keys.public_key(),
+                &metadata_event,
+            )
+            .unwrap());
+
+        let members_event = create_test_event(
+            &admin_keys,
+            KIND_GROUP_MEMBERS_39002.as_u16(),
+            vec![Tag::custom(TagKind::d(), [&group_id])],
+        )
+        .await;
+        assert!(!group
+            .can_see_event(
+                &Some(non_member_keys.public_key()),
+                &admin_keys.public_key(),
+                &members_event,
+            )
+            .unwrap());
+
+        group.metadata.hidden = true;
+        assert!(!group
+            .can_see_event(
+                &Some(non_member_keys.public_key()),
+                &admin_keys.public_key(),
+                &metadata_event,
+            )
+            .unwrap());
+
+        group.metadata.private = false;
+        let message = create_test_event(
+            &member_keys,
+            9,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        assert!(group
+            .can_see_event(
+                &Some(non_member_keys.public_key()),
+                &admin_keys.public_key(),
+                &message,
+            )
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_restricted_controls_non_member_writes() {
+        let (admin_keys, _, non_member_keys) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+        group.metadata.private = false;
+        group.metadata.closed = true;
+        group.metadata.restricted = true;
+
+        let blocked = create_test_event(
+            &non_member_keys,
+            9,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        assert!(group
+            .handle_group_content(Box::new(blocked), &admin_keys.public_key())
+            .is_err());
+
+        group.metadata.restricted = false;
+        let allowed = create_test_event(
+            &non_member_keys,
+            9,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        assert!(group
+            .handle_group_content(Box::new(allowed), &admin_keys.public_key())
+            .is_ok());
+        assert!(!group.is_member(&non_member_keys.public_key()));
     }
 
     #[tokio::test]

@@ -26,6 +26,8 @@ config/backups/
 scripts/install-host-docker-and-start-relay.sh
 
 # DB backups (e.g. obelisk-backup-YYYYMMDD-HHMM.sql.gz). Never in git.
+/backups/
+*.bak.*
 *.sql.gz
 obelisk-backup-*
 backups/

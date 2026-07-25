@@ -1,5 +1,6 @@
 services:
   groups_relay:
+    profiles: ["retired"]
     # Prebuilt image published from the workstation; see BUILD_ON_SERVER.md.
     # `docker compose pull groups_relay` fetches it (~30s) instead of compiling
     # from source. Override RELAY_IMAGE_TAG to pin a version (for example
@@ -42,7 +43,7 @@ services:
       # Purple theme override: same filename hash as the baked CSS, so index.html
       # picks up our tinted variant without needing a frontend rebuild. If the
       # frontend bundle is rebuilt and the hash changes, regenerate this file.
-      - ./public-config/branding/assets/index-DUXQZBvw.css:/app/frontend/dist/assets/index-DUXQZBvw.css:ro
+      - ./public-config/branding/assets/index-PDsRJO3H.css:/app/frontend/dist/assets/index-PDsRJO3H.css:ro
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
       NIP29__relay__relay_url: "wss://public.obelisk.ar"

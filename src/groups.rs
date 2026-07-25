@@ -93,9 +93,8 @@ impl Groups {
         // `["private"]` tag.
         if force_public_groups {
             for mut entry in all_groups.iter_mut() {
-                if entry.metadata.private {
-                    entry.metadata.private = false;
-                }
+                entry.metadata.private = false;
+                entry.metadata.hidden = false;
             }
         }
 
@@ -467,6 +466,7 @@ impl Groups {
         // ends up public on relays configured as public-only.
         if self.force_public_groups {
             group.metadata.private = false;
+            group.metadata.hidden = false;
         }
 
         // Only allow migrating unmanaged groups to managed ones if creator is relay admin
@@ -590,6 +590,7 @@ impl Groups {
         // to private.
         if self.force_public_groups {
             group.metadata.private = false;
+            group.metadata.hidden = false;
         }
 
         let scope_clone = scope.clone();

@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up both Obelisk Nostr relays twice weekly
+
+[Timer]
+OnCalendar=Mon,Thu *-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=obelisk-relay-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Validated backup of both Obelisk Nostr relays
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/obelisk-relay/scripts/backup-relays.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

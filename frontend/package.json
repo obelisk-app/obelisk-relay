@@ -10,7 +10,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "description": "",
   "dependencies": {
     "@cashu/cashu-ts": "^2.5.2",

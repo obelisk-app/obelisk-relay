@@ -161,6 +161,15 @@ Rust (Tokio + Axum) · `relay_builder` + `websocket_builder` (verse-pbc) · `nos
 
 See [ROADMAP.md](ROADMAP.md) — the next milestone is a Nostr-authenticated admin panel for content moderation.
 
-## License
+## Legal
 
-[AGPL](LICENSE)
+AGPL-3.0 — see [LICENSE](LICENSE). Provided **as-is, without warranty of any kind**.
+
+This is a fork of [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay); the copyleft
+is inherited, not chosen.
+
+Running this software makes **you** the operator of your relay, responsible for what it stores and
+serves. Set your own NIP-11 `contact` before exposing it publicly — see [ABUSE.md](ABUSE.md).
+
+- **Abuse on an Obelisk-operated relay:** abuse@obelisk.ar
+- **Security vulnerabilities:** [SECURITY.md](SECURITY.md) — security@obelisk.ar

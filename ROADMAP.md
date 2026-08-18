@@ -47,8 +47,19 @@ A web-based admin panel where relay operators manage the relay **using their Nos
 - [ ] **Event inspector** — View full event JSON, tags, signatures
 - [ ] **Delete event** — Remove specific events (sends kind 9005 as relay)
 - [ ] **Delete by filter** — Bulk delete by pubkey, kind, group, or time range
-- [ ] **Content reports** — View flagged content (NIP-56 reports)
 - [ ] **Moderation log** — Full audit trail of all admin actions
+
+#### Reports inbox (NIP-56, kind 1984)
+
+Today kind 1984 events are accepted and stored like any other event and nothing reads them — see `ABUSE.md`. The only working report channel is email to `abuse@obelisk.ar`, which means a reporter has to leave the client and hand-copy a relay URL and an event ID.
+
+- [ ] **Ingest** — recognise kind 1984 on write, index by reported pubkey (`p` tag), reported event (`e` tag), report type, and reporter. Types are the NIP-56 seven: `nudity`, `malware`, `profanity`, `illegal`, `spam`, `impersonation`, `other`. Handle `x` (blob hash) reports too, since uploads are reportable.
+- [ ] **Queue UI** — admin view grouped by reported pubkey/event, showing report count, distinct reporters, types, and the reported content inline. Per-row actions: ignore, delete event (kind 9005), remove from group, blacklist pubkey — all of which `src/admin.rs` and `src/blacklist.rs` already implement.
+- [ ] **Reporter weighting** — rank the queue by *distinct* reporters, and optionally by whether the reporter is whitelisted or inside the operator's WoT (v0.4). One key reporting a thousand times must not outrank ten unrelated keys reporting once.
+- [ ] **No automatic action** — NIP-56 explicitly discourages relays from auto-moderating on reports because they are trivially gamed: a spammer can mint keys and mass-report a target. Reports may sort and surface a queue; only an operator action mutates data. Every action lands in the moderation log above.
+- [ ] **Update `ABUSE.md`** — once the queue exists, replace the "does not currently ingest" paragraph with what the relay actually does, and keep email as a parallel channel rather than the only one.
+
+Client half (the report button that produces these events) is tracked in [obelisk-app/obelisk](https://github.com/obelisk-app/obelisk) under Fase 1.5.
 
 #### User Management
 - [ ] **User directory** — All pubkeys that have interacted with the relay

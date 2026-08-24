@@ -22,7 +22,7 @@ COPY benches ./benches
 ENV RUSTFLAGS="--cfg tokio_unstable"
 RUN cargo build --features console
 
-FROM node:20-slim AS frontend-builder
+FROM node:24-slim AS frontend-builder
 
 WORKDIR /usr/src/app/frontend
 
@@ -34,7 +34,7 @@ RUN set -eux; \
         g++; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
     apt-get clean; \
-    npm install -g pnpm
+    npm install -g pnpm@10
 
 COPY frontend/package*.json ./
 COPY frontend/pnpm-lock.yaml ./

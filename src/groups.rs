@@ -1022,8 +1022,21 @@ impl Groups {
         Ok(result)
     }
 
-    /// Admin-only: delete ALL events by a pubkey across all scopes (relay-wide wipe).
-    pub async fn admin_delete_user_events(&self, pubkey_hex: &str) -> Result<(), Error> {
+    /// Admin-only: delete events authored by a pubkey across all scopes.
+    ///
+    /// Never deletes [`crate::pruner::NEVER_PRUNE_KINDS`]. This used to wipe with a
+    /// bare `Filter::author(pubkey)`, which meant wiping whoever created a group also
+    /// deleted its 9007/9000/9002 events and left the group orphaned — the exact
+    /// outcome the pruner has always refused to cause. Both paths now consult the
+    /// same constant so they cannot drift apart.
+    ///
+    /// Pass `kinds` to restrict further; `None` means "everything this author wrote,
+    /// minus the protected kinds". Returns the number of events deleted.
+    pub async fn admin_delete_user_events(
+        &self,
+        pubkey_hex: &str,
+        kinds: Option<&[u16]>,
+    ) -> Result<u64, Error> {
         let pubkey =
             PublicKey::from_hex(pubkey_hex).map_err(|_| Error::notice("Invalid pubkey"))?;
 
@@ -1035,16 +1048,116 @@ impl Groups {
             .into_iter()
             .collect();
 
+        let mut deleted_total = 0u64;
+
         for scope in &scopes {
-            let filter = Filter::new().author(pubkey);
+            // A nostr filter can only express kind *inclusion*, so "everything except
+            // the protected kinds" cannot be stated directly. Discover which kinds
+            // this author actually used, subtract the protected set, and delete that
+            // explicit list — which keeps the delete itself index-bounded.
+            let target_kinds: Vec<Kind> = match kinds {
+                Some(requested) => requested
+                    .iter()
+                    .filter(|k| !crate::pruner::NEVER_PRUNE_KINDS.contains(k))
+                    .map(|k| Kind::from(*k))
+                    .collect(),
+                None => self
+                    .author_kinds_in_scope(pubkey, scope)
+                    .await?
+                    .into_iter()
+                    .filter(|k| !crate::pruner::NEVER_PRUNE_KINDS.contains(&k.as_u16()))
+                    .collect(),
+            };
+
+            if target_kinds.is_empty() {
+                continue;
+            }
+
+            let filter = Filter::new()
+                .author(pubkey)
+                .kinds(target_kinds.iter().copied());
+
+            let count = self
+                .db
+                .count(vec![filter.clone()], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))? as u64;
+
+            if count == 0 {
+                continue;
+            }
+
             self.db
                 .delete(filter, scope)
                 .await
                 .map_err(|e| Error::internal(e.to_string()))?;
+            deleted_total = deleted_total.saturating_add(count);
         }
 
-        info!("Admin wiped all events by '{}'", pubkey_hex);
-        Ok(())
+        info!(
+            "Admin deleted {} events authored by '{}' (protected kinds retained)",
+            deleted_total, pubkey_hex
+        );
+        Ok(deleted_total)
+    }
+
+    /// Distinct kinds an author has stored in a scope.
+    ///
+    /// Pages newest-first rather than taking a single window: missing a kind here
+    /// would silently leave those events behind on a wipe.
+    async fn author_kinds_in_scope(
+        &self,
+        pubkey: PublicKey,
+        scope: &Scope,
+    ) -> Result<Vec<Kind>, Error> {
+        const PAGE: usize = 500;
+        // Bounds the work for a pathological author; 200 pages = 100k events.
+        const MAX_PAGES: usize = 200;
+
+        let mut kinds: std::collections::HashSet<Kind> = std::collections::HashSet::new();
+        let mut until: Option<Timestamp> = None;
+
+        for page in 0..MAX_PAGES {
+            let mut filter = Filter::new().author(pubkey).limit(PAGE);
+            if let Some(ts) = until {
+                filter = filter.until(ts);
+            }
+
+            let events = self
+                .db
+                .query(vec![filter], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+
+            let mut oldest: Option<Timestamp> = None;
+            let mut seen = 0usize;
+            for event in events {
+                kinds.insert(event.kind);
+                oldest = Some(match oldest {
+                    Some(o) if o <= event.created_at => o,
+                    _ => event.created_at,
+                });
+                seen += 1;
+            }
+
+            if seen < PAGE {
+                break;
+            }
+            // Step strictly past the oldest seen, otherwise a page full of
+            // identical timestamps would loop forever.
+            match oldest {
+                Some(ts) if ts.as_secs() > 0 => until = Some(Timestamp::from(ts.as_secs() - 1)),
+                _ => break,
+            }
+            if page == MAX_PAGES - 1 {
+                warn!(
+                    "Author kind discovery hit the page cap for {}; some kinds may be missed",
+                    pubkey.to_hex()
+                );
+            }
+        }
+
+        Ok(kinds.into_iter().collect())
     }
 
     /// Admin-only: remove a member from a group.
@@ -2501,5 +2614,109 @@ mod tests {
             assert!(group.value().is_member(&member_keys.public_key()));
             assert!(group.value().is_member(&non_member_keys.public_key()));
         }
+    }
+
+    /// Wiping the user who created a group must not delete the group's own
+    /// management events. Before this guard, a wipe used a bare
+    /// `Filter::author(pubkey)` and silently orphaned every group that user made.
+    #[tokio::test]
+    async fn test_user_wipe_retains_protected_group_kinds() {
+        let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
+
+        // handle_group_create only mutates in-memory state; persisting is the
+        // caller's job, so store both events explicitly here.
+        let creation = create_test_event(
+            &admin_keys,
+            KIND_GROUP_CREATE_9007,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        groups
+            .db
+            .save_event(&creation, &scope)
+            .await
+            .expect("store creation event");
+
+        // The group-creation event (9007) is authored by admin_keys and is
+        // protected. The chat message (9) is ordinary content and is not.
+        let chat = create_test_event(
+            &admin_keys,
+            Kind::from(9u16),
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        groups
+            .db
+            .save_event(&chat, &scope)
+            .await
+            .expect("store chat event");
+
+        let author = admin_keys.public_key();
+        let count_kind = |kind: u16| {
+            let db = Arc::clone(&groups.db);
+            let scope = scope.clone();
+            async move {
+                db.count(
+                    vec![Filter::new().author(author).kind(Kind::from(kind))],
+                    &scope,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        assert_eq!(count_kind(9007).await, 1, "group creation event stored");
+        assert_eq!(count_kind(9).await, 1, "chat event stored");
+
+        let deleted = groups
+            .admin_delete_user_events(&author.to_hex(), None)
+            .await
+            .expect("wipe succeeds");
+
+        assert_eq!(
+            count_kind(9007).await,
+            1,
+            "kind 9007 is protected and must survive a user wipe"
+        );
+        assert_eq!(count_kind(9).await, 0, "ordinary content is deleted");
+        assert_eq!(deleted, 1, "only the unprotected event is counted");
+    }
+
+    /// An explicit kind list must not become a way around the protected set.
+    #[tokio::test]
+    async fn test_user_wipe_ignores_requested_protected_kinds() {
+        let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
+        let author = admin_keys.public_key();
+
+        let creation = create_test_event(
+            &admin_keys,
+            KIND_GROUP_CREATE_9007,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        groups
+            .db
+            .save_event(&creation, &scope)
+            .await
+            .expect("store creation event");
+
+        let deleted = groups
+            .admin_delete_user_events(&author.to_hex(), Some(&[9007, 39000]))
+            .await
+            .expect("wipe succeeds");
+
+        assert_eq!(
+            deleted, 0,
+            "requesting only protected kinds deletes nothing"
+        );
+        let remaining = groups
+            .db
+            .count(
+                vec![Filter::new().author(author).kind(KIND_GROUP_CREATE_9007)],
+                &scope,
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1, "group creation event still present");
     }
 }

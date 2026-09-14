@@ -2597,6 +2597,11 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct UserEventsDeleteResponse {
+    deleted: u64,
+}
+
 #[derive(Deserialize)]
 struct BulkDeleteRequest {
     event_ids: Vec<String>,
@@ -3179,10 +3184,10 @@ async fn handle_user_events_delete(
         return Err(unauthorized());
     }
 
-    state
+    let deleted = state
         .http_state
         .groups
-        .admin_delete_user_events(&pubkey)
+        .admin_delete_user_events(&pubkey, None)
         .await
         .map_err(|e| {
             (
@@ -3193,7 +3198,9 @@ async fn handle_user_events_delete(
             )
         })?;
 
-    Ok(StatusCode::NO_CONTENT)
+    // Report the real figure rather than a bare 204: the caller cannot otherwise
+    // tell a wipe of 10,000 events from one that matched nothing.
+    Ok(Json(UserEventsDeleteResponse { deleted }))
 }
 
 // --- State helpers ---

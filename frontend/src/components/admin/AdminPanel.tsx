@@ -174,13 +174,20 @@ export const AdminPanel = (_props: { path?: string }) => {
 
   return (
     <div class="min-h-screen flex flex-col md:flex-row" style={{ background: 'var(--color-bg-primary)' }}>
-      <aside class="md:w-72 flex-shrink-0 flex flex-col" style={{ background: 'var(--color-bg-secondary)', borderRight: '1px solid var(--color-border)' }}>
+      {/* Sidebar is pinned to the viewport so its footer actions stay reachable.
+          Without md:h-screen the aside stretches to the full page height on
+          content-heavy tabs, and md:flex-1 on the nav pushes Open Chat / Sign
+          out thousands of pixels down, below the fold. */}
+      <aside class="md:w-72 flex-shrink-0 flex flex-col md:sticky md:top-0 md:h-screen" style={{ background: 'var(--color-bg-secondary)', borderRight: '1px solid var(--color-border)' }}>
         <div class="p-5" style={{ borderBottom: '1px solid var(--color-border)' }}>
           <a href="/" class="text-lg font-bold block" style={{ color: '#b4f953' }}>Obelisk Relay</a>
           <div class="text-xs mt-1" style={{ color: 'var(--color-text-secondary)' }}>Admin console</div>
         </div>
 
-        <nav class="flex md:flex-col gap-2 overflow-x-auto md:overflow-x-visible p-3 md:flex-1">
+        {/* md:min-h-0 lets the nav shrink below its content height (flex items
+            default to min-height:auto and refuse to), so it scrolls internally
+            instead of overflowing the aside and displacing the footer. */}
+        <nav class="flex md:flex-col gap-2 overflow-x-auto md:overflow-x-visible md:overflow-y-auto p-3 md:flex-1 md:min-h-0">
           {tabs.map(tab => {
             const selected = activeTab === tab.id
             return (

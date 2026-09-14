@@ -33,6 +33,16 @@ scripts/install-host-docker-and-start-relay.sh
 obelisk-backup-*
 backups/
 
+# Local edit-in-place backups of config/compose, e.g.
+# compose.yml.pre-loopback-20260821T135433Z, settings.local.yml.bak-20260830T225917.
+# Timestamped suffixes, so *.bak / *.bak.* do not catch them.
+*.bak-*
+*.pre-*
+*-candidate
+
+# Ad-hoc UI reference screenshots dropped in the repo root.
+/image*.png
+
 frontend/node_modules/*
 frontend/dist/*
 

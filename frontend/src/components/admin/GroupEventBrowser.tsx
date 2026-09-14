@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi, EventInfo, MemberInfo, type GroupInfo } from '../../services/AdminApiClient'
 import { SearchIcon } from './SearchIcon'
+import { GroupChatView } from './GroupChatView'
 
 interface Props {
   group: GroupInfo
@@ -25,14 +26,6 @@ const KIND_LABELS: Record<number, string> = {
 
 const kindLabel = (k: number) => KIND_LABELS[k] ?? `kind ${k}`
 
-const relativeTime = (ts: number): string => {
-  const diff = Math.floor(Date.now() / 1000) - ts
-  if (diff < 60) return `${diff}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
-}
-
 const short = (s: string, n = 8) => `${s.slice(0, n)}…`
 
 const accessText = (group: GroupInfo) => {
@@ -50,7 +43,12 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [eventsError, setEventsError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [authorFilter, setAuthorFilter] = useState<string | null>(null)
-  const [deletingEvent, setDeletingEvent] = useState<string | null>(null)
+  // Multi-select for bulk moderation. lastIndex anchors shift-click ranges.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const lastIndexRef = useRef<number | null>(null)
+  const [orderedIds, setOrderedIds] = useState<string[]>([])
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [confirmBulk, setConfirmBulk] = useState(false)
   const [wipingUser, setWipingUser] = useState(false)
   const [confirmWipe, setConfirmWipe] = useState(false)
 
@@ -90,19 +88,6 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
       .catch(e => setMembersError(e.message))
       .finally(() => setMembersLoading(false))
   }, [tab])
-
-  const handleDeleteEvent = async (id: string) => {
-    setDeletingEvent(id)
-    try {
-      await adminApi.deleteEvent(id)
-      setEvents(prev => prev.filter(e => e.id !== id))
-      showToast('Event deleted')
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Failed to delete', 'err')
-    } finally {
-      setDeletingEvent(null)
-    }
-  }
 
   const handleWipeUser = async () => {
     if (!authorFilter) return
@@ -149,6 +134,72 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
       kindLabel(ev.kind).includes(q)
     )
   })
+
+  // The chat view renders oldest-first, so range selection must be computed
+  // against that order, not the newest-first API order.
+  const chatOrdered = [...filteredEvents].sort((a, b) => a.created_at - b.created_at)
+
+  useEffect(() => {
+    setOrderedIds(chatOrdered.map(e => e.id))
+    // Drop selections for events no longer on screen so the count never claims
+    // more than the operator can see.
+    setSelected(prev => {
+      const visible = new Set(chatOrdered.map(e => e.id))
+      const next = new Set([...prev].filter(id => visible.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [events, search])
+
+  const toggleSelect = (id: string, index: number, shiftKey: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (shiftKey && lastIndexRef.current !== null) {
+        const [from, to] = index < lastIndexRef.current
+          ? [index, lastIndexRef.current]
+          : [lastIndexRef.current, index]
+        const select = !prev.has(id)
+        for (let i = from; i <= to; i += 1) {
+          const rowId = orderedIds[i]
+          if (!rowId) continue
+          if (select) next.add(rowId)
+          else next.delete(rowId)
+        }
+      } else if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+    lastIndexRef.current = index
+  }
+
+  const selectAllVisible = () => setSelected(new Set(orderedIds))
+  const selectAllFromAuthor = (pubkey: string) =>
+    setSelected(new Set(chatOrdered.filter(e => e.pubkey === pubkey).map(e => e.id)))
+  const clearSelection = () => { setSelected(new Set()); setConfirmBulk(false) }
+
+  const handleBulkDelete = async () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    setBulkDeleting(true)
+    try {
+      const res = await adminApi.bulkDeleteEvents(ids)
+      const gone = new Set(res.results.filter(r => r.deleted).map(r => r.id))
+      setEvents(prev => prev.filter(e => !gone.has(e.id)))
+      clearSelection()
+      showToast(
+        res.failed === 0
+          ? `Deleted ${res.deleted} event${res.deleted !== 1 ? 's' : ''}`
+          : `Deleted ${res.deleted}, ${res.failed} failed`,
+        res.failed === 0 ? 'ok' : 'err',
+      )
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Bulk delete failed', 'err')
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
 
   const tabStyle = (id: Tab) => ({
     borderBottom: tab === id ? '2px solid #b4f953' : '2px solid transparent',
@@ -309,59 +360,66 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                   {events.length === 0 ? 'No events found.' : `No events match "${search}".`}
                 </div>
               ) : (
-                <table class="w-full text-sm">
-                  <thead style={{ position: 'sticky', top: 0, background: 'var(--color-bg-secondary)', zIndex: 1 }}>
-                    <tr>
-                      <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Event ID</th>
-                      <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Author</th>
-                      <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Kind</th>
-                      <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Content</th>
-                      <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Time</th>
-                      <th class="px-3 py-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredEvents.map(ev => (
-                      <tr key={ev.id} style={{ borderTop: '1px solid var(--color-border)' }} class="hover:bg-white/[0.02] transition-colors">
-                        <td class="px-3 py-2 font-mono text-xs" style={{ color: 'var(--color-text-secondary)' }} title={ev.id}>
-                          {short(ev.id)}
-                        </td>
-                        <td class="px-3 py-2 font-mono text-xs">
-                          <button
-                            onClick={() => { setAuthorFilter(ev.pubkey); setConfirmWipe(false) }}
-                            title={`Filter by ${ev.pubkey}`}
-                            style={{ color: authorFilter === ev.pubkey ? '#b4f953' : 'var(--color-text-secondary)', textDecoration: 'underline dotted', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
-                          >
-                            {short(ev.pubkey)}
-                          </button>
-                        </td>
-                        <td class="px-3 py-2">
-                          <span class="px-1.5 py-0.5 rounded text-xs" style={{ background: 'var(--color-bg-tertiary)', whiteSpace: 'nowrap' }}>
-                            {kindLabel(ev.kind)}
-                          </span>
-                        </td>
-                        <td class="px-3 py-2 text-xs" style={{ maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                          title={ev.content}>
-                          {ev.content || <span style={{ color: 'var(--color-text-secondary)', fontStyle: 'italic' }}>empty</span>}
-                        </td>
-                        <td class="px-3 py-2 text-xs whitespace-nowrap" style={{ color: 'var(--color-text-secondary)' }}>
-                          {relativeTime(ev.created_at)}
-                        </td>
-                        <td class="px-3 py-2 text-right">
-                          <button
-                            onClick={() => handleDeleteEvent(ev.id)}
-                            disabled={deletingEvent === ev.id}
-                            class="text-xs text-red-400 hover:text-red-300 transition-colors opacity-60 hover:opacity-100"
-                          >
-                            {deletingEvent === ev.id ? '…' : 'Delete'}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <GroupChatView
+                  events={filteredEvents}
+                  selected={selected}
+                  onToggle={toggleSelect}
+                  onFilterAuthor={pk => { setAuthorFilter(pk); setConfirmWipe(false) }}
+                  activeAuthor={authorFilter}
+                />
               )}
             </div>
+
+            {/* Selection bar. Sits below the list so it never covers content,
+                and states the exact count before anything is deleted. */}
+            {selected.size > 0 && (
+              <div
+                class="mt-2 px-3 py-2 rounded-lg flex items-center gap-3 flex-wrap"
+                style={{ background: 'rgba(180,249,83,0.07)', border: '1px solid rgba(180,249,83,0.2)', flexShrink: 0 }}
+              >
+                <span class="text-sm font-semibold">{selected.size} selected</span>
+                <button type="button" onClick={selectAllVisible} class="text-xs underline" style={{ color: 'var(--color-text-secondary)' }}>
+                  Select all {orderedIds.length}
+                </button>
+                {authorFilter && (
+                  <button type="button" onClick={() => selectAllFromAuthor(authorFilter)} class="text-xs underline" style={{ color: 'var(--color-text-secondary)' }}>
+                    Select all from this author
+                  </button>
+                )}
+                <button type="button" onClick={clearSelection} class="text-xs underline" style={{ color: 'var(--color-text-secondary)' }}>
+                  Clear
+                </button>
+                <div class="flex-1" />
+                {confirmBulk ? (
+                  <>
+                    <span class="text-xs text-red-400">
+                      Permanently delete {selected.size} event{selected.size !== 1 ? 's' : ''}?
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleBulkDelete}
+                      disabled={bulkDeleting}
+                      class="text-xs px-2 py-1 rounded"
+                      style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.4)' }}
+                    >
+                      {bulkDeleting ? 'Deleting…' : 'Confirm delete'}
+                    </button>
+                    <button type="button" onClick={() => setConfirmBulk(false)} class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmBulk(true)}
+                    class="text-xs px-2 py-1 rounded"
+                    style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}
+                  >
+                    Delete selected
+                  </button>
+                )}
+              </div>
+            )}
 
             <div class="mt-2 text-xs" style={{ color: 'var(--color-text-secondary)', flexShrink: 0 }}>
               {!eventsLoading && !eventsError && (

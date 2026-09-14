@@ -221,6 +221,17 @@ export class AdminApiClient {
     return this.request(`/api/admin/admin-pubkeys/${hex}`, { method: 'DELETE' })
   }
 
+  /**
+   * Delete many events in one request. Returns per-id outcomes so partial
+   * failures can be reported honestly rather than as a single pass/fail.
+   */
+  async bulkDeleteEvents(eventIds: string[]): Promise<BulkDeleteResponse> {
+    return this.request('/api/admin/events/delete', {
+      method: 'POST',
+      body: JSON.stringify({ event_ids: eventIds }),
+    })
+  }
+
   /** Public relay info — no auth required; used for branding the console. */
   async getRelayInfo(): Promise<PublicRelayInfo> {
     return this.request('/api/relay-info')
@@ -361,6 +372,12 @@ export interface AdminPubkeyEntry {
   hex: string
   npub: string
   current_session: boolean
+}
+
+export interface BulkDeleteResponse {
+  deleted: number
+  failed: number
+  results: Array<{ id: string; deleted: boolean; error?: string }>
 }
 
 export interface PublicRelayInfo {

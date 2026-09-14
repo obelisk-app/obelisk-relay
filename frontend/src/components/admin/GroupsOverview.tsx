@@ -42,6 +42,11 @@ export const GroupsOverview = () => {
   const [toast, setToast] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [selectedGroup, setSelectedGroup] = useState<GroupInfo | null>(null)
+  // Insertion order buries the signal at 35+ groups. Sorting by size puts the
+  // groups an operator actually moderates at the top. Sorting by recent
+  // activity would be better still, but that needs a per-group event count and
+  // those cost a full index walk each -- deliberately not done here.
+  const [sortBy, setSortBy] = useState<'members' | 'name'>('members')
   const [browserGroup, setBrowserGroup] = useState<GroupInfo | null>(null)
 
   const showToast = (msg: string) => {
@@ -90,6 +95,10 @@ export const GroupsOverview = () => {
     (g.about || '').toLowerCase().includes(q) ||
     (g.channel_kind || '').toLowerCase().includes(q) ||
     (g.parent || '').toLowerCase().includes(q)
+  ).sort((a, b) =>
+    sortBy === 'members'
+      ? b.member_count - a.member_count || a.name.localeCompare(b.name)
+      : a.name.localeCompare(b.name),
   )
 
   const totalMembers = groups.reduce((sum, group) => sum + group.member_count, 0)
@@ -168,7 +177,17 @@ export const GroupsOverview = () => {
                   <tr style={{ background: 'var(--color-bg-primary)' }}>
                     <th class="text-left px-4 py-3 text-sm font-medium" style={{ color: 'var(--color-text-secondary)' }}>Group</th>
                     <th class="text-left px-4 py-3 text-sm font-medium" style={{ color: 'var(--color-text-secondary)' }}>Access</th>
-                    <th class="text-center px-4 py-3 text-sm font-medium" style={{ color: 'var(--color-text-secondary)' }}>Members</th>
+                    <th class="text-center px-4 py-3 text-sm font-medium" style={{ color: 'var(--color-text-secondary)' }}>
+                      <button
+                        type="button"
+                        onClick={() => setSortBy(prev => (prev === 'members' ? 'name' : 'members'))}
+                        class="underline decoration-dotted"
+                        style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer' }}
+                        title="Toggle sort between member count and name"
+                      >
+                        Members {sortBy === 'members' ? '↓' : ''}
+                      </button>
+                    </th>
                     <th class="text-right px-4 py-3 text-sm font-medium" style={{ color: 'var(--color-text-secondary)' }}>Actions</th>
                   </tr>
                 </thead>

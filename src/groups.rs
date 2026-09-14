@@ -848,6 +848,24 @@ impl Groups {
     }
 
     /// Admin-only: delete a single event by ID across all scopes.
+    /// Admin-only: delete many events in one call.
+    ///
+    /// Returns `(deleted_id, error)` pairs per input so the caller can report
+    /// partial results honestly. Done server-side rather than as N requests
+    /// from the browser: one auth check, one pass over the scopes, and it
+    /// cannot half-apply because the operator closed the tab.
+    pub async fn admin_delete_events(
+        &self,
+        event_id_hexes: &[String],
+    ) -> Vec<(String, Option<String>)> {
+        let mut results = Vec::with_capacity(event_id_hexes.len());
+        for id in event_id_hexes {
+            let outcome = self.admin_delete_event(id).await;
+            results.push((id.clone(), outcome.err().map(|e| e.to_string())));
+        }
+        results
+    }
+
     pub async fn admin_delete_event(&self, event_id_hex: &str) -> Result<(), Error> {
         let event_id =
             EventId::from_hex(event_id_hex).map_err(|_| Error::notice("Invalid event ID"))?;

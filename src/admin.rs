@@ -1407,6 +1407,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/blacklist/{hex}", delete(handle_blacklist_remove))
         .route("/groups/{id}/events", get(handle_group_events))
         .route("/events/{event_id}", delete(handle_event_delete))
+        .route("/events/delete", post(handle_events_bulk_delete))
         .route(
             "/groups/{id}/members/{pubkey}",
             delete(handle_group_member_remove),
@@ -2594,6 +2595,78 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
         .get_or_init(|| RwLock::new(None))
         .write() = Some(response);
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct BulkDeleteRequest {
+    event_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BulkDeleteResult {
+    id: String,
+    deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BulkDeleteResponse {
+    deleted: usize,
+    failed: usize,
+    results: Vec<BulkDeleteResult>,
+}
+
+/// Delete a batch of events. Reports per-id outcomes rather than a single
+/// pass/fail so the UI can say exactly what did and did not go.
+async fn handle_events_bulk_delete(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    if req.event_ids.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "No events selected",
+        ));
+    }
+    // Bound the batch so one request cannot pin the database for minutes.
+    if req.event_ids.len() > 500 {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Too many events in one request; delete up to 500 at a time",
+        ));
+    }
+
+    let outcomes = state
+        .http_state
+        .groups
+        .admin_delete_events(&req.event_ids)
+        .await;
+
+    let results: Vec<BulkDeleteResult> = outcomes
+        .into_iter()
+        .map(|(id, error)| BulkDeleteResult {
+            id,
+            deleted: error.is_none(),
+            error,
+        })
+        .collect();
+
+    let deleted = results.iter().filter(|r| r.deleted).count();
+    let failed = results.len() - deleted;
+    info!("Admin bulk delete: {} deleted, {} failed", deleted, failed);
+
+    Ok(Json(BulkDeleteResponse {
+        deleted,
+        failed,
+        results,
+    }))
 }
 
 async fn handle_relay_info(State(state): State<Arc<ServerState>>) -> impl IntoResponse {

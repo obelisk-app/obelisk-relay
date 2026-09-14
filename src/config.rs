@@ -31,6 +31,11 @@ pub struct RelaySettings {
     /// Optional advertised relay description (NIP-11 / admin info).
     #[serde(default)]
     pub relay_description: Option<String>,
+    /// Optional relay icon, advertised as NIP-11 `icon` and used as the
+    /// browser favicon so multi-instance operators can tell deployments apart.
+    /// Either an `https://` URL or a small `data:image/...;base64,` URI.
+    #[serde(default)]
+    pub relay_icon: Option<String>,
     /// If set, events of `prune_kinds` older than this duration can be deleted by
     /// a background task, but only when `enable_event_pruner` is explicitly true.
     /// Retention config alone is kept as inert policy metadata to prevent accidental
@@ -254,6 +259,7 @@ pub struct Settings {
     pub max_subscriptions: usize,
     pub relay_name: Option<String>,
     pub relay_description: Option<String>,
+    pub relay_icon: Option<String>,
     pub event_retention: Option<Duration>,
     pub enable_event_pruner: bool,
     pub prune_interval: Option<Duration>,

@@ -69,6 +69,8 @@ pub struct ServerState {
     pub pruner_config: Option<PrunerConfig>,
     pub relay_name: String,
     pub relay_description: String,
+    /// NIP-11 icon URL / data URI, if the operator set one.
+    pub relay_icon: Option<String>,
     pub supported_nips: Vec<u16>,
     pub obelisk_index: Option<Arc<ObeliskIndex>>,
     pub obelisk_http_limiter: Arc<ObeliskHttpLimiter>,
@@ -350,6 +352,7 @@ pub async fn run_server(
             "NIP-29 groups relay for Obelisk. Auth-required, whitelisted access.".to_string()
         }
     });
+    let relay_icon = settings.relay_icon.clone().filter(|s| !s.trim().is_empty());
     let supported_nips =
         configured_supported_nips(advertise_indexed_search, settings.obelisk_index.enabled);
 
@@ -361,7 +364,7 @@ pub async fn run_server(
         supported_nips: supported_nips.clone(),
         software: "groups_relay".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        icon: None,
+        icon: relay_icon.clone(),
     };
     let obelisk_capability = settings
         .obelisk_index
@@ -439,6 +442,7 @@ pub async fn run_server(
         pruner_config: pruner_config_opt,
         relay_name: relay_name.clone(),
         relay_description: relay_description.clone(),
+        relay_icon: relay_icon.clone(),
         supported_nips: supported_nips.clone(),
         obelisk_index: obelisk_index.clone(),
         obelisk_http_limiter: Arc::new(ObeliskHttpLimiter::default()),

@@ -38,7 +38,9 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
     relay_name: '',
     relay_description: '',
     relay_url: '',
+    relay_icon: '',
   })
+  const [iconError, setIconError] = useState<string | null>(null)
   const [admins, setAdmins] = useState<AdminPubkeyEntry[]>([])
   const [newAdminPubkey, setNewAdminPubkey] = useState('')
   const [backups, setBackups] = useState<BackupEntry[]>([])
@@ -73,6 +75,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
         relay_name: identityData.relay_name,
         relay_description: identityData.relay_description,
         relay_url: identityData.relay_url,
+        relay_icon: identityData.relay_icon ?? '',
       })
       setAdmins(adminData)
       setBackups(backupData)
@@ -331,6 +334,80 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
                 onInput={e => setIdentityForm(prev => ({ ...prev, relay_description: (e.target as HTMLTextAreaElement).value }))}
               />
             </label>
+
+            {/* Relay icon: advertised as NIP-11 `icon`, shown top-left in this
+                console, and used as the browser favicon so operators running
+                several instances can tell them apart at a glance. */}
+            <div class="mt-4">
+              <span class="block text-sm font-semibold mb-2">Relay icon</span>
+              <div class="flex items-start gap-4">
+                <div
+                  class="flex-shrink-0 flex items-center justify-center overflow-hidden"
+                  style={{
+                    width: '56px',
+                    height: '56px',
+                    borderRadius: '10px',
+                    border: '1px solid var(--color-border)',
+                    background: 'var(--color-bg-primary)',
+                  }}
+                >
+                  {identityForm.relay_icon
+                    ? <img src={identityForm.relay_icon} alt="" class="w-full h-full object-cover" />
+                    : <span class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>none</span>}
+                </div>
+                <div class="flex-1 min-w-0 space-y-2">
+                  <input
+                    type="text"
+                    class="w-full"
+                    placeholder="https://example.com/icon.png"
+                    value={identityForm.relay_icon.startsWith('data:') ? '' : identityForm.relay_icon}
+                    onInput={e => {
+                      setIconError(null)
+                      setIdentityForm(prev => ({ ...prev, relay_icon: (e.target as HTMLInputElement).value }))
+                    }}
+                  />
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/svg+xml,image/webp,image/x-icon"
+                      class="text-xs"
+                      onChange={e => {
+                        const file = (e.target as HTMLInputElement).files?.[0]
+                        if (!file) return
+                        // Embedded as a data URI rather than uploaded: the relay
+                        // is not an image host, and this keeps the icon inside
+                        // the config the operator already backs up.
+                        if (file.size > 180 * 1024) {
+                          setIconError('Image is too large. Use one under 180 KB, or link to a URL.')
+                          return
+                        }
+                        const reader = new FileReader()
+                        reader.onload = () => {
+                          setIconError(null)
+                          setIdentityForm(prev => ({ ...prev, relay_icon: String(reader.result) }))
+                        }
+                        reader.onerror = () => setIconError('Could not read that file.')
+                        reader.readAsDataURL(file)
+                      }}
+                    />
+                    {identityForm.relay_icon && (
+                      <button
+                        type="button"
+                        class="lc-pill text-xs"
+                        style={{ borderRadius: '6px', padding: '4px 10px' }}
+                        onClick={() => { setIconError(null); setIdentityForm(prev => ({ ...prev, relay_icon: '' })) }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <p class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                    Paste an image URL or upload a small image. Applies after restart.
+                  </p>
+                  {iconError && <p class="text-xs text-red-400">{iconError}</p>}
+                </div>
+              </div>
+            </div>
 
             <div class="admin-settings-actions">
               <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>

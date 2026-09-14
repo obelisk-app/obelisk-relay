@@ -399,6 +399,27 @@ body {
   color: #fbbf24;
 }
 
+/*
+ * Shared height for the sidebar header and the page header.
+ *
+ * They previously used independent padding (p-5 vs px-5/py-7) over different
+ * content, so their 1px bottom borders landed ~24px apart and the divider
+ * stepped where the two columns meet. A single min-height with centred content
+ * keeps them aligned no matter what goes inside — which matters because the
+ * sidebar header now also carries a 32px relay icon.
+ */
+.admin-header-bar {
+  display: flex;
+  align-items: center;
+  min-height: var(--admin-header-height, 112px);
+}
+
+@media (max-width: 767px) {
+  .admin-header-bar {
+    min-height: var(--admin-header-height-sm, 84px);
+  }
+}
+
 /* Destructive state — currently only "events are being deleted". */
 .admin-status-badge-danger {
   border-color: rgba(248, 113, 113, 0.3);

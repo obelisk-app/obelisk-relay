@@ -263,6 +263,8 @@ struct AddAdminPubkeyRequest {
 #[derive(Serialize)]
 struct RelayIdentityResponse {
     relay_name: String,
+    /// NIP-11 icon: an https:// URL or a small data: URI. Empty when unset.
+    relay_icon: String,
     relay_description: String,
     relay_url: String,
     relay_pubkey: String,
@@ -271,6 +273,8 @@ struct RelayIdentityResponse {
 
 #[derive(Deserialize)]
 struct RelayIdentityRequest {
+    #[serde(default)]
+    relay_icon: String,
     relay_name: String,
     relay_description: String,
     relay_url: String,
@@ -372,6 +376,8 @@ struct StatsResponse {
 pub struct RelayInfoResponse {
     pub name: String,
     pub description: String,
+    /// Relay icon (URL or data URI); empty when unset.
+    pub icon: String,
     pub group_count: usize,
     pub supported_nips: Vec<u16>,
 }
@@ -994,10 +1000,72 @@ fn relay_identity_response(state: &ServerState, restart_required: bool) -> Relay
             "relay_description",
             &state.relay_description,
         ),
+        relay_icon: read_yaml_scalar(
+            config_dir,
+            "relay_icon",
+            state.relay_icon.as_deref().unwrap_or(""),
+        ),
         relay_url: read_yaml_scalar(config_dir, "relay_url", &state.relay_url),
         relay_pubkey: state.relay_pubkey.clone(),
         restart_required,
     }
+}
+
+/// Largest accepted `data:` icon, before base64 expansion. The value is
+/// inlined into settings.local.yml and echoed in every NIP-11 response, so it
+/// has to stay small — this is a favicon, not an image host.
+const MAX_ICON_DATA_URI_BYTES: usize = 256 * 1024;
+
+/// Validate a relay icon before it is persisted and advertised.
+///
+/// Accepts an empty string (unset), an `https://`/`http://` URL, or a
+/// `data:image/...;base64,` URI. Anything else is rejected rather than stored:
+/// this value is served to every client that reads the NIP-11 document and is
+/// injected into the admin page's `<link rel="icon">`, so `javascript:` and
+/// other schemes must never reach it.
+fn validate_relay_icon(icon: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    if icon.is_empty() {
+        return Ok(String::new());
+    }
+
+    if let Some(rest) = icon.strip_prefix("data:") {
+        if !rest.starts_with("image/") {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Icon data URI must be an image",
+            ));
+        }
+        if !rest.contains(";base64,") {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Icon data URI must be base64 encoded",
+            ));
+        }
+        if icon.len() > MAX_ICON_DATA_URI_BYTES {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Icon is too large; use an image under 256 KB or link to a URL",
+            ));
+        }
+        return Ok(icon.to_string());
+    }
+
+    if icon.starts_with("https://") || icon.starts_with("http://") {
+        // Reject embedded quotes/newlines: this is written into YAML and into
+        // an HTML attribute.
+        if icon.contains(['"', '\'', '\n', '\r', '<', '>']) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Icon URL contains invalid characters",
+            ));
+        }
+        return Ok(icon.to_string());
+    }
+
+    Err(error_response(
+        StatusCode::BAD_REQUEST,
+        "Icon must be an https:// URL or a data:image/... URI",
+    ))
 }
 
 fn persist_relay_identity_settings(
@@ -1005,6 +1073,7 @@ fn persist_relay_identity_settings(
     relay_name: &str,
     relay_description: &str,
     relay_url: &str,
+    relay_icon: &str,
 ) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(config_dir)?;
     let path = config_dir.join(SETTINGS_LOCAL_FILE);
@@ -1016,6 +1085,7 @@ fn persist_relay_identity_settings(
         &yaml_quote(relay_description),
     );
     let contents = upsert_relay_value(contents, "relay_url", &yaml_quote(relay_url));
+    let contents = upsert_relay_value(contents, "relay_icon", &yaml_quote(relay_icon));
     std::fs::write(path, contents)
 }
 
@@ -1863,11 +1933,14 @@ async fn handle_relay_identity_update(
         )
     })?;
 
+    let relay_icon = validate_relay_icon(req.relay_icon.trim())?;
+
     persist_relay_identity_settings(
         StdPath::new(&state.config_dir),
         req.relay_name.trim(),
         req.relay_description.trim(),
         req.relay_url.trim(),
+        &relay_icon,
     )
     .map_err(|e| {
         warn!("Failed to persist relay identity settings: {}", e);
@@ -1879,6 +1952,7 @@ async fn handle_relay_identity_update(
 
     Ok(Json(RelayIdentityResponse {
         relay_name: req.relay_name.trim().to_string(),
+        relay_icon,
         relay_description: req.relay_description.trim().to_string(),
         relay_url: req.relay_url.trim().to_string(),
         relay_pubkey: state.relay_pubkey.clone(),
@@ -2533,6 +2607,7 @@ async fn handle_relay_info(State(state): State<Arc<ServerState>>) -> impl IntoRe
     Json(RelayInfoResponse {
         name: state.relay_name.clone(),
         description: state.relay_description.clone(),
+        icon: state.relay_icon.clone().unwrap_or_default(),
         group_count,
         supported_nips: state.supported_nips.clone(),
     })

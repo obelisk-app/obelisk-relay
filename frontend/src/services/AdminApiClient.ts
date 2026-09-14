@@ -221,6 +221,11 @@ export class AdminApiClient {
     return this.request(`/api/admin/admin-pubkeys/${hex}`, { method: 'DELETE' })
   }
 
+  /** Public relay info — no auth required; used for branding the console. */
+  async getRelayInfo(): Promise<PublicRelayInfo> {
+    return this.request('/api/relay-info')
+  }
+
   async getRelayIdentity(): Promise<RelayIdentity> {
     return this.request('/api/admin/relay-identity')
   }
@@ -229,6 +234,7 @@ export class AdminApiClient {
     relay_name: string
     relay_description: string
     relay_url: string
+    relay_icon: string
   }): Promise<RelayIdentity> {
     return this.request('/api/admin/relay-identity', {
       method: 'POST',
@@ -357,8 +363,19 @@ export interface AdminPubkeyEntry {
   current_session: boolean
 }
 
+export interface PublicRelayInfo {
+  name: string
+  description: string
+  /** Relay icon (URL or data URI); empty when unset. */
+  icon: string
+  group_count: number
+  supported_nips: number[]
+}
+
 export interface RelayIdentity {
   relay_name: string
+  /** NIP-11 icon: https:// URL or data: URI. Empty when unset. */
+  relay_icon: string
   relay_description: string
   relay_url: string
   relay_pubkey: string

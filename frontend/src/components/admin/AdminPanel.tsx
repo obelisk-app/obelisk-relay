@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks'
-import { adminApi, type SetupStatus } from '../../services/AdminApiClient'
+import { adminApi, type PublicRelayInfo, type SetupStatus } from '../../services/AdminApiClient'
 import { AdminAuth } from './AdminAuth'
 import { AdminSetupWizard } from './AdminSetupWizard'
 import { Dashboard } from './Dashboard'
@@ -14,6 +14,7 @@ import {
   GroupsIcon,
   OverviewIcon,
   ReferencesIcon,
+  RelayIcon,
   SettingsIcon,
   StorageIcon,
 } from './icons'
@@ -100,6 +101,25 @@ export const AdminPanel = (_props: { path?: string }) => {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
   const [globalSearch, setGlobalSearch] = useState('')
+  const [relayInfo, setRelayInfo] = useState<PublicRelayInfo | null>(null)
+  const [iconBroken, setIconBroken] = useState(false)
+
+  // Brand the console from the relay's own NIP-11 identity, and point the
+  // browser tab at the same icon so several deployments stay distinguishable.
+  useEffect(() => {
+    let cancelled = false
+    adminApi.getRelayInfo()
+      .then(info => {
+        if (cancelled) return
+        setRelayInfo(info)
+        if (!info.icon) return
+        const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+          ?? document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'icon' }))
+        link.href = info.icon
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -200,9 +220,28 @@ export const AdminPanel = (_props: { path?: string }) => {
           content-heavy tabs, and md:flex-1 on the nav pushes Open Chat / Sign
           out thousands of pixels down, below the fold. */}
       <aside class="md:w-72 flex-shrink-0 flex flex-col md:sticky md:top-0 md:h-screen" style={{ background: 'var(--color-bg-secondary)', borderRight: '1px solid var(--color-border)' }}>
-        <div class="p-5" style={{ borderBottom: '1px solid var(--color-border)' }}>
-          <a href="/" class="text-lg font-bold block" style={{ color: '#b4f953' }}>Obelisk Relay</a>
-          <div class="text-xs mt-1" style={{ color: 'var(--color-text-secondary)' }}>Admin console</div>
+        {/* admin-header-bar gives this the same height as the page header on
+            the right, so the two bottom rules meet as one continuous line. */}
+        <div class="admin-header-bar px-5" style={{ borderBottom: '1px solid var(--color-border)' }}>
+          <a href="/" class="flex items-center gap-2.5 min-w-0">
+            {relayInfo?.icon && !iconBroken
+              ? <img
+                  src={relayInfo.icon}
+                  alt=""
+                  class="flex-shrink-0 object-cover"
+                  style={{ width: '32px', height: '32px', borderRadius: '7px' }}
+                  // A configured-but-unreachable URL would otherwise render as
+                  // a broken-image glyph in the console header.
+                  onError={() => setIconBroken(true)}
+                />
+              : <RelayIcon class="w-7 h-7 flex-shrink-0" />}
+            <span class="min-w-0">
+              <span class="block text-lg font-bold truncate" style={{ color: '#b4f953' }}>
+                {relayInfo?.name || 'Obelisk Relay'}
+              </span>
+              <span class="block text-xs" style={{ color: 'var(--color-text-secondary)' }}>Admin console</span>
+            </span>
+          </a>
         </div>
 
         {/* md:min-h-0 lets the nav shrink below its content height (flex items
@@ -258,8 +297,8 @@ export const AdminPanel = (_props: { path?: string }) => {
       </aside>
 
       <main class="flex-1 overflow-auto">
-        <div class="px-5 md:px-8 py-5 md:py-7" style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(255,255,255,0.015)' }}>
-          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div class="admin-header-bar px-5 md:px-8" style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(255,255,255,0.015)' }}>
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 w-full">
             <div>
               <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>Admin</div>
               <h1 class="mt-1 text-2xl font-bold">{active.label}</h1>

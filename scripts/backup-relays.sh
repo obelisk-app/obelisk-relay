@@ -53,10 +53,15 @@ for relay in public lacrypta; do
     -v "$stage/$relay/db:/backup-db" \
     "$image" --db-path /backup-db \
     >"$stage/$relay/integrity.txt"
+  # Record integrity, do not gate the backup on it. Stale entries in the
+  # deleted-ids index accumulate on a long-running relay (both production
+  # relays currently report some), and aborting here means no backup at all --
+  # strictly worse than a backup of a database with a few stale index entries.
+  # The events themselves are intact; scripts/relay-data.sh round-trips such a
+  # database into a clean one. See docs/export-import.md.
   grep -Fq "No corrupted entries found." "$stage/$relay/integrity.txt" || {
-    cat "$stage/$relay/integrity.txt" >&2
-    echo "Integrity check failed for $relay backup." >&2
-    exit 1
+    echo "WARNING: $relay reports index corruption; backup retained anyway:" >&2
+    sed -n '1,4p' "$stage/$relay/integrity.txt" >&2
   }
 done
 

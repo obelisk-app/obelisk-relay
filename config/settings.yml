@@ -1,9 +1,11 @@
 # Default relay configuration
 relay:
-  # Relay secret key (hex format)
-  # This is a test key, replace with your own in settings.local.yml
-  # pubkey is 385c3a6ec0b9d57a4330dbd6284989be5bd00e41c535f9ca39b6ae7c521b81cd
-  relay_secret_key: "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e"
+  # Relay identity.
+  # No key here on purpose. This file is committed, so any key in it is
+  # public. The relay generates a unique identity on first start and writes it
+  # to settings.local.yml (which is gitignored). See docs/export-import.md for
+  # what the relay identity controls.
+  relay_secret_key: ""
   local_addr: "0.0.0.0:8080"
   relay_url: "ws://example.local:8080"
   db_path: "/app/db"

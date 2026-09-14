@@ -116,9 +116,18 @@ async fn async_main() -> Result<()> {
 
     let args = Args::parse();
     let config = config::Config::new(&args.config_dir).context("Failed to load configuration")?;
-    let relay_settings = config
+    let mut relay_settings = config
         .get_settings()
         .context("Failed to get relay settings")?;
+
+    // A fresh deployment ships no key, and older ones inherited the committed
+    // default whose private half is public. Mint a unique identity before
+    // anything signs with it.
+    relay_settings.relay_secret_key = config::ensure_relay_identity(
+        std::path::Path::new(&args.config_dir),
+        &relay_settings.relay_secret_key,
+    )
+    .context("Failed to establish relay identity")?;
 
     let mut settings = config::Settings {
         relay_url: relay_settings.relay_url.clone(),

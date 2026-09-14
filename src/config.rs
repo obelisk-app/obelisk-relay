@@ -9,8 +9,21 @@ use tracing::info;
 const ENVIRONMENT_PREFIX: &str = "NIP29";
 const CONFIG_SEPARATOR: &str = "__";
 
+/// The relay identity that used to ship in `config/settings.yml`.
+///
+/// It was committed to a public repository, so its private half is known to
+/// anyone. Any relay still running on it can be impersonated and can have its
+/// NIP-29 group state (kinds 39000-39003) forged. It is recognised here so a
+/// deployment that inherited it is migrated to a unique key on next start
+/// rather than silently continuing to use a compromised identity.
+pub const COMPROMISED_DEFAULT_SECRET_KEY: &str =
+    "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e";
+
 #[derive(Debug, Deserialize)]
 pub struct RelaySettings {
+    /// Relay identity. Empty on a fresh deployment — `ensure_relay_identity`
+    /// generates and persists a unique key before the relay starts.
+    #[serde(default)]
     pub relay_secret_key: String,
     pub local_addr: String,
     pub relay_url: String,
@@ -177,6 +190,128 @@ fn default_obelisk_message_requests_per_minute() -> u32 {
 
 fn default_obelisk_reconcile_interval() -> Duration {
     Duration::from_secs(5 * 60)
+}
+
+/// Make sure the relay has a unique identity of its own, generating one on
+/// first start.
+///
+/// A fresh deployment should be "start the container, open the UI" — but that
+/// only works if the relay can mint its own key. Without this, an operator who
+/// never set `relay_secret_key` silently ran on the committed default
+/// ([`COMPROMISED_DEFAULT_SECRET_KEY`]), whose private half is public.
+///
+/// Returns the hex secret key to use. Writes to `settings.local.yml` when a new
+/// key is minted so the identity survives a restart — a relay whose pubkey
+/// changed on every boot would invalidate its own group state each time.
+pub fn ensure_relay_identity(config_dir: &Path, current: &str) -> Result<String, anyhow::Error> {
+    let trimmed = current.trim();
+
+    let reason = if trimmed.is_empty() {
+        "no relay_secret_key configured"
+    } else if trimmed.eq_ignore_ascii_case(COMPROMISED_DEFAULT_SECRET_KEY) {
+        "relay_secret_key is the publicly-known default from config/settings.yml"
+    } else {
+        return Ok(trimmed.to_string());
+    };
+
+    let keys = Keys::generate();
+    let secret_hex = keys.secret_key().to_secret_hex();
+
+    let path = config_dir.join("settings.local.yml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+    let updated = upsert_relay_secret_key(&existing, &secret_hex);
+    std::fs::write(&path, updated)?;
+
+    info!(
+        "Generated a new relay identity ({}): pubkey {}. Persisted to {}.",
+        reason,
+        keys.public_key().to_hex(),
+        path.display()
+    );
+
+    Ok(secret_hex)
+}
+
+/// Insert or replace `relay_secret_key` under the top-level `relay:` key,
+/// preserving everything else in the file.
+fn upsert_relay_secret_key(contents: &str, secret_hex: &str) -> String {
+    let line = format!("  relay_secret_key: \"{secret_hex}\"");
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+
+    for raw in contents.lines() {
+        if !replaced && raw.trim_start().starts_with("relay_secret_key:") {
+            out.push(line.clone());
+            replaced = true;
+        } else {
+            out.push(raw.to_string());
+        }
+    }
+
+    if !replaced {
+        if !out.iter().any(|l| l.trim_start().starts_with("relay:")) {
+            out.insert(0, "relay:".to_string());
+        }
+        let insert_at = out
+            .iter()
+            .position(|l| l.trim_start().starts_with("relay:"))
+            .map_or(out.len(), |i| i + 1);
+        out.insert(insert_at, line);
+    }
+
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_an_existing_key_in_place() {
+        let out = upsert_relay_secret_key(
+            "relay:\n  relay_secret_key: \"old\"\n  relay_url: \"ws://x\"\n",
+            "new",
+        );
+        assert!(out.contains("relay_secret_key: \"new\""));
+        assert!(!out.contains("\"old\""));
+        // Everything else survives.
+        assert!(out.contains("relay_url: \"ws://x\""));
+    }
+
+    #[test]
+    fn inserts_under_existing_relay_key() {
+        let out = upsert_relay_secret_key("relay:\n  relay_url: \"ws://x\"\n", "k");
+        assert!(out.starts_with("relay:\n  relay_secret_key: \"k\""));
+        assert!(out.contains("relay_url: \"ws://x\""));
+    }
+
+    #[test]
+    fn creates_the_relay_key_when_absent() {
+        let out = upsert_relay_secret_key("", "k");
+        assert!(out.contains("relay:"));
+        assert!(out.contains("relay_secret_key: \"k\""));
+    }
+
+    #[test]
+    fn keeps_an_operator_supplied_key() {
+        let dir = std::env::temp_dir();
+        let key = "a".repeat(64);
+        assert_eq!(ensure_relay_identity(&dir, &key).unwrap(), key);
+    }
+
+    #[test]
+    fn regenerates_the_publicly_known_default() {
+        let dir = std::env::temp_dir().join("obelisk-identity-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = ensure_relay_identity(&dir, COMPROMISED_DEFAULT_SECRET_KEY).unwrap();
+        assert_ne!(out, COMPROMISED_DEFAULT_SECRET_KEY);
+        assert_eq!(out.len(), 64);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 impl RelaySettings {

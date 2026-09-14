@@ -1145,9 +1145,7 @@ impl Group {
         )];
 
         if self.metadata.restricted && !is_member {
-            return Err(Error::restricted(
-                "Only members can post in this group",
-            ));
+            return Err(Error::restricted("Only members can post in this group"));
         }
 
         // Preserve legacy open-group auto-join behavior. Unrestricted closed

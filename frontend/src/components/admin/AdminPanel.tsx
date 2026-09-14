@@ -9,13 +9,34 @@ import { ReferenceAccountsManager } from './ReferenceAccountsManager'
 import { RelaySettings } from './RelaySettings'
 import { StorageManager } from './StorageManager'
 import { SearchIcon } from './SearchIcon'
+import {
+  AccessIcon,
+  GroupsIcon,
+  OverviewIcon,
+  ReferencesIcon,
+  SettingsIcon,
+  StorageIcon,
+} from './icons'
 
 type Tab = 'dashboard' | 'whitelist' | 'reference-accounts' | 'groups' | 'storage' | 'settings'
+
+type IconComponent = (props: { class?: string }) => preact.JSX.Element
 
 interface NavItem {
   id: Tab
   label: string
   description: string
+  icon: IconComponent
+}
+
+/** Icon per destination, shared by the sidebar nav and the search results. */
+const TAB_ICONS: Record<Tab, IconComponent> = {
+  dashboard: OverviewIcon,
+  whitelist: AccessIcon,
+  'reference-accounts': ReferencesIcon,
+  groups: GroupsIcon,
+  storage: StorageIcon,
+  settings: SettingsIcon,
 }
 
 interface SearchTarget {
@@ -26,12 +47,12 @@ interface SearchTarget {
 }
 
 const tabs: NavItem[] = [
-  { id: 'dashboard', label: 'Overview', description: 'Relay health' },
-  { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks' },
-  { id: 'reference-accounts', label: 'References', description: 'Follow sync sources' },
-  { id: 'groups', label: 'Groups', description: 'Metadata and moderation' },
-  { id: 'storage', label: 'Storage', description: 'Database and pruning' },
-  { id: 'settings', label: 'Settings', description: 'Reset and recovery' },
+  { id: 'dashboard', label: 'Overview', description: 'Relay health', icon: OverviewIcon },
+  { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks', icon: AccessIcon },
+  { id: 'reference-accounts', label: 'References', description: 'Follow sync sources', icon: ReferencesIcon },
+  { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon },
+  { id: 'storage', label: 'Storage', description: 'Database and pruning', icon: StorageIcon },
+  { id: 'settings', label: 'Settings', description: 'Reset and recovery', icon: SettingsIcon },
 ]
 
 const searchTargets: SearchTarget[] = [
@@ -203,9 +224,14 @@ export const AdminPanel = (_props: { path?: string }) => {
                   color: selected ? '#b4f953' : 'var(--color-text-primary)',
                 }}
               >
-                <span class="block text-sm font-semibold">{tab.label}</span>
-                <span class="block text-xs mt-0.5" style={{ color: selected ? 'rgba(180,249,83,0.78)' : 'var(--color-text-secondary)' }}>
-                  {tab.description}
+                <span class="flex items-center gap-2.5">
+                  <tab.icon class="w-[18px] h-[18px] flex-shrink-0 opacity-80" />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-semibold">{tab.label}</span>
+                    <span class="block text-xs mt-0.5" style={{ color: selected ? 'rgba(180,249,83,0.78)' : 'var(--color-text-secondary)' }}>
+                      {tab.description}
+                    </span>
+                  </span>
                 </span>
               </button>
             )
@@ -257,8 +283,16 @@ export const AdminPanel = (_props: { path?: string }) => {
                         onClick={() => openSearchResult(result.id)}
                         class="admin-search-result"
                       >
-                        <span class="block text-sm font-semibold">{result.title}</span>
-                        <span class="block text-xs mt-0.5">{result.description}</span>
+                        <span class="flex items-start gap-2.5">
+                          {(() => {
+                            const Icon = TAB_ICONS[result.id]
+                            return <Icon class="w-4 h-4 flex-shrink-0 mt-0.5 opacity-70" />
+                          })()}
+                          <span class="min-w-0">
+                            <span class="block text-sm font-semibold">{result.title}</span>
+                            <span class="block text-xs mt-0.5">{result.description}</span>
+                          </span>
+                        </span>
                       </button>
                     ))
                   ) : (

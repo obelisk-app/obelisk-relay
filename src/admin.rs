@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -158,6 +158,59 @@ struct StorageSettingsResponse {
     runs: u64,
     last_run_unix: i64,
     restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct StorageStatsQuery {
+    /// Force a background recount even if the cached snapshot is still fresh.
+    refresh: Option<bool>,
+}
+
+/// Envelope so the UI can distinguish "no snapshot yet, one is being built"
+/// from "here are the numbers". Counting a multi-GB database takes longer than
+/// an HTTP request may live, so the client polls instead of waiting.
+#[derive(Serialize, Clone)]
+struct StorageStatsEnvelope {
+    /// A scan is running right now; poll again shortly.
+    computing: bool,
+    /// Last completed snapshot, if there has ever been one. May be stale while
+    /// `computing` is true — `stats.computed_at` says how stale.
+    stats: Option<StorageStatsResponse>,
+}
+
+#[derive(Serialize, Clone)]
+struct StorageKindStat {
+    kind: u16,
+    count: usize,
+}
+
+#[derive(Serialize, Clone)]
+struct StorageStatsResponse {
+    /// Events examined for the kind breakdown below. This is a newest-first
+    /// SAMPLE, not a total — exact per-kind counts cost >12s each on the
+    /// production database, which is not affordable as a UI refresh.
+    sampled_events: usize,
+    /// The sample cap. If `sampled_events < sample_size`, the whole database
+    /// was examined and the breakdown is exhaustive after all.
+    sample_size: usize,
+    /// True when the sample covered every stored event.
+    sample_is_complete: bool,
+    kinds: Vec<StorageKindStat>,
+    newest_event_unix: u64,
+    /// Oldest timestamp reached by the sample.
+    oldest_sampled_unix: u64,
+    scope_count: usize,
+    db_size_bytes: u64,
+    db_file_count: u64,
+    /// How many events a prune run would delete right now under the currently
+    /// configured retention window and kinds — whether or not pruning is armed.
+    prune_preview: usize,
+    prune_preview_retention_days: u32,
+    prune_preview_kinds: Vec<u16>,
+    /// Unix seconds these figures were computed; they are served from a short
+    /// cache because each refresh walks one index range per kind.
+    computed_at: i64,
+    cached: bool,
 }
 
 #[derive(Deserialize)]
@@ -1264,6 +1317,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/groups", get(handle_groups))
         .route("/groups/{id}", delete(handle_group_delete))
         .route("/stats", get(handle_stats))
+        .route("/storage/stats", get(handle_storage_stats))
         .route(
             "/reference-accounts",
             get(handle_reference_accounts_list).post(handle_reference_accounts_add),
@@ -2367,6 +2421,107 @@ async fn handle_stats(
     }))
 }
 
+/// Storage statistics: what is stored, by kind, and what pruning would delete.
+///
+/// `?refresh=1` bypasses the cache. Without it a snapshot up to
+/// `STORAGE_STATS_TTL_SECS` old is served, flagged with `cached` and
+/// `computed_at` so the UI can show its age rather than implying live data.
+async fn handle_storage_stats(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<StorageStatsQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let cache = STORAGE_STATS_CACHE.get_or_init(|| RwLock::new(None));
+    let now = Timestamp::now().as_secs() as i64;
+    let snapshot = cache.read().clone();
+
+    let fresh = snapshot
+        .as_ref()
+        .is_some_and(|s| now - s.computed_at < STORAGE_STATS_TTL_SECS);
+
+    if fresh && !params.refresh.unwrap_or(false) {
+        return Ok(Json(StorageStatsEnvelope {
+            computing: STORAGE_STATS_COMPUTING.load(Ordering::Relaxed),
+            stats: snapshot.map(|s| StorageStatsResponse { cached: true, ..s }),
+        }));
+    }
+
+    // Stale or forced: kick off a scan and answer immediately with whatever we
+    // already have. compare_exchange keeps concurrent callers to one scan.
+    if STORAGE_STATS_COMPUTING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let state_for_scan = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(e) = refresh_storage_stats(&state_for_scan).await {
+                warn!("Storage stats refresh failed: {}", e);
+            }
+            STORAGE_STATS_COMPUTING.store(false, Ordering::Release);
+        });
+    }
+
+    Ok(Json(StorageStatsEnvelope {
+        computing: true,
+        stats: snapshot.map(|s| StorageStatsResponse { cached: true, ..s }),
+    }))
+}
+
+/// Walk the database and refresh the cached storage snapshot. Slow by nature —
+/// always called from a background task, never inline in a request.
+async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
+    let config_dir = StdPath::new(&state.config_dir);
+    // Preview against what is configured on disk, not against what is running:
+    // an operator reviewing a not-yet-armed setting needs to see its blast
+    // radius before enabling it.
+    let retention_days =
+        parse_duration_days(&read_yaml_scalar(config_dir, "event_retention", "0d"), 0);
+    let prune_kinds = read_prune_kinds(config_dir);
+
+    let stats = state
+        .http_state
+        .groups
+        .admin_storage_stats(STORAGE_SAMPLE_SIZE, &prune_kinds, retention_days)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (db_size_bytes, db_file_count) = directory_stats(StdPath::new(&state.db_path));
+
+    let response = StorageStatsResponse {
+        sampled_events: stats.sampled_events,
+        sample_size: stats.sample_size,
+        sample_is_complete: stats.sampled_events < stats.sample_size,
+        kinds: stats
+            .kinds
+            .iter()
+            .map(|k| StorageKindStat {
+                kind: k.kind,
+                count: k.count,
+            })
+            .collect(),
+        newest_event_unix: stats.newest_event_unix,
+        oldest_sampled_unix: stats.oldest_sampled_unix,
+        scope_count: stats.scope_count,
+        db_size_bytes,
+        db_file_count,
+        prune_preview: stats.prune_preview,
+        prune_preview_retention_days: retention_days,
+        prune_preview_kinds: prune_kinds,
+        computed_at: Timestamp::now().as_secs() as i64,
+        cached: false,
+    };
+
+    *STORAGE_STATS_CACHE
+        .get_or_init(|| RwLock::new(None))
+        .write() = Some(response);
+    Ok(())
+}
+
 async fn handle_relay_info(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let groups = &state.http_state.groups;
     let mut group_count = 0usize;
@@ -2913,6 +3068,25 @@ fn get_admin_state(_state: &ServerState) -> AdminState {
 
 use once_cell::sync::OnceCell;
 static ADMIN_SHARED: OnceCell<AdminState> = OnceCell::new();
+
+/// Cached storage statistics. Recomputing walks one index range per probed
+/// kind across every scope; measured against the 4.2 GB production database
+/// that takes longer than the server's 30s request timeout, so it is never
+/// computed inline — the handler serves the cache and refreshes behind it.
+static STORAGE_STATS_CACHE: OnceCell<RwLock<Option<StorageStatsResponse>>> = OnceCell::new();
+
+/// Guards against piling up concurrent scans when several admins (or a polling
+/// UI) ask for a refresh at once.
+static STORAGE_STATS_COMPUTING: AtomicBool = AtomicBool::new(false);
+
+/// How long a computed storage snapshot stays fresh before a background
+/// refresh is triggered on the next request.
+const STORAGE_STATS_TTL_SECS: i64 = 300;
+
+/// How many newest events to examine for the kind breakdown. Large enough to
+/// be representative of what is currently filling the relay, small enough that
+/// the read stays bounded on a multi-GB database.
+const STORAGE_SAMPLE_SIZE: usize = 20_000;
 
 /// Initialize the admin state. Must be called once during server setup.
 pub fn init_admin_state(admin_pubkeys: Vec<PublicKey>, relay_url: String, config_dir: String) {

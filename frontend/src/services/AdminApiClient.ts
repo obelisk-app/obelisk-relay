@@ -156,6 +156,10 @@ export class AdminApiClient {
     })
   }
 
+  async getStorageStats(refresh = false): Promise<StorageStatsEnvelope> {
+    return this.request(`/api/admin/storage/stats${refresh ? '?refresh=true' : ''}`)
+  }
+
   async getObeliskIndexSettings(): Promise<ObeliskIndexSettings> {
     return this.request('/api/admin/obelisk-index-settings')
   }
@@ -413,6 +417,41 @@ export interface StorageSettings {
   runs: number
   last_run_unix: number
   restart_required: boolean
+}
+
+export interface StorageKindStat {
+  kind: number
+  count: number
+}
+
+export interface StorageStats {
+  /**
+   * Events examined for the kind breakdown — a newest-first SAMPLE, not a
+   * total. Exact per-kind counts cost >12s each on a multi-GB database.
+   */
+  sampled_events: number
+  sample_size: number
+  /** True when the sample covered every stored event. */
+  sample_is_complete: boolean
+  kinds: StorageKindStat[]
+  newest_event_unix: number
+  oldest_sampled_unix: number
+  scope_count: number
+  db_size_bytes: number
+  db_file_count: number
+  /** Events a prune run would delete right now under the configured window. */
+  prune_preview: number
+  prune_preview_retention_days: number
+  prune_preview_kinds: number[]
+  computed_at: number
+  cached: boolean
+}
+
+export interface StorageStatsEnvelope {
+  /** A scan is running; poll again shortly. */
+  computing: boolean
+  /** Last completed snapshot, or null if none has been computed yet. */
+  stats: StorageStats | null
 }
 
 export interface ObeliskIndexSettings {

@@ -399,6 +399,13 @@ body {
   color: #fbbf24;
 }
 
+/* Destructive state — currently only "events are being deleted". */
+.admin-status-badge-danger {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+}
+
 .admin-access-actions,
 .admin-mode-grid,
 .admin-storage-stats {

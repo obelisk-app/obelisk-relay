@@ -157,6 +157,11 @@ struct StorageSettingsResponse {
     total_pruned: u64,
     runs: u64,
     last_run_unix: i64,
+    /// Per-kind retention currently in force, seconds. None when pruning is off.
+    policies_secs: Option<std::collections::BTreeMap<u16, u64>>,
+    /// Events deleted per kind since process start, so the policy table can
+    /// attribute deletions rather than showing one aggregate.
+    deleted_by_kind: Option<std::collections::BTreeMap<u16, u64>>,
     restart_required: bool,
 }
 
@@ -1122,13 +1127,14 @@ fn storage_settings_response(
         parse_duration_minutes(&read_yaml_scalar(config_dir, "prune_interval", "60m"), 60);
     let configured_pruning_enabled = config_bool(config_dir, "enable_event_pruner", false);
     let (db_size_bytes, db_file_count) = directory_stats(StdPath::new(&state.db_path));
-    let (total_pruned, runs, last_run_unix) = match &state.pruner_stats {
+    let (total_pruned, runs, last_run_unix, deleted_by_kind) = match &state.pruner_stats {
         Some(s) => (
             s.total_pruned.load(Ordering::Relaxed),
             s.runs.load(Ordering::Relaxed),
             s.last_run_unix.load(Ordering::Relaxed),
+            Some(s.per_kind_snapshot()),
         ),
-        None => (0, 0, 0),
+        None => (0, 0, 0, None),
     };
 
     StorageSettingsResponse {
@@ -1140,6 +1146,8 @@ fn storage_settings_response(
         retention_days,
         prune_interval_minutes,
         prune_kinds: read_prune_kinds(config_dir),
+        policies_secs: state.pruner_config.as_ref().map(|c| c.policies_as_secs()),
+        deleted_by_kind,
         total_pruned,
         runs,
         last_run_unix,
@@ -2699,34 +2707,52 @@ struct RetentionStatus {
     retention_secs: Option<u64>,
     interval_secs: Option<u64>,
     prune_kinds: Option<Vec<u16>>,
+    /// Retention window per kind, in seconds. Replaces the single
+    /// `retention_secs` for relays using per-kind policies; `retention_secs`
+    /// stays populated with the shortest window so existing readers of this
+    /// endpoint keep working.
+    policies_secs: Option<std::collections::BTreeMap<u16, u64>>,
+    /// Events deleted per kind since process start.
+    deleted_by_kind: Option<std::collections::BTreeMap<u16, u64>>,
     total_pruned: u64,
     runs: u64,
     last_run_unix: i64,
 }
 
 async fn handle_retention_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let (enabled, retention_secs, interval_secs, prune_kinds) = match &state.pruner_config {
-        Some(cfg) => (
-            true,
-            Some(cfg.retention.as_secs()),
-            Some(cfg.interval.as_secs()),
-            Some(cfg.kinds_as_u16()),
-        ),
-        None => (false, None, None, None),
-    };
+    let (enabled, retention_secs, interval_secs, prune_kinds, policies_secs) =
+        match &state.pruner_config {
+            Some(cfg) => {
+                let policies = cfg.policies_as_secs();
+                // Shortest window: the most aggressive policy is the honest
+                // single-number summary for a caller that cannot read the map.
+                let shortest = policies.values().copied().min();
+                (
+                    true,
+                    shortest,
+                    Some(cfg.interval.as_secs()),
+                    Some(cfg.kinds_as_u16()),
+                    Some(policies),
+                )
+            }
+            None => (false, None, None, None, None),
+        };
 
-    let (total_pruned, runs, last_run_unix) = match &state.pruner_stats {
+    let (total_pruned, runs, last_run_unix, deleted_by_kind) = match &state.pruner_stats {
         Some(s) => (
             s.total_pruned.load(Ordering::Relaxed),
             s.runs.load(Ordering::Relaxed),
             s.last_run_unix.load(Ordering::Relaxed),
+            Some(s.per_kind_snapshot()),
         ),
-        None => (0, 0, 0),
+        None => (0, 0, 0, None),
     };
 
     Json(RetentionStatus {
         enabled,
         retention_secs,
+        policies_secs,
+        deleted_by_kind,
         interval_secs,
         prune_kinds,
         total_pruned,

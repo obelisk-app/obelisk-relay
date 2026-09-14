@@ -145,6 +145,7 @@ async fn async_main() -> Result<()> {
         enable_event_pruner: relay_settings.enable_event_pruner,
         prune_interval: relay_settings.prune_interval,
         prune_kinds: relay_settings.prune_kinds.clone(),
+        prune_retention_by_kind: relay_settings.prune_retention_by_kind.clone(),
         pubkey_rate_limit_per_minute: relay_settings.pubkey_rate_limit_per_minute,
         connection_rate_limit_per_minute: relay_settings.connection_rate_limit_per_minute,
         global_rate_limit_per_minute: relay_settings.global_rate_limit_per_minute,

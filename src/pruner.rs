@@ -1,12 +1,14 @@
 //! Background event pruner.
 //!
-//! Periodically deletes events older than `retention` for a configurable set of kinds.
+//! Periodically deletes events older than a per-kind retention window.
 //! Designed for a public relay where chat-like content (kinds 9/11/12) is ephemeral
 //! and should not accumulate forever, while NIP-29 group state events (9000-series and
 //! 39000-series) are kept indefinitely so groups don't get destroyed.
 
 use nostr_sdk::prelude::*;
+use parking_lot::RwLock;
 use relay_builder::RelayDatabase;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,47 +37,109 @@ pub struct PrunerStats {
     pub last_run_unix: AtomicI64,
     /// Number of completed prune runs.
     pub runs: AtomicU64,
+    /// Deleted counts keyed by kind, so the UI can attribute deletions to the
+    /// policy that caused them rather than showing one opaque total.
+    pub per_kind: RwLock<BTreeMap<u16, u64>>,
+}
+
+impl PrunerStats {
+    pub fn per_kind_snapshot(&self) -> BTreeMap<u16, u64> {
+        self.per_kind.read().clone()
+    }
 }
 
 #[derive(Clone)]
 pub struct PrunerConfig {
-    pub retention: Duration,
+    /// Retention window per kind. A kind absent from this map is never pruned.
+    ///
+    /// Replaces the previous single `retention` + `kinds` pair: a relay storing
+    /// both ephemeral game moves and long-lived chat cannot express both with one
+    /// window, and forcing a shared window means either keeping throwaway events
+    /// for a year or deleting conversations after a week.
+    pub policies: BTreeMap<Kind, Duration>,
     pub interval: Duration,
-    pub kinds: Vec<Kind>,
 }
 
 impl PrunerConfig {
-    pub fn from_settings(
-        retention: Duration,
+    /// Build from explicit per-kind policies.
+    ///
+    /// Protected kinds are dropped here with a warning, so a hand-edited config
+    /// cannot arm a policy against group state.
+    pub fn from_policies(
+        policies: BTreeMap<u16, Duration>,
         interval: Option<Duration>,
-        kinds: Option<Vec<u16>>,
-    ) -> Self {
-        let interval = interval.unwrap_or_else(|| {
-            // Default: scan ~48 times across the retention window, clamped 60s..6h.
-            let secs = (retention.as_secs() / 48).clamp(60, 6 * 3600);
-            Duration::from_secs(secs)
-        });
-        let raw_kinds = kinds.unwrap_or_else(|| DEFAULT_PRUNE_KINDS.to_vec());
-        let (allowed, denied): (Vec<u16>, Vec<u16>) = raw_kinds
+    ) -> Option<Self> {
+        let (allowed, denied): (Vec<_>, Vec<_>) = policies
             .into_iter()
-            .partition(|k| !NEVER_PRUNE_KINDS.contains(k));
+            .partition(|(k, _)| !NEVER_PRUNE_KINDS.contains(k));
+
         if !denied.is_empty() {
             warn!(
                 "Pruner: refusing to prune protected NIP-29 management/state kinds {:?}; \
                  these are required for group identity and will never be deleted.",
-                denied
+                denied.iter().map(|(k, _)| *k).collect::<Vec<_>>()
             );
         }
-        let kinds: Vec<Kind> = allowed.into_iter().map(Kind::from).collect();
-        Self {
-            retention,
-            interval,
-            kinds,
+
+        // A zero window would mean "delete everything immediately"; treat it as
+        // unset rather than as a catastrophic instruction.
+        let policies: BTreeMap<Kind, Duration> = allowed
+            .into_iter()
+            .filter(|(_, d)| d.as_secs() > 0)
+            .map(|(k, d)| (Kind::from(k), d))
+            .collect();
+
+        if policies.is_empty() {
+            return None;
         }
+
+        // Cadence follows the SHORTEST window: a 7-day policy alongside a 1-year
+        // one must still be enforced with 7-day granularity.
+        let interval = interval.unwrap_or_else(|| {
+            let shortest = policies
+                .values()
+                .map(|d| d.as_secs())
+                .min()
+                .unwrap_or(u64::MAX);
+            Duration::from_secs((shortest / 48).clamp(60, 6 * 3600))
+        });
+
+        Some(Self { policies, interval })
+    }
+
+    /// Build from the pre-per-kind config shape: one retention applied to a list
+    /// of kinds. Kept so existing `event_retention` + `prune_kinds` deployments
+    /// behave identically without a config edit.
+    pub fn from_legacy_settings(
+        retention: Duration,
+        interval: Option<Duration>,
+        kinds: Option<Vec<u16>>,
+    ) -> Option<Self> {
+        let kinds = kinds.unwrap_or_else(|| DEFAULT_PRUNE_KINDS.to_vec());
+        let policies = kinds.into_iter().map(|k| (k, retention)).collect();
+        Self::from_policies(policies, interval)
     }
 
     pub fn kinds_as_u16(&self) -> Vec<u16> {
-        self.kinds.iter().map(|k| k.as_u16()).collect()
+        self.policies.keys().map(|k| k.as_u16()).collect()
+    }
+
+    /// Policies grouped by window, so a run issues one filter per distinct
+    /// duration rather than one per kind.
+    fn by_window(&self) -> BTreeMap<u64, Vec<Kind>> {
+        let mut grouped: BTreeMap<u64, Vec<Kind>> = BTreeMap::new();
+        for (kind, window) in &self.policies {
+            grouped.entry(window.as_secs()).or_default().push(*kind);
+        }
+        grouped
+    }
+
+    /// Retention as `{kind: seconds}` for API responses.
+    pub fn policies_as_secs(&self) -> BTreeMap<u16, u64> {
+        self.policies
+            .iter()
+            .map(|(k, d)| (k.as_u16(), d.as_secs()))
+            .collect()
     }
 }
 
@@ -86,10 +150,9 @@ pub fn spawn(
     cancel: CancellationToken,
 ) {
     info!(
-        "Event pruner enabled: retention={:?}, interval={:?}, kinds={:?}",
-        config.retention,
+        "Event pruner enabled: interval={:?}, policies={:?}",
         config.interval,
-        config.kinds_as_u16()
+        config.policies_as_secs()
     );
 
     tokio::spawn(async move {
@@ -118,17 +181,13 @@ pub fn spawn(
 }
 
 async fn run_once(database: &RelayDatabase, config: &PrunerConfig, stats: &PrunerStats) {
-    let cutoff_secs = match std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().saturating_sub(config.retention.as_secs()))
-    {
-        Ok(s) => s,
+    let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
         Err(e) => {
             warn!("Pruner: clock error: {e}");
             return;
         }
     };
-    let cutoff = Timestamp::from(cutoff_secs);
 
     let scopes = match database.list_scopes().await {
         Ok(s) => s,
@@ -138,32 +197,45 @@ async fn run_once(database: &RelayDatabase, config: &PrunerConfig, stats: &Prune
         }
     };
 
+    // Kinds sharing a window are deleted together, so the number of filters is
+    // the number of distinct retention values -- not the number of kinds.
+    let windows = config.by_window();
     let mut deleted_total: u64 = 0;
-    for scope in &scopes {
-        let filter = Filter::new()
-            .kinds(config.kinds.iter().copied())
-            .until(cutoff);
+    let mut deleted_by_kind: BTreeMap<u16, u64> = BTreeMap::new();
 
-        // Count first so we can report deletion volume; .count() and .delete() are
-        // both bounded by the same filter, so the count is a tight upper bound.
-        let count = match database.count(vec![filter.clone()], scope).await {
-            Ok(n) => n as u64,
-            Err(e) => {
-                warn!("Pruner: count failed for scope {:?}: {e}", scope);
-                0
-            }
-        };
+    for (window_secs, kinds) in &windows {
+        let cutoff = Timestamp::from(now_secs.saturating_sub(*window_secs));
 
-        if count == 0 {
-            continue;
-        }
+        for scope in &scopes {
+            // Counted per kind rather than per window: attributing deletions to a
+            // specific policy is the whole point of having separate policies, and
+            // a lumped total cannot be split after the fact.
+            for kind in kinds {
+                let filter = Filter::new().kind(*kind).until(cutoff);
 
-        match database.delete(filter, scope).await {
-            Ok(()) => {
-                deleted_total = deleted_total.saturating_add(count);
-            }
-            Err(e) => {
-                error!("Pruner: delete failed for scope {:?}: {e}", scope);
+                // Count first so we can report volume; .count() and .delete() share
+                // the same filter, so the count is a tight upper bound.
+                let count = match database.count(vec![filter.clone()], scope).await {
+                    Ok(n) => n as u64,
+                    Err(e) => {
+                        warn!("Pruner: count failed for scope {:?}: {e}", scope);
+                        continue;
+                    }
+                };
+
+                if count == 0 {
+                    continue;
+                }
+
+                match database.delete(filter, scope).await {
+                    Ok(()) => {
+                        deleted_total = deleted_total.saturating_add(count);
+                        *deleted_by_kind.entry(kind.as_u16()).or_insert(0) += count;
+                    }
+                    Err(e) => {
+                        error!("Pruner: delete failed for scope {:?}: {e}", scope);
+                    }
+                }
             }
         }
     }
@@ -172,18 +244,119 @@ async fn run_once(database: &RelayDatabase, config: &PrunerConfig, stats: &Prune
         .total_pruned
         .fetch_add(deleted_total, Ordering::Relaxed);
     stats.runs.fetch_add(1, Ordering::Relaxed);
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    stats.last_run_unix.store(now_secs, Ordering::Relaxed);
+    if !deleted_by_kind.is_empty() {
+        let mut per_kind = stats.per_kind.write();
+        for (kind, count) in &deleted_by_kind {
+            *per_kind.entry(*kind).or_insert(0) += count;
+        }
+    }
+    stats
+        .last_run_unix
+        .store(now_secs as i64, Ordering::Relaxed);
 
     if deleted_total > 0 {
         info!(
-            "Pruner run complete: deleted {} events older than {:?} across {} scopes",
+            "Pruner run complete: deleted {} events across {} scopes ({} policies); by kind: {:?}",
             deleted_total,
-            config.retention,
-            scopes.len()
+            scopes.len(),
+            config.policies.len(),
+            deleted_by_kind
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn days(n: u64) -> Duration {
+        Duration::from_secs(n * 86_400)
+    }
+
+    #[test]
+    fn protected_kinds_cannot_be_armed() {
+        let policies = [(9u16, days(30)), (9007, days(1)), (39000, days(1))]
+            .into_iter()
+            .collect();
+        let cfg = PrunerConfig::from_policies(policies, None).expect("policy survives");
+        assert_eq!(cfg.kinds_as_u16(), vec![9], "only kind 9 is prunable");
+    }
+
+    #[test]
+    fn a_policy_set_of_only_protected_kinds_disables_the_pruner() {
+        let policies = [(9007u16, days(1)), (39001, days(1))].into_iter().collect();
+        assert!(
+            PrunerConfig::from_policies(policies, None).is_none(),
+            "nothing prunable means no pruner at all"
+        );
+    }
+
+    #[test]
+    fn zero_windows_are_treated_as_unset_not_as_delete_everything() {
+        let policies = [(9u16, Duration::ZERO), (11, days(7))]
+            .into_iter()
+            .collect();
+        let cfg = PrunerConfig::from_policies(policies, None).expect("kind 11 survives");
+        assert_eq!(cfg.kinds_as_u16(), vec![11]);
+    }
+
+    #[test]
+    fn legacy_settings_apply_one_window_to_every_listed_kind() {
+        let cfg = PrunerConfig::from_legacy_settings(days(30), None, Some(vec![9, 11, 12]))
+            .expect("legacy config still arms the pruner");
+        let policies = cfg.policies_as_secs();
+        assert_eq!(policies.len(), 3);
+        for kind in [9u16, 11, 12] {
+            assert_eq!(
+                policies.get(&kind).copied(),
+                Some(days(30).as_secs()),
+                "kind {kind} keeps the single legacy window"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_settings_without_kinds_fall_back_to_the_chat_defaults() {
+        let cfg = PrunerConfig::from_legacy_settings(days(30), None, None).expect("arms");
+        assert_eq!(cfg.kinds_as_u16(), DEFAULT_PRUNE_KINDS.to_vec());
+    }
+
+    #[test]
+    fn kinds_sharing_a_window_are_grouped_into_one_filter() {
+        let policies = [
+            (9u16, days(365)),
+            (11, days(365)),
+            (1059, days(30)),
+            (2390, days(7)),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = PrunerConfig::from_policies(policies, None).expect("arms");
+        let windows = cfg.by_window();
+
+        assert_eq!(windows.len(), 3, "three distinct windows, not four kinds");
+        assert_eq!(
+            windows.get(&days(365).as_secs()).map(Vec::len),
+            Some(2),
+            "the two year-long kinds share a filter"
+        );
+    }
+
+    #[test]
+    fn cadence_follows_the_shortest_window() {
+        let policies = [(9u16, days(365)), (2390, days(7))].into_iter().collect();
+        let cfg = PrunerConfig::from_policies(policies, None).expect("arms");
+
+        // 7 days / 48, not 365 days / 48 -- a long policy must not slow down
+        // enforcement of a short one.
+        assert_eq!(cfg.interval.as_secs(), (days(7).as_secs() / 48).max(60));
+    }
+
+    #[test]
+    fn an_explicit_interval_is_respected() {
+        let policies = [(9u16, days(30))].into_iter().collect();
+        let cfg =
+            PrunerConfig::from_policies(policies, Some(Duration::from_secs(900))).expect("arms");
+        assert_eq!(cfg.interval.as_secs(), 900);
     }
 }

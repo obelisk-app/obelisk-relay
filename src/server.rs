@@ -113,6 +113,35 @@ fn accepts_nostr_json(headers: &HeaderMap) -> bool {
         })
 }
 
+/// Resolve retention policies from config, preferring the per-kind map and
+/// falling back to the older `event_retention` + `prune_kinds` pair.
+///
+/// The fallback exists so a deployment that predates per-kind policies keeps its
+/// exact current behaviour without a config edit — silently switching such a
+/// relay to "no policy" would be a quiet behaviour change, and silently widening
+/// one would delete data.
+fn resolve_prune_policies(
+    settings: &crate::config::Settings,
+) -> Option<std::collections::BTreeMap<u16, std::time::Duration>> {
+    if let Some(policies) = &settings.prune_retention_by_kind {
+        if !policies.is_empty() {
+            return Some(policies.clone());
+        }
+    }
+
+    let retention = settings.event_retention?;
+    if retention.as_secs() == 0 {
+        return None;
+    }
+
+    let kinds = settings
+        .prune_kinds
+        .clone()
+        .unwrap_or_else(|| pruner::DEFAULT_PRUNE_KINDS.to_vec());
+
+    Some(kinds.into_iter().map(|k| (k, retention)).collect())
+}
+
 fn relay_info_response(
     relay_info: &RelayInfo,
     obelisk: Option<&ObeliskNip11Capability>,
@@ -302,17 +331,16 @@ pub async fn run_server(
     let cancellation_token = CancellationToken::new();
     let connection_counter = Arc::new(AtomicUsize::new(0));
 
-    // Background event retention is destructive. It is disabled unless both
-    // event_retention is configured and enable_event_pruner is explicitly true.
-    // This keeps stale/example retention settings from silently deleting relay data.
+    // Background event retention is destructive. It stays disabled unless
+    // enable_event_pruner is explicitly true AND a usable policy exists, so stale
+    // or example retention settings can never silently delete relay data.
+    let configured_policies = resolve_prune_policies(&settings);
+
     let (pruner_stats, pruner_config_opt) = if settings.enable_event_pruner {
-        if let Some(retention) = settings.event_retention {
-            if retention.as_secs() > 0 {
-                let cfg = PrunerConfig::from_settings(
-                    retention,
-                    settings.prune_interval,
-                    settings.prune_kinds.clone(),
-                );
+        match configured_policies
+            .and_then(|policies| PrunerConfig::from_policies(policies, settings.prune_interval))
+        {
+            Some(cfg) => {
                 let stats = Arc::new(PrunerStats::default());
                 pruner::spawn(
                     database_for_pruner.clone(),
@@ -321,20 +349,18 @@ pub async fn run_server(
                     cancellation_token.clone(),
                 );
                 (Some(stats), Some(cfg))
-            } else {
-                tracing::info!("Event pruner disabled: event_retention is zero");
+            }
+            None => {
+                tracing::warn!(
+                    "enable_event_pruner=true but no usable retention policy is configured; pruner disabled"
+                );
                 (None, None)
             }
-        } else {
-            tracing::warn!(
-                "enable_event_pruner=true but event_retention is unset; pruner disabled"
-            );
-            (None, None)
         }
     } else {
-        if settings.event_retention.is_some() {
+        if configured_policies.is_some() {
             tracing::warn!(
-                "Event retention is configured but enable_event_pruner=false; automatic deletion is disabled"
+                "Retention policies are configured but enable_event_pruner=false; automatic deletion is disabled"
             );
         }
         (None, None)

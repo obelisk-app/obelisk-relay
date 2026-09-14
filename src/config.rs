@@ -9,6 +9,37 @@ use tracing::info;
 const ENVIRONMENT_PREFIX: &str = "NIP29";
 const CONFIG_SEPARATOR: &str = "__";
 
+/// Deserializes `{kind: "30d"}` into `{u16: Duration}`.
+///
+/// `humantime_serde` handles a bare duration but not one nested as a map value,
+/// and YAML map keys arrive as strings, so both sides are converted here.
+mod humantime_kind_map {
+    use serde::{Deserialize, Deserializer};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<BTreeMap<u16, Duration>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // humantime_serde::Serde<Duration> parses "30d" without pulling in
+        // `humantime` as a direct dependency.
+        let raw = Option::<BTreeMap<String, humantime_serde::Serde<Duration>>>::deserialize(
+            deserializer,
+        )?;
+        let Some(raw) = raw else { return Ok(None) };
+
+        let mut out = BTreeMap::new();
+        for (kind, window) in raw {
+            let kind: u16 = kind
+                .parse()
+                .map_err(|_| serde::de::Error::custom(format!("invalid event kind: {kind}")))?;
+            out.insert(kind, window.into_inner());
+        }
+        Ok(Some(out))
+    }
+}
+
 /// The relay identity that used to ship in `config/settings.yml`.
 ///
 /// It was committed to a public repository, so its private half is known to
@@ -62,8 +93,17 @@ pub struct RelaySettings {
     #[serde(default, with = "humantime_serde")]
     pub prune_interval: Option<Duration>,
     /// Kinds eligible for time-based pruning. Defaults to NIP-29 chat-style kinds [9, 11, 12].
+    /// Superseded by `prune_retention_by_kind`; kept so existing configs keep working.
     #[serde(default)]
     pub prune_kinds: Option<Vec<u16>>,
+    /// Per-kind retention, e.g. `{1059: "30d", 2390: "7d"}`.
+    ///
+    /// A relay holding both ephemeral game moves and long-lived conversation cannot
+    /// express both with one window. When set, this replaces the
+    /// `event_retention` + `prune_kinds` pair entirely; when absent, that pair is
+    /// migrated into this shape at startup so nothing changes for existing configs.
+    #[serde(default, with = "humantime_kind_map")]
+    pub prune_retention_by_kind: Option<std::collections::BTreeMap<u16, Duration>>,
     /// Per-pubkey events/minute. None disables the per-pubkey limiter.
     #[serde(default)]
     pub pubkey_rate_limit_per_minute: Option<u32>,
@@ -399,6 +439,7 @@ pub struct Settings {
     pub enable_event_pruner: bool,
     pub prune_interval: Option<Duration>,
     pub prune_kinds: Option<Vec<u16>>,
+    pub prune_retention_by_kind: Option<std::collections::BTreeMap<u16, Duration>>,
     pub pubkey_rate_limit_per_minute: Option<u32>,
     pub connection_rate_limit_per_minute: Option<u32>,
     pub global_rate_limit_per_minute: Option<u32>,

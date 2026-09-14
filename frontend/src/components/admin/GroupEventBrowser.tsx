@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi, EventInfo, MemberInfo, type GroupInfo } from '../../services/AdminApiClient'
 import { SearchIcon } from './SearchIcon'
 import { GroupChatView } from './GroupChatView'
+import { useRowSelection } from './useRowSelection'
 
 interface Props {
   group: GroupInfo
@@ -44,9 +45,6 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [search, setSearch] = useState('')
   const [authorFilter, setAuthorFilter] = useState<string | null>(null)
   // Multi-select for bulk moderation. lastIndex anchors shift-click ranges.
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const lastIndexRef = useRef<number | null>(null)
-  const [orderedIds, setOrderedIds] = useState<string[]>([])
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [confirmBulk, setConfirmBulk] = useState(false)
   const [wipingUser, setWipingUser] = useState(false)
@@ -58,6 +56,12 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [membersError, setMembersError] = useState<string | null>(null)
   const [removingMember, setRemovingMember] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  // Bulk member moderation. Same selection mechanics as the events tab.
+  const memberIds = members.map(m => m.pubkey)
+  const memberSel = useRowSelection(memberIds)
+  const [memberAction, setMemberAction] = useState<'remove' | 'wipe' | null>(null)
+  const [memberConfirmText, setMemberConfirmText] = useState('')
+  const [memberBusy, setMemberBusy] = useState(false)
 
   const [toast, setToast] = useState<{ msg: string; type: 'ok' | 'err' } | null>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -105,6 +109,52 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
     }
   }
 
+  const runMemberBulk = async () => {
+    const pubkeys = [...memberSel.selected]
+    if (pubkeys.length === 0 || !memberAction) return
+    setMemberBusy(true)
+    try {
+      if (memberAction === 'remove') {
+        // No batch endpoint for membership; sequential keeps per-member
+        // failures visible instead of aborting the whole set.
+        let removed = 0
+        const failures: string[] = []
+        for (const pk of pubkeys) {
+          try {
+            await adminApi.removeGroupMember(group.id, pk)
+            removed += 1
+          } catch {
+            failures.push(pk)
+          }
+        }
+        const gone = new Set(pubkeys.filter(pk => !failures.includes(pk)))
+        setMembers(prev => prev.filter(m => !gone.has(m.pubkey)))
+        showToast(
+          failures.length === 0
+            ? `Removed ${removed} member${removed !== 1 ? 's' : ''} from the group`
+            : `Removed ${removed}, ${failures.length} failed`,
+          failures.length === 0 ? 'ok' : 'err',
+        )
+      } else {
+        const res = await adminApi.bulkDeleteUserEvents(pubkeys)
+        showToast(
+          res.failed === 0
+            ? `Deleted ${res.deleted} event${res.deleted !== 1 ? 's' : ''} from ${pubkeys.length} user${pubkeys.length !== 1 ? 's' : ''}`
+            : `Deleted ${res.deleted}, ${res.failed} user${res.failed !== 1 ? 's' : ''} failed`,
+          res.failed === 0 ? 'ok' : 'err',
+        )
+        loadEvents(authorFilter)
+      }
+      memberSel.clear()
+      setMemberAction(null)
+      setMemberConfirmText('')
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Bulk action failed', 'err')
+    } finally {
+      setMemberBusy(false)
+    }
+  }
+
   const handleRemoveMember = async (pubkey: string) => {
     setRemovingMember(pubkey)
     try {
@@ -139,45 +189,15 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   // against that order, not the newest-first API order.
   const chatOrdered = [...filteredEvents].sort((a, b) => a.created_at - b.created_at)
 
-  useEffect(() => {
-    setOrderedIds(chatOrdered.map(e => e.id))
-    // Drop selections for events no longer on screen so the count never claims
-    // more than the operator can see.
-    setSelected(prev => {
-      const visible = new Set(chatOrdered.map(e => e.id))
-      const next = new Set([...prev].filter(id => visible.has(id)))
-      return next.size === prev.size ? prev : next
-    })
-  }, [events, search])
-
-  const toggleSelect = (id: string, index: number, shiftKey: boolean) => {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (shiftKey && lastIndexRef.current !== null) {
-        const [from, to] = index < lastIndexRef.current
-          ? [index, lastIndexRef.current]
-          : [lastIndexRef.current, index]
-        const select = !prev.has(id)
-        for (let i = from; i <= to; i += 1) {
-          const rowId = orderedIds[i]
-          if (!rowId) continue
-          if (select) next.add(rowId)
-          else next.delete(rowId)
-        }
-      } else if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
-      return next
-    })
-    lastIndexRef.current = index
-  }
-
-  const selectAllVisible = () => setSelected(new Set(orderedIds))
+  // Selection mechanics are shared with the members tab.
+  const orderedIds = chatOrdered.map(e => e.id)
+  const eventSel = useRowSelection(orderedIds)
+  const selected = eventSel.selected
+  const toggleSelect = eventSel.toggle
+  const selectAllVisible = eventSel.selectAll
   const selectAllFromAuthor = (pubkey: string) =>
-    setSelected(new Set(chatOrdered.filter(e => e.pubkey === pubkey).map(e => e.id)))
-  const clearSelection = () => { setSelected(new Set()); setConfirmBulk(false) }
+    eventSel.selectMatching(chatOrdered.filter(e => e.pubkey === pubkey).map(e => e.id))
+  const clearSelection = () => { eventSel.clear(); setConfirmBulk(false) }
 
   const handleBulkDelete = async () => {
     const ids = [...selected]
@@ -447,14 +467,41 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                 <table class="w-full text-sm">
                   <thead style={{ position: 'sticky', top: 0, background: 'var(--color-bg-secondary)', zIndex: 1 }}>
                     <tr>
+                      <th class="px-3 py-2 w-8">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all members"
+                          checked={memberSel.selected.size > 0 && memberSel.selected.size === members.length}
+                          onChange={() => (
+                            memberSel.selected.size === members.length
+                              ? memberSel.clear()
+                              : memberSel.selectAll()
+                          )}
+                        />
+                      </th>
                       <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Pubkey</th>
                       <th class="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>Roles</th>
                       <th class="px-3 py-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    {members.map(m => (
-                      <tr key={m.pubkey} style={{ borderTop: '1px solid var(--color-border)' }} class="hover:bg-white/[0.02] transition-colors">
+                    {members.map((m, i) => (
+                      <tr
+                        key={m.pubkey}
+                        style={{
+                          borderTop: '1px solid var(--color-border)',
+                          background: memberSel.selected.has(m.pubkey) ? 'rgba(180,249,83,0.07)' : undefined,
+                        }}
+                        class="hover:bg-white/[0.02] transition-colors"
+                      >
+                        <td class="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select member ${m.pubkey}`}
+                            checked={memberSel.selected.has(m.pubkey)}
+                            onClick={e => memberSel.toggle(m.pubkey, i, (e as MouseEvent).shiftKey)}
+                          />
+                        </td>
                         <td class="px-3 py-2 font-mono text-xs" title={m.pubkey} style={{ color: 'var(--color-text-secondary)' }}>
                           <button
                             onClick={() => { setTab('events'); setAuthorFilter(m.pubkey) }}
@@ -506,6 +553,91 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                 </table>
               )}
             </div>
+
+            {memberSel.selected.size > 0 && (
+              <div
+                class="mt-2 px-3 py-2 rounded-lg flex flex-col gap-2"
+                style={{ background: 'rgba(180,249,83,0.07)', border: '1px solid rgba(180,249,83,0.2)', flexShrink: 0 }}
+              >
+                <div class="flex items-center gap-3 flex-wrap">
+                  <span class="text-sm font-semibold">{memberSel.selected.size} selected</span>
+                  <button type="button" onClick={memberSel.selectAll} class="text-xs underline" style={{ color: 'var(--color-text-secondary)' }}>
+                    Select all {members.length}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { memberSel.clear(); setMemberAction(null); setMemberConfirmText('') }}
+                    class="text-xs underline"
+                    style={{ color: 'var(--color-text-secondary)' }}
+                  >
+                    Clear
+                  </button>
+                  <div class="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => { setMemberAction('remove'); setMemberConfirmText('') }}
+                    class="text-xs px-2 py-1 rounded"
+                    style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)' }}
+                  >
+                    Remove from group
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setMemberAction('wipe'); setMemberConfirmText('') }}
+                    class="text-xs px-2 py-1 rounded"
+                    style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}
+                  >
+                    Delete their events
+                  </button>
+                </div>
+
+                {memberAction && (
+                  <div class="p-3 rounded" style={{ background: 'rgba(0,0,0,0.25)' }}>
+                    <p class="text-sm mb-2" style={{ color: memberAction === 'wipe' ? '#fca5a5' : 'var(--color-text-primary)' }}>
+                      {memberAction === 'remove' ? (
+                        <>Remove {memberSel.selected.size} member{memberSel.selected.size !== 1 ? 's' : ''} from this group? Their events stay on the relay.</>
+                      ) : (
+                        <>
+                          Permanently delete every event authored by {memberSel.selected.size}{' '}
+                          user{memberSel.selected.size !== 1 ? 's' : ''}, across all groups on this
+                          relay. Group metadata, membership and roles are never deleted. There is
+                          no undo. Type <strong>DELETE</strong> to confirm.
+                        </>
+                      )}
+                    </p>
+                    {memberAction === 'wipe' && (
+                      <input
+                        type="text"
+                        class="mb-2"
+                        value={memberConfirmText}
+                        placeholder="DELETE"
+                        aria-label="Type DELETE to confirm deleting these users' events"
+                        onInput={e => setMemberConfirmText((e.target as HTMLInputElement).value)}
+                      />
+                    )}
+                    <div class="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={runMemberBulk}
+                        disabled={memberBusy || (memberAction === 'wipe' && memberConfirmText.trim() !== 'DELETE')}
+                        class="text-xs px-2 py-1 rounded"
+                        style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.4)' }}
+                      >
+                        {memberBusy ? 'Working…' : memberAction === 'remove' ? 'Confirm remove' : 'Confirm delete'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setMemberAction(null); setMemberConfirmText('') }}
+                        class="text-xs"
+                        style={{ color: 'var(--color-text-secondary)' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div class="mt-2 text-xs" style={{ color: 'var(--color-text-secondary)', flexShrink: 0 }}>
               {!membersLoading && !membersError && `${members.length} member${members.length !== 1 ? 's' : ''}`}

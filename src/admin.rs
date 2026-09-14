@@ -1417,6 +1417,14 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/events/{event_id}", delete(handle_event_delete))
         .route("/events/delete", post(handle_events_bulk_delete))
         .route(
+            "/events/delete-by-recipient",
+            post(handle_events_delete_by_recipient),
+        )
+        .route(
+            "/users/delete-events",
+            post(handle_users_events_bulk_delete),
+        )
+        .route(
             "/groups/{id}/members/{pubkey}",
             delete(handle_group_member_remove),
         )
@@ -2608,6 +2616,188 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
 #[derive(Serialize)]
 struct UserEventsDeleteResponse {
     deleted: u64,
+}
+
+/// Cap on pubkeys per bulk moderation request, matching the batch event route.
+/// Each pubkey costs a count + delete per scope, so an unbounded list could hold
+/// the database for minutes.
+const MAX_BULK_PUBKEYS: usize = 200;
+
+#[derive(Deserialize)]
+struct BulkUserEventsRequest {
+    pubkeys: Vec<String>,
+    /// Restrict to these kinds. Omit for "everything they authored, minus
+    /// protected kinds".
+    #[serde(default)]
+    kinds: Option<Vec<u16>>,
+}
+
+#[derive(Deserialize)]
+struct BulkRecipientRequest {
+    pubkeys: Vec<String>,
+    /// Kinds addressed to these pubkeys. Defaults to gift wraps, the case this
+    /// route exists for.
+    #[serde(default)]
+    kinds: Option<Vec<u16>>,
+}
+
+#[derive(Serialize)]
+struct BulkUserResult {
+    pubkey: String,
+    deleted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BulkUserResponse {
+    /// Total events removed across every listed pubkey.
+    deleted: u64,
+    failed: usize,
+    results: Vec<BulkUserResult>,
+}
+
+fn validate_bulk_pubkeys(pubkeys: &[String]) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if pubkeys.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "No users selected"));
+    }
+    if pubkeys.len() > MAX_BULK_PUBKEYS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Too many users in one request; select up to 200 at a time",
+        ));
+    }
+    Ok(())
+}
+
+/// Delete events authored by each listed pubkey.
+///
+/// Per-pubkey outcomes rather than one pass/fail: a partial failure across a
+/// 50-user sweep is otherwise indistinguishable from total success.
+async fn handle_users_events_bulk_delete(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<BulkUserEventsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+    validate_bulk_pubkeys(&req.pubkeys)?;
+
+    let kinds = req.kinds.as_deref();
+    let mut results = Vec::with_capacity(req.pubkeys.len());
+    let mut deleted = 0u64;
+    let mut failed = 0usize;
+
+    for pubkey in &req.pubkeys {
+        match state
+            .http_state
+            .groups
+            .admin_delete_user_events(pubkey, kinds)
+            .await
+        {
+            Ok(n) => {
+                deleted = deleted.saturating_add(n);
+                results.push(BulkUserResult {
+                    pubkey: pubkey.clone(),
+                    deleted: n,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(BulkUserResult {
+                    pubkey: pubkey.clone(),
+                    deleted: 0,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    info!(
+        "Admin bulk user wipe: {} events across {} users, {} failed",
+        deleted,
+        req.pubkeys.len(),
+        failed
+    );
+
+    Ok(Json(BulkUserResponse {
+        deleted,
+        failed,
+        results,
+    }))
+}
+
+/// Delete events addressed to each listed pubkey via the `p` tag.
+///
+/// The only route that can act on gift wraps per user — their authors are
+/// one-time keys, so author-based deletion cannot reach them.
+async fn handle_events_delete_by_recipient(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<BulkRecipientRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+    validate_bulk_pubkeys(&req.pubkeys)?;
+
+    // Defaulting to gift wraps keeps an omitted `kinds` from meaning "everything
+    // that mentions this person", which would sweep up group membership events.
+    let kinds = req.kinds.unwrap_or_else(|| vec![1059]);
+    if kinds.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Choose at least one event kind",
+        ));
+    }
+
+    let mut results = Vec::with_capacity(req.pubkeys.len());
+    let mut deleted = 0u64;
+    let mut failed = 0usize;
+
+    for pubkey in &req.pubkeys {
+        match state
+            .http_state
+            .groups
+            .admin_delete_events_by_recipient(pubkey, &kinds)
+            .await
+        {
+            Ok(n) => {
+                deleted = deleted.saturating_add(n);
+                results.push(BulkUserResult {
+                    pubkey: pubkey.clone(),
+                    deleted: n,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(BulkUserResult {
+                    pubkey: pubkey.clone(),
+                    deleted: 0,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    info!(
+        "Admin deleted {} events addressed to {} recipients (kinds {:?}), {} failed",
+        deleted,
+        req.pubkeys.len(),
+        kinds,
+        failed
+    );
+
+    Ok(Json(BulkUserResponse {
+        deleted,
+        failed,
+        results,
+    }))
 }
 
 #[derive(Deserialize)]

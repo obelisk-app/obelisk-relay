@@ -232,6 +232,28 @@ export class AdminApiClient {
     })
   }
 
+  /**
+   * Delete events authored by each pubkey. Protected group-management kinds are
+   * never removed, whatever is requested.
+   */
+  async bulkDeleteUserEvents(pubkeys: string[], kinds?: number[]): Promise<BulkUserResponse> {
+    return this.request('/api/admin/users/delete-events', {
+      method: 'POST',
+      body: JSON.stringify({ pubkeys, kinds }),
+    })
+  }
+
+  /**
+   * Delete events addressed to each pubkey via their `p` tag. The only way to
+   * act on gift wraps per user — their authors are one-time keys.
+   */
+  async bulkDeleteByRecipient(pubkeys: string[], kinds?: number[]): Promise<BulkUserResponse> {
+    return this.request('/api/admin/events/delete-by-recipient', {
+      method: 'POST',
+      body: JSON.stringify({ pubkeys, kinds }),
+    })
+  }
+
   /** Public relay info — no auth required; used for branding the console. */
   async getRelayInfo(): Promise<PublicRelayInfo> {
     return this.request('/api/relay-info')
@@ -378,6 +400,13 @@ export interface BulkDeleteResponse {
   deleted: number
   failed: number
   results: Array<{ id: string; deleted: boolean; error?: string }>
+}
+
+export interface BulkUserResponse {
+  /** Total events removed across every listed pubkey. */
+  deleted: number
+  failed: number
+  results: Array<{ pubkey: string; deleted: number; error?: string }>
 }
 
 export interface PublicRelayInfo {

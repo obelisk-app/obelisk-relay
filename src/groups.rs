@@ -1022,6 +1022,73 @@ impl Groups {
         Ok(result)
     }
 
+    /// Admin-only: delete events *addressed to* a pubkey via their `p` tag.
+    ///
+    /// Exists because NIP-59 gift wraps (kind 1059) are signed by a fresh throwaway
+    /// key per wrap, so author-based moderation cannot touch them at all. The `p`
+    /// tag is the only stable handle a relay operator has on that traffic.
+    ///
+    /// `kinds` is required rather than optional: "everything addressed to this
+    /// person" would sweep up group management events that merely mention them
+    /// (9000 add-user carries a `p` tag), and those are exactly what must survive.
+    /// Protected kinds are filtered out regardless.
+    ///
+    /// Deleting gift wraps destroys the messages themselves — the relay holds no
+    /// other copy and clients fetch DM history from it.
+    pub async fn admin_delete_events_by_recipient(
+        &self,
+        pubkey_hex: &str,
+        kinds: &[u16],
+    ) -> Result<u64, Error> {
+        let pubkey =
+            PublicKey::from_hex(pubkey_hex).map_err(|_| Error::notice("Invalid pubkey"))?;
+
+        let target_kinds: Vec<Kind> = kinds
+            .iter()
+            .filter(|k| !crate::pruner::NEVER_PRUNE_KINDS.contains(k))
+            .map(|k| Kind::from(*k))
+            .collect();
+
+        if target_kinds.is_empty() {
+            return Ok(0);
+        }
+
+        let scopes = self
+            .db
+            .list_scopes()
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+
+        let mut deleted_total = 0u64;
+        for scope in &scopes {
+            let filter = Filter::new()
+                .kinds(target_kinds.iter().copied())
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey.to_hex());
+
+            let count = self
+                .db
+                .count(vec![filter.clone()], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))? as u64;
+
+            if count == 0 {
+                continue;
+            }
+
+            self.db
+                .delete(filter, scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+            deleted_total = deleted_total.saturating_add(count);
+        }
+
+        info!(
+            "Admin deleted {} events addressed to '{}' (kinds {:?})",
+            deleted_total, pubkey_hex, kinds
+        );
+        Ok(deleted_total)
+    }
+
     /// Admin-only: delete events authored by a pubkey across all scopes.
     ///
     /// Never deletes [`crate::pruner::NEVER_PRUNE_KINDS`]. This used to wipe with a
@@ -2680,6 +2747,56 @@ mod tests {
         );
         assert_eq!(count_kind(9).await, 0, "ordinary content is deleted");
         assert_eq!(deleted, 1, "only the unprotected event is counted");
+    }
+
+    /// Group membership events carry a `p` tag naming the member, so deleting
+    /// "everything addressed to X" must not take 9000s with it.
+    #[tokio::test]
+    async fn test_recipient_delete_spares_group_membership_events() {
+        let (groups, admin_keys, member_keys, _, group_id, scope) = setup_test_groups().await;
+        let member = member_keys.public_key();
+
+        // A 9000 addressed to the member, and a gift wrap addressed to them.
+        let add_user = create_test_event(
+            &admin_keys,
+            KIND_GROUP_ADD_USER_9000,
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::public_key(member),
+            ],
+        )
+        .await;
+        groups.db.save_event(&add_user, &scope).await.unwrap();
+
+        let wrap = create_test_event(
+            &admin_keys,
+            Kind::from(1059u16),
+            vec![Tag::public_key(member)],
+        )
+        .await;
+        groups.db.save_event(&wrap, &scope).await.unwrap();
+
+        // Asking for both kinds: the protected one must be refused, not honoured.
+        let deleted = groups
+            .admin_delete_events_by_recipient(&member.to_hex(), &[1059, 9000])
+            .await
+            .expect("delete succeeds");
+
+        assert_eq!(deleted, 1, "only the gift wrap is deleted");
+
+        let remaining_9000 = groups
+            .db
+            .count(vec![Filter::new().kind(KIND_GROUP_ADD_USER_9000)], &scope)
+            .await
+            .unwrap();
+        assert_eq!(remaining_9000, 1, "membership event survives");
+
+        let remaining_wraps = groups
+            .db
+            .count(vec![Filter::new().kind(Kind::from(1059u16))], &scope)
+            .await
+            .unwrap();
+        assert_eq!(remaining_wraps, 0, "gift wrap is gone");
     }
 
     /// An explicit kind list must not become a way around the protected set.

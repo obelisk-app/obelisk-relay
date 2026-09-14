@@ -20,6 +20,14 @@ COPY benches ./benches
 # tokio_unstable needed for runtime metrics used by watchdog
 # tokio_taskdump enables task dumps when deadlocks are detected (Linux only)
 ENV RUSTFLAGS="--cfg tokio_unstable --cfg tokio_taskdump"
+
+# Parallelism cap for constrained build hosts. Limiting the builder's CPU alone
+# is not enough: cargo still spawns one rustc per core, which thrashes against
+# the cgroup quota and multiplies peak memory. Set CARGO_BUILD_JOBS=1 when
+# building on a box that is also serving traffic. Unset means "use all cores".
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 RUN cargo build --release --bins
 
 # Install binaries from relay_builder

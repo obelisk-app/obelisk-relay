@@ -18,11 +18,11 @@ importers:
         specifier: ^0.6.2
         version: 0.6.3(@cashu/cashu-ts@2.9.0)(@cashu/crypto@0.3.4)(nostr-tools@2.23.3(typescript@5.8.3))
       '@nostr-wot/signers':
-        specifier: ^0.4.0
-        version: 0.4.0(nostr-tools@2.23.3(typescript@5.8.3))
+        specifier: ^1.2.0
+        version: 1.2.0(nostr-tools@2.23.3(typescript@5.8.3))
       '@nostr-wot/ui':
-        specifier: ^0.6.0
-        version: 0.6.0(nostr-tools@2.23.3(typescript@5.8.3))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+        specifier: ^0.7.1
+        version: 0.7.1(nostr-tools@2.23.3(typescript@5.8.3))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@preact/preset-vite':
         specifier: ^2.8.1
         version: 2.10.1(@babel/core@7.27.1)(preact@10.26.7)(vite@6.3.5(@types/node@22.15.21)(jiti@1.21.7)(yaml@2.8.0))
@@ -348,8 +348,16 @@ packages:
   '@jridgewell/trace-mapping@0.3.25':
     resolution: {integrity: sha512-vNk6aEwybGtawWmy/PzwnGDOjCkLWSD2wqvjGGAgOAwCGWySYXfYoxt00IJkTF+8Lb57DwOb3Aa0o9CApepiYQ==}
 
+  '@noble/ciphers@1.3.0':
+    resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/ciphers@2.1.1':
     resolution: {integrity: sha512-bysYuiVfhxNJuldNXlFEitTVdNnYUc+XNJZd7Qm2a5j1vZHgY+fazadNFWFaMK/2vye0JVlxV3gHmC0WDfAOQw==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
     engines: {node: '>= 20.19.0'}
 
   '@noble/curves@1.9.1':
@@ -374,6 +382,10 @@ packages:
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/post-quantum@0.6.1':
+    resolution: {integrity: sha512-+pormrDZwjRw05U8ADK4JpHejo87+gBd+muRBB/ozztH5yhDLMDF4jHQWN3NQQAsu1zBNPWTG0ZwVI0CR29H0A==}
     engines: {node: '>= 20.19.0'}
 
   '@noble/secp256k1@2.2.3':
@@ -412,13 +424,18 @@ packages:
       react:
         optional: true
 
-  '@nostr-wot/signers@0.4.0':
-    resolution: {integrity: sha512-QevLhTlYCT/ev5M/WgBdngUBtoCpIYmY12OwTr16DQxWuuFy6u9aXZQaQCJEaPWG+e7zCMXtZULs/hqBHhBfxw==}
+  '@nostr-wot/pq@0.2.2':
+    resolution: {integrity: sha512-+dLyu7xgV75iR7LnUFEQKAGalEk+TI5MiTKS9cP40nE1gxY8Wp5hUCTxiiTIYfhZ4tzKH4nLTxykTqX+Hy61iw==}
     peerDependencies:
       nostr-tools: '>=2.0.0'
 
-  '@nostr-wot/ui@0.6.0':
-    resolution: {integrity: sha512-OlCnEBvkqrLrM364VmJvdR79b7qBodIXxMPCciEU16p5sBZvSHYTR+0r2qarIwo9OcgLCtjWCqq55l+v4CQpTA==}
+  '@nostr-wot/signers@1.2.0':
+    resolution: {integrity: sha512-HLMq/RbX9ml79RDTjtkKifn1DhsjVmET3x1H1Xl2FZvwGYhxg2pbskz6IWLXHzxdZoSsChzl5AwiK92O5YGPHg==}
+    peerDependencies:
+      nostr-tools: '>=2.0.0'
+
+  '@nostr-wot/ui@0.7.1':
+    resolution: {integrity: sha512-JtAt44UAW6x8fztraBfcKddgDYI7qc2i1ooQBDsJVGCierZLCRW71NCjoz1FiTSekuCxlcZQwEksQ10GyOPSOA==}
     peerDependencies:
       nostr-tools: '>=2.0.0'
       react: '>=18'
@@ -492,56 +509,67 @@ packages:
     resolution: {integrity: sha512-wC53ZNDgt0pqx5xCAgNunkTzFE8GTgdZ9EwYGVcg+jEjJdZGtq9xPjDnFgfFozQI/Xm1mh+D9YlYtl+ueswNEg==}
     cpu: [arm]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-arm-musleabihf@4.41.1':
     resolution: {integrity: sha512-jwKCca1gbZkZLhLRtsrka5N8sFAaxrGz/7wRJ8Wwvq3jug7toO21vWlViihG85ei7uJTpzbXZRcORotE+xyrLA==}
     cpu: [arm]
     os: [linux]
+    libc: [musl]
 
   '@rollup/rollup-linux-arm64-gnu@4.41.1':
     resolution: {integrity: sha512-g0UBcNknsmmNQ8V2d/zD2P7WWfJKU0F1nu0k5pW4rvdb+BIqMm8ToluW/eeRmxCared5dD76lS04uL4UaNgpNA==}
     cpu: [arm64]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-arm64-musl@4.41.1':
     resolution: {integrity: sha512-XZpeGB5TKEZWzIrj7sXr+BEaSgo/ma/kCgrZgL0oo5qdB1JlTzIYQKel/RmhT6vMAvOdM2teYlAaOGJpJ9lahg==}
     cpu: [arm64]
     os: [linux]
+    libc: [musl]
 
   '@rollup/rollup-linux-loongarch64-gnu@4.41.1':
     resolution: {integrity: sha512-bkCfDJ4qzWfFRCNt5RVV4DOw6KEgFTUZi2r2RuYhGWC8WhCA8lCAJhDeAmrM/fdiAH54m0mA0Vk2FGRPyzI+tw==}
     cpu: [loong64]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-powerpc64le-gnu@4.41.1':
     resolution: {integrity: sha512-3mr3Xm+gvMX+/8EKogIZSIEF0WUu0HL9di+YWlJpO8CQBnoLAEL/roTCxuLncEdgcfJcvA4UMOf+2dnjl4Ut1A==}
     cpu: [ppc64]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-riscv64-gnu@4.41.1':
     resolution: {integrity: sha512-3rwCIh6MQ1LGrvKJitQjZFuQnT2wxfU+ivhNBzmxXTXPllewOF7JR1s2vMX/tWtUYFgphygxjqMl76q4aMotGw==}
     cpu: [riscv64]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-riscv64-musl@4.41.1':
     resolution: {integrity: sha512-LdIUOb3gvfmpkgFZuccNa2uYiqtgZAz3PTzjuM5bH3nvuy9ty6RGc/Q0+HDFrHrizJGVpjnTZ1yS5TNNjFlklw==}
     cpu: [riscv64]
     os: [linux]
+    libc: [musl]
 
   '@rollup/rollup-linux-s390x-gnu@4.41.1':
     resolution: {integrity: sha512-oIE6M8WC9ma6xYqjvPhzZYk6NbobIURvP/lEbh7FWplcMO6gn7MM2yHKA1eC/GvYwzNKK/1LYgqzdkZ8YFxR8g==}
     cpu: [s390x]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-x64-gnu@4.41.1':
     resolution: {integrity: sha512-cWBOvayNvA+SyeQMp79BHPK8ws6sHSsYnK5zDcsC3Hsxr1dgTABKjMnMslPq1DvZIp6uO7kIWhiGwaTdR4Og9A==}
     cpu: [x64]
     os: [linux]
+    libc: [glibc]
 
   '@rollup/rollup-linux-x64-musl@4.41.1':
     resolution: {integrity: sha512-y5CbN44M+pUCdGDlZFzGGBSKCA4A/J2ZH4edTYSSxFg7ce1Xt3GtydbVKWLlzL+INfFIZAEg1ZV6hh9+QQf9YQ==}
     cpu: [x64]
     os: [linux]
+    libc: [musl]
 
   '@rollup/rollup-win32-arm64-msvc@4.41.1':
     resolution: {integrity: sha512-lZkCxIrjlJlMt1dLO/FbpZbzt6J/A8p4DnqzSa4PWqPEUUUnzXLeki/iyPLfV0BmHItlYgHUqJe+3KiyydmiNQ==}
@@ -1752,7 +1780,11 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.0
 
+  '@noble/ciphers@1.3.0': {}
+
   '@noble/ciphers@2.1.1': {}
+
+  '@noble/ciphers@2.2.0': {}
 
   '@noble/curves@1.9.1':
     dependencies:
@@ -1771,6 +1803,12 @@ snapshots:
   '@noble/hashes@2.0.1': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/post-quantum@0.6.1':
+    dependencies:
+      '@noble/ciphers': 2.2.0
+      '@noble/curves': 2.2.0
+      '@noble/hashes': 2.2.0
 
   '@noble/secp256k1@2.2.3': {}
 
@@ -1822,15 +1860,23 @@ snapshots:
     optionalDependencies:
       react: 19.2.6
 
-  '@nostr-wot/signers@0.4.0(nostr-tools@2.23.3(typescript@5.8.3))':
+  '@nostr-wot/pq@0.2.2(nostr-tools@2.23.3(typescript@5.8.3))':
     dependencies:
+      '@noble/ciphers': 1.3.0
       '@noble/hashes': 1.8.0
+      '@noble/post-quantum': 0.6.1
       nostr-tools: 2.23.3(typescript@5.8.3)
 
-  '@nostr-wot/ui@0.6.0(nostr-tools@2.23.3(typescript@5.8.3))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
+  '@nostr-wot/signers@1.2.0(nostr-tools@2.23.3(typescript@5.8.3))':
+    dependencies:
+      '@noble/hashes': 1.8.0
+      '@nostr-wot/pq': 0.2.2(nostr-tools@2.23.3(typescript@5.8.3))
+      nostr-tools: 2.23.3(typescript@5.8.3)
+
+  '@nostr-wot/ui@0.7.1(nostr-tools@2.23.3(typescript@5.8.3))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
     dependencies:
       '@nostr-wot/data': 0.5.1(nostr-tools@2.23.3(typescript@5.8.3))(react@19.2.6)
-      '@nostr-wot/signers': 0.4.0(nostr-tools@2.23.3(typescript@5.8.3))
+      '@nostr-wot/signers': 1.2.0(nostr-tools@2.23.3(typescript@5.8.3))
       nostr-tools: 2.23.3(typescript@5.8.3)
       qrcode: 1.5.4
       react: 19.2.6

@@ -5,6 +5,7 @@ import {
   useSigner,
 } from '@nostr-wot/ui'
 import type { NostrSigner } from '@nostr-wot/signers'
+import { NIP46_RELAYS } from '../../constants'
 import { adminApi, type SetupStatus } from '../../services/AdminApiClient'
 import { Nip46SignerDeepLink } from './Nip46SignerDeepLink'
 import {
@@ -298,7 +299,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                       flatLayout
                       showRememberToggle
                       nip46Mode="qr"
-                      nip46Relays={['wss://relay.nsec.app', 'wss://relay.damus.io']}
+                      nip46Relays={[...NIP46_RELAYS]}
                       nip46Metadata={{
                         name: 'Obelisk Relay Setup',
                         url: window.location.origin,

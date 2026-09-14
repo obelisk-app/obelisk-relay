@@ -6,7 +6,8 @@ import NDK, {
   NDKUser,
   type NDKSigner,
 } from "@nostr-dev-kit/ndk";
-import { nostrSignerAsNdkSigner, type NostrSigner } from "@nostr-wot/signers";
+import { type NostrSigner } from "@nostr-wot/signers";
+import { nostrSignerAsNdkSigner } from "./ndkSignerAdapter";
 import { nip19 } from "nostr-tools";
 import localforage from "localforage";
 

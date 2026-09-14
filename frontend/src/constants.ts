@@ -20,3 +20,23 @@ export const COLORS = {
 } as const;
 
 export const MIN_NUTZAP_AMOUNT = 1; // minimum sats for nutzap compatibility check
+
+/**
+ * Rendezvous relays for NIP-46 (remote signer / bunker) login.
+ *
+ * The browser and the user's signer app must meet on a relay they both use, so
+ * a short list is a single point of failure: if every entry is unreachable the
+ * QR never renders and bunker login — including admin sign-in and the setup
+ * wizard — simply hangs. That happened with the previous two-relay list; both
+ * relay.nsec.app and relay.damus.io were down at the same time.
+ *
+ * Keep the canonical signer relays first (that is where nsec.app and Amber
+ * users are found) and carry independently-operated fallbacks behind them.
+ */
+export const NIP46_RELAYS = [
+  'wss://relay.nsec.app',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+  'wss://relay.primal.net',
+  'wss://offchain.pub',
+] as const;

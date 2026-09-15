@@ -81,6 +81,32 @@ impl PrunerConfig {
             );
         }
 
+        // Replaceable and addressable kinds are never pruned.
+        //
+        // NIP-01 has the relay keep only the latest event per (pubkey, kind) —
+        // replaceable — or per (pubkey, kind, d-tag) — addressable. They cannot
+        // accumulate: there is exactly one per user per slot however long the
+        // relay runs. Time-based deletion therefore reclaims almost nothing and
+        // destroys live state — a profile (kind 0), relay list (10002), or an
+        // app's read state (30078) simply vanishes. Worse, the user who trips it
+        // is by definition the inactive one, who will not republish.
+        //
+        // Classification comes from the nostr crate rather than a hand-written
+        // range so the rule tracks the spec.
+        let (allowed, unprunable): (Vec<_>, Vec<_>) = allowed.into_iter().partition(|(k, _)| {
+            let kind = Kind::from(*k);
+            !kind.is_replaceable() && !kind.is_addressable()
+        });
+
+        if !unprunable.is_empty() {
+            warn!(
+                "Pruner: refusing to prune replaceable/addressable kinds {:?}; the relay \
+                 stores only the newest event per user for these, so deleting them frees \
+                 nothing and would discard that user's current state.",
+                unprunable.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+            );
+        }
+
         // A zero window would mean "delete everything immediately"; treat it as
         // unset rather than as a catastrophic instruction.
         let policies: BTreeMap<Kind, Duration> = allowed
@@ -280,6 +306,38 @@ mod tests {
             .collect();
         let cfg = PrunerConfig::from_policies(policies, None).expect("policy survives");
         assert_eq!(cfg.kinds_as_u16(), vec![9], "only kind 9 is prunable");
+    }
+
+    #[test]
+    fn replaceable_and_addressable_kinds_are_refused() {
+        let policies = [
+            (0u16, days(30)),  // metadata - replaceable
+            (10002, days(30)), // relay list - replaceable
+            (30078, days(30)), // app data (read state) - addressable
+            (9, days(30)),     // group chat - regular
+            (1059, days(30)),  // gift wrap - regular
+        ]
+        .into_iter()
+        .collect();
+
+        let cfg = PrunerConfig::from_policies(policies, None).expect("regular kinds survive");
+        assert_eq!(
+            cfg.kinds_as_u16(),
+            vec![9, 1059],
+            "only regular kinds are prunable; one-per-user kinds are refused"
+        );
+    }
+
+    #[test]
+    fn a_read_state_only_policy_disables_the_pruner() {
+        // The motivating case: an operator points a window at the app's
+        // read-state kind. Every user's read state is a single addressable
+        // event, so this must arm nothing rather than delete it.
+        let policies = [(30078u16, days(30))].into_iter().collect();
+        assert!(
+            PrunerConfig::from_policies(policies, None).is_none(),
+            "a policy against an addressable kind leaves the pruner disabled"
+        );
     }
 
     #[test]

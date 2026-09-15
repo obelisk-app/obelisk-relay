@@ -118,10 +118,6 @@ export const GroupsOverview = () => {
     <div>
       <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-6">
         <div>
-          <h2 class="text-xl font-bold">Groups</h2>
-          <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
-            Browse relay groups, metadata, members, and stored events.
-          </p>
         </div>
         <button onClick={fetchGroups} disabled={loading} class="lc-pill-secondary text-sm" style={{ borderRadius: '8px', padding: '8px 16px' }}>
           {loading ? 'Refreshing...' : 'Refresh'}

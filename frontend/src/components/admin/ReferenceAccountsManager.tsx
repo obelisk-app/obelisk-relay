@@ -123,10 +123,6 @@ export const ReferenceAccountsManager = () => {
     <div>
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h2 class="text-xl font-bold">Reference Accounts</h2>
-          <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
-            Accounts whose follows are auto-whitelisted on this relay.
-          </p>
         </div>
         <button
           onClick={handleSync}

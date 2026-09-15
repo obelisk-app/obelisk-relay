@@ -242,10 +242,6 @@ export const WhitelistManager = () => {
 
   return (
     <div>
-      <h2 class="text-xl font-bold mb-2">Access Management</h2>
-      <p class="text-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-        Choose who can use the relay, then manage allowed and blocked pubkeys.
-      </p>
 
       {toast && (
         <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
@@ -428,7 +424,15 @@ export const WhitelistManager = () => {
           ))}
         </div>
       ) : entries.length === 0 ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>No whitelisted pubkeys. The relay is open to all.</div>
+        <div class="admin-empty-state">
+          <p>No allowlist — anyone can connect.</p>
+          <p>
+            Any pubkey may read from and publish to this relay. That is a valid
+            way to run a public relay, but it also means storage growth is
+            bounded only by your retention policy. Add a pubkey above to switch
+            to an allowlist, and everyone not on it is refused.
+          </p>
+        </div>
       ) : filtered.length === 0 ? (
         <div style={{ color: 'var(--color-text-secondary)' }}>No entries match "{search}".</div>
       ) : (
@@ -559,7 +563,14 @@ export const WhitelistManager = () => {
                 ))}
               </div>
             ) : blacklist.length === 0 ? (
-              <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>No blacklisted pubkeys.</div>
+              <div class="admin-empty-state">
+                <p>Nobody is blocked.</p>
+                <p>
+                  A blocked pubkey is refused even when it is on the allowlist or
+                  arrives through follow sync, so this is the one list that always
+                  wins. Empty is the normal state.
+                </p>
+              </div>
             ) : (
               <div class="space-y-2">
                 {blacklist.map(entry => {

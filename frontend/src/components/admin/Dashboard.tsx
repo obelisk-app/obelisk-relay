@@ -108,7 +108,35 @@ export const Dashboard = () => {
     )
   }
 
-  const pruning = storage?.pruning_enabled ?? false
+  // Retention state is three states, not two, and the third is the one that
+  // matters: armed in the config but not yet live, because policies are only
+  // read at startup. That is the state this relay sat in while its database
+  // grew to 5.2GB -- the config said pruning was on and nothing was running.
+  const retention: { tone: string; label: string; detail: string } = (() => {
+    if (!storage) return { tone: '', label: 'Retention unknown', detail: 'Could not read storage settings.' }
+    if (storage.restart_required) {
+      return {
+        tone: 'admin-status-badge-warn',
+        label: 'Restart to apply',
+        detail: 'Retention is configured but not running. Policies are read only at startup.',
+      }
+    }
+    if (!storage.configured_pruning_enabled) {
+      return {
+        tone: '',
+        label: 'Keeping everything',
+        detail: 'Nothing is deleted automatically. Storage grows until you act.',
+      }
+    }
+    const windows = Object.entries(storage.policies_secs ?? {})
+      .map(([kind, secs]) => `kind ${kind} after ${Math.round(secs / 86400)}d`)
+      .join(', ')
+    return {
+      tone: 'admin-status-badge-ok',
+      label: 'Retention on',
+      detail: windows ? `Deleting ${windows}.` : 'Retention is enforced.',
+    }
+  })()
 
   return (
     <div class="space-y-6">
@@ -134,14 +162,69 @@ export const Dashboard = () => {
               </p>
             )}
           </div>
-          <span
-            class={`admin-status-badge ${pruning ? 'admin-status-badge-danger' : 'admin-status-badge-ok'}`}
-            title={pruning
-              ? 'Automatic retention pruning is running on this relay'
-              : 'No automatic deletion is configured'}
-          >
-            {pruning ? 'Deleting old events' : 'Nothing is deleted'}
+          {/* Was a red "Deleting old events" whenever retention was on. It
+              read as an action stuck in progress rather than a steady state,
+              and coloured the healthy configuration as a danger -- retention
+              being on is what stops the disk filling. */}
+          <span class={`admin-status-badge ${retention.tone}`} title={retention.detail}>
+            {retention.label}
           </span>
+        </div>
+      </section>
+
+      {/*
+        * What is configured, and whether it is actually in force. The relay ran
+        * for weeks with a config that said pruning was on while nothing was
+        * deleting, and with a channel-list query that took 29 seconds -- none
+        * of which was visible anywhere. A status is only worth showing if it
+        * says whether the thing is working, so each row carries its own verdict
+        * rather than a raw value the operator has to interpret.
+        */}
+      <section>
+        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+          Configured
+        </h3>
+        <div class="admin-status-list">
+          <div class="admin-status-item">
+            <div>
+              <strong>Retention</strong>
+              <p>{retention.detail}</p>
+            </div>
+            <span class={`admin-status-badge ${retention.tone}`}>{retention.label}</span>
+          </div>
+
+          <div class="admin-status-item">
+            <div>
+              <strong>Database</strong>
+              <p>
+                {storage ? formatBytes(storage.db_size_bytes) : '—'} on disk
+                {storage && storage.runs > 0 && (
+                  <> · {formatNumber(storage.total_pruned)} events deleted since start</>
+                )}
+                {/* LMDB reuses freed pages internally and never returns them,
+                    so a file that stays large after a big delete is expected
+                    and needs an export/import rebuild, not more pruning. */}
+                . Deleting events frees space inside the file, not on the disk.
+              </p>
+            </div>
+            <span class="admin-status-badge">
+              {storage && storage.runs > 0 ? `${formatNumber(storage.runs)} prune runs` : 'No prune yet'}
+            </span>
+          </div>
+
+          <div class="admin-status-item">
+            <div>
+              <strong>Access</strong>
+              <p>
+                {stats.whitelisted_count > 0
+                  ? `${formatNumber(stats.whitelisted_count)} pubkeys may connect. Everyone else is refused.`
+                  : 'No allowlist, so any pubkey may connect and store events here.'}
+              </p>
+            </div>
+            <span class={`admin-status-badge ${stats.whitelisted_count > 0 ? 'admin-status-badge-ok' : ''}`}>
+              {stats.whitelisted_count > 0 ? 'Restricted' : 'Open relay'}
+            </span>
+          </div>
         </div>
       </section>
 

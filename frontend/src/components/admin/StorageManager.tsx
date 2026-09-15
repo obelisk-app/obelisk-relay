@@ -5,7 +5,6 @@ import {
   type StorageStats,
   type StorageSample,
 } from '../../services/AdminApiClient'
-import { StorageIcon } from './icons'
 import { confirmMatches } from './confirmPhrase'
 
 /**
@@ -358,12 +357,7 @@ export const StorageManager = () => {
 
   return (
     <div>
-      <div class="flex items-center gap-2 mb-2">
-        <StorageIcon class="w-5 h-5" />
-        <h2 class="text-xl font-bold">Storage</h2>
-      </div>
       <p class="text-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-        What this relay has stored, and whether anything is being deleted.
         Automatic pruning is off unless explicitly armed below.
       </p>
 

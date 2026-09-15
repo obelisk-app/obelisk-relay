@@ -1641,3 +1641,68 @@ body {
     gap: 2px;
   }
 }
+
+/*
+ * The page header owns the title. Every screen used to render its own <h2> and
+ * description directly beneath the identical title the header had already
+ * shown -- "Access" followed immediately by "Access Management" -- so the first
+ * thing on every page was a restatement of where you already knew you were.
+ * The descriptions now live with the tab definitions and render here, once.
+ */
+.admin-header-blurb {
+  margin: 4px 0 0;
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--color-text-secondary);
+}
+
+/* ---------- Status rows ---------- */
+
+/*
+ * A dashboard status is only useful if it says whether the thing is working.
+ * These pair a plain-language verdict with the badge, so an operator does not
+ * have to know that "pruning_enabled: true" and "actually deleting" are
+ * different things -- which is precisely what was missed while the database
+ * grew to 5.2GB.
+ */
+.admin-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--color-border);
+}
+
+.admin-status-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  background: var(--color-bg-secondary, #141414);
+}
+
+.admin-status-item strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.admin-status-item p {
+  margin: 3px 0 0;
+  max-width: 68ch;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .admin-status-item {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

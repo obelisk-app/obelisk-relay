@@ -246,10 +246,6 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
   return (
     <div class="space-y-6">
       <div>
-        <h2 class="text-xl font-bold">Relay Settings</h2>
-        <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
-          Operational controls for identity, admins, backups, restart, and recovery.
-        </p>
       </div>
 
       {toast && (

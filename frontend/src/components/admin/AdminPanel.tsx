@@ -26,7 +26,10 @@ type IconComponent = (props: { class?: string }) => preact.JSX.Element
 interface NavItem {
   id: Tab
   label: string
+  /** Terse line under the sidebar entry. */
   description: string
+  /** Fuller sentence rendered beside the page title in the header. */
+  blurb: string
   icon: IconComponent
 }
 
@@ -47,13 +50,23 @@ interface SearchTarget {
   keywords: string[]
 }
 
+// `description` is the terse sidebar line; `blurb` is the fuller sentence shown
+// in the page header. Both live here so a page is described in exactly one
+// place -- every screen used to repeat its own title and description in the
+// body, directly under the identical title the header had already rendered.
 const tabs: NavItem[] = [
-  { id: 'dashboard', label: 'Overview', description: 'Relay health', icon: OverviewIcon },
-  { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks', icon: AccessIcon },
-  { id: 'reference-accounts', label: 'References', description: 'Follow sync sources', icon: ReferencesIcon },
-  { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon },
-  { id: 'storage', label: 'Storage', description: 'Database and pruning', icon: StorageIcon },
-  { id: 'settings', label: 'Settings', description: 'Reset and recovery', icon: SettingsIcon },
+  { id: 'dashboard', label: 'Overview', description: 'Relay health', icon: OverviewIcon,
+    blurb: 'Live health, what is configured, and anything that needs attention.' },
+  { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks', icon: AccessIcon,
+    blurb: 'Choose who can use the relay, then manage allowed and blocked pubkeys.' },
+  { id: 'reference-accounts', label: 'References', description: 'Follow sync sources', icon: ReferencesIcon,
+    blurb: 'Accounts whose follows are auto-whitelisted on this relay.' },
+  { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon,
+    blurb: 'Browse relay groups, metadata, members, and stored events.' },
+  { id: 'storage', label: 'Storage', description: 'Database and pruning', icon: StorageIcon,
+    blurb: 'What this relay has stored, and whether anything is being deleted.' },
+  { id: 'settings', label: 'Settings', description: 'Reset and recovery', icon: SettingsIcon,
+    blurb: 'Operational controls for identity, admins, backups, restart, and recovery.' },
 ]
 
 const searchTargets: SearchTarget[] = [
@@ -299,9 +312,11 @@ export const AdminPanel = (_props: { path?: string }) => {
       <main class="flex-1 overflow-auto">
         <div class="admin-header-bar px-5 md:px-8" style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(255,255,255,0.015)' }}>
           <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 w-full">
-            <div>
-              <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>Admin</div>
-              <h1 class="mt-1 text-2xl font-bold">{active.label}</h1>
+            <div class="min-w-0">
+              <h1 class="text-2xl font-bold">{active.label}</h1>
+              {active.blurb && (
+                <p class="admin-header-blurb">{active.blurb}</p>
+              )}
             </div>
             <div class="admin-global-search">
               <SearchIcon class="admin-search-icon" />

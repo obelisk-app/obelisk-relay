@@ -8,6 +8,7 @@ import type { NostrSigner } from '@nostr-wot/signers'
 import { NIP46_RELAYS } from '../../constants'
 import { adminApi, type SetupStatus } from '../../services/AdminApiClient'
 import { Nip46SignerDeepLink } from './Nip46SignerDeepLink'
+import { LOGIN_METHOD_ICONS } from './loginIcons'
 import {
   clearStoredSigners,
   restoreNip46SignerWithoutConnectReplay,
@@ -292,10 +293,12 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                         Loading signer...
                       </div>
                     )}
+                    <div class="obelisk-login">
                     <LoginWidget
                       title={setupOwnerPubkey ? 'Connect retained owner' : 'Connect relay owner'}
                       subtitle={setupOwnerPubkey ? 'This reset can only be completed by the retained owner.' : 'This identity becomes the first admin.'}
                       methods={['nip07', 'nip46', 'import']}
+                      methodIcons={LOGIN_METHOD_ICONS}
                       flatLayout
                       showRememberToggle
                       nip46Mode="qr"
@@ -307,6 +310,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                       }}
                       onLogin={handleWidgetLogin}
                     />
+                    </div>
                   </div>
                 )}
               </section>

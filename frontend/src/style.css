@@ -1352,3 +1352,82 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   word-break: break-all;
 }
+
+/* ── Login widget ───────────────────────────────────────────────────────────
+ *
+ * Ported from obelisk-dex's `.obelisk-login-modal` (globals.css) so the relay
+ * console and the app present one sign-in screen rather than two. The variable
+ * names differ between repos but the palette is identical: `--color-lc-green`
+ * there is `--color-accent` (#b4f953) here.
+ *
+ * Scoped to `.obelisk-login` rather than dex's `.nui-modal`, because the admin
+ * login renders inline via `flatLayout` — there is no modal element to hang the
+ * rules on. Only the shared pieces are carried over; dex's profile-setup and
+ * npub-sharing rules target flows this widget does not offer.
+ */
+.obelisk-login .nui-method-button {
+  padding: 16px;
+  gap: 14px;
+  border-radius: 14px;
+  border-color: var(--color-border);
+  background: #0f0f0f;
+}
+.obelisk-login .nui-method-button:hover,
+.obelisk-login .nui-method-button:focus-visible {
+  border-color: var(--color-accent);
+  background: color-mix(in oklab, var(--color-bg-primary) 90%, var(--color-accent) 10%);
+  outline: none;
+}
+
+/* The tinted rounded square behind each method icon. Without it the SVGs float
+ * unanchored at the start of the row. */
+.obelisk-login .nui-method-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  color: var(--color-accent);
+  border: 1px solid color-mix(in oklab, var(--color-accent) 22%, transparent);
+}
+.obelisk-login .nui-method-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.obelisk-login .nui-method-label {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.obelisk-login .nui-method-hint {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* Primary CTA pill, matching lc-pill-primary so disabled-vs-enabled reads
+ * correctly against the dark backdrop. */
+.obelisk-login .nui-login-button {
+  padding: 14px 24px;
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  min-height: 48px;
+}
+.obelisk-login .nui-login-button:not(:disabled):hover {
+  background: color-mix(in oklab, var(--color-accent) 92%, white 8%);
+  box-shadow: 0 0 24px color-mix(in oklab, var(--color-accent) 30%, transparent);
+}
+
+/* Native checkboxes (the remember-me toggle) render as an OS grey square
+ * otherwise. */
+.obelisk-login input[type="checkbox"] {
+  accent-color: var(--color-accent);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin: 1px 0 0;
+}

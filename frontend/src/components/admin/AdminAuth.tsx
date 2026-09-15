@@ -14,6 +14,7 @@ import {
   signAdminAuthEvent,
   withTimeout,
 } from "./adminSigner"
+import { LOGIN_METHOD_ICONS } from "./loginIcons"
 
 interface AdminAuthProps {
   onAuthenticated: () => void
@@ -138,10 +139,12 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
         )}
 
         {!signer ? (
+          <div class="obelisk-login">
           <LoginWidget
             title="Sign in as relay admin"
             subtitle="Use the operator Nostr key authorized for this relay."
             methods={["nip07", "nip46", "import"]}
+            methodIcons={LOGIN_METHOD_ICONS}
             flatLayout
             showRememberToggle
             nip46Mode="qr"
@@ -153,6 +156,7 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
             }}
             onLogin={handleWidgetLogin}
           />
+          </div>
         ) : (
           <div class="space-y-3">
             {!error && (

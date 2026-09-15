@@ -5,6 +5,7 @@ import {
   type StorageStats,
 } from '../../services/AdminApiClient'
 import { StorageIcon } from './icons'
+import { confirmMatches } from './confirmPhrase'
 
 /**
  * Kinds the relay refuses to prune under any configuration — mirrors
@@ -182,7 +183,7 @@ export const StorageManager = () => {
     .filter(([, days]) => Number.isInteger(days) && days >= 1)
 
   const isEnabling = armed && !settings?.configured_pruning_enabled
-  const confirmed = !isEnabling || confirmText.trim() === 'DELETE'
+  const confirmed = !isEnabling || confirmMatches(confirmText, 'DELETE')
   const intervalNum = Number(intervalMinutes)
   const formValid = !armed || (
     Number.isInteger(intervalNum) && intervalNum >= 1 && activePolicies.length > 0
@@ -570,6 +571,7 @@ export const StorageManager = () => {
                     </p>
                     <input
                       type="text"
+                      class={`admin-confirm-input ${confirmMatches(confirmText, 'DELETE') ? 'is-valid' : ''}`}
                       value={confirmText}
                       placeholder="DELETE"
                       aria-label="Type DELETE to confirm enabling automatic deletion"
@@ -639,7 +641,8 @@ export const StorageManager = () => {
                               <span class="flex items-center justify-end gap-2">
                                 <input
                                   type="text"
-                                  style={{ width: '110px' }}
+                                  class={`admin-confirm-input ${confirmMatches(recipientConfirm, 'DELETE') ? 'is-valid' : ''}`}
+                                  style={{ maxWidth: '130px' }}
                                   value={recipientConfirm}
                                   placeholder="DELETE"
                                   aria-label="Type DELETE to confirm"
@@ -647,7 +650,7 @@ export const StorageManager = () => {
                                 />
                                 <button
                                   type="button"
-                                  disabled={recipientBusy || recipientConfirm.trim() !== 'DELETE'}
+                                  disabled={recipientBusy || !confirmMatches(recipientConfirm, 'DELETE')}
                                   onClick={() => deleteWrapsFor(r.pubkey)}
                                   class="text-xs px-2 py-1 rounded"
                                   style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.4)' }}

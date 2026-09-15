@@ -3,6 +3,7 @@ import { adminApi, EventInfo, MemberInfo, type GroupInfo } from '../../services/
 import { SearchIcon } from './SearchIcon'
 import { GroupChatView } from './GroupChatView'
 import { useRowSelection } from './useRowSelection'
+import { confirmMatches } from './confirmPhrase'
 
 interface Props {
   group: GroupInfo
@@ -608,7 +609,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                     {memberAction === 'wipe' && (
                       <input
                         type="text"
-                        class="mb-2"
+                        class={`admin-confirm-input mb-2 ${confirmMatches(memberConfirmText, 'DELETE') ? 'is-valid' : ''}`}
                         value={memberConfirmText}
                         placeholder="DELETE"
                         aria-label="Type DELETE to confirm deleting these users' events"
@@ -619,7 +620,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                       <button
                         type="button"
                         onClick={runMemberBulk}
-                        disabled={memberBusy || (memberAction === 'wipe' && memberConfirmText.trim() !== 'DELETE')}
+                        disabled={memberBusy || (memberAction === 'wipe' && !confirmMatches(memberConfirmText, 'DELETE'))}
                         class="text-xs px-2 py-1 rounded"
                         style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.4)' }}
                       >

@@ -7,6 +7,7 @@ import {
   type ObeliskIndexSettings,
   type RelayIdentity,
 } from '../../services/AdminApiClient'
+import { confirmMatches } from './confirmPhrase'
 
 type SettingsSection = 'whitelist' | 'storage' | 'groups'
 
@@ -109,7 +110,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
     setBusy('rotate-key')
     setError(null)
     try {
-      const response = await adminApi.rotateRelayKey(rotateConfirm)
+      const response = await adminApi.rotateRelayKey('ROTATE')
       setRotateConfirm('')
       setIdentity(prev => prev ? { ...prev, relay_pubkey: response.relay_pubkey, restart_required: true } : prev)
       showToast(response.message)
@@ -232,7 +233,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
     setError(null)
 
     try {
-      const response = await adminApi.resetRelayConfig({ confirm: resetConfirm })
+      const response = await adminApi.resetRelayConfig({ confirm: 'RESET' })
       setResetConfirm('')
       onResetToSetup(response)
     } catch (e) {
@@ -440,7 +441,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
                 <button
                   type="button"
                   onClick={rotateRelayKey}
-                  disabled={rotateConfirm !== 'ROTATE' || busy === 'rotate-key'}
+                  disabled={!confirmMatches(rotateConfirm, 'ROTATE') || busy === 'rotate-key'}
                   class="admin-danger-button"
                 >
                   {busy === 'rotate-key' ? 'Rotating...' : 'Rotate key'}
@@ -752,7 +753,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
             <button
               type="button"
               onClick={resetConfig}
-              disabled={resetConfirm !== 'RESET' || busy === 'reset'}
+              disabled={!confirmMatches(resetConfirm, 'RESET') || busy === 'reset'}
               class="admin-danger-button"
             >
               {busy === 'reset' ? 'Resetting...' : 'Reset and reopen setup'}

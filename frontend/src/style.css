@@ -501,6 +501,50 @@ body {
   background: #202020;
 }
 
+/*
+ * Typed confirmation for a destructive action ("type DELETE").
+ *
+ * These were bare <input> elements, so they fell through every admin input
+ * rule above and rendered at browser defaults inside a dark panel — the text
+ * being typed was effectively invisible. On the one control standing between
+ * an operator and irreversible deletion, that is the worst possible place for
+ * low contrast. Red-tinted so it reads as dangerous, and monospace so DELETE
+ * is unambiguous while typing.
+ */
+.admin-confirm-input {
+  width: 100%;
+  max-width: 220px;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  line-height: 20px;
+  outline: none;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.admin-confirm-input::placeholder {
+  color: var(--color-text-secondary);
+  opacity: 0.55;
+  letter-spacing: 0.08em;
+}
+
+.admin-confirm-input:focus {
+  border-color: #f87171;
+  background: #202020;
+}
+
+/* Confirmed: the word matches and the action is now armed. */
+.admin-confirm-input.is-valid {
+  border-color: rgba(180, 249, 83, 0.55);
+  color: #b4f953;
+}
+
 .admin-access-button {
   min-height: 40px;
   min-width: 76px;

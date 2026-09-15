@@ -1,9 +1,25 @@
 name: CI
 
 on:
+  # Only main on push. Every other branch is covered by pull_request, and
+  # listing "*" here meant a push to a branch with an open PR ran the whole
+  # suite twice — once for each event.
   push:
-    branches: [ "*" ]
+    branches: [ main ]
+    paths-ignore: &non_code
+      - '**.md'
+      - 'docs/**'
+      - 'screenshots/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
+    paths-ignore: *non_code
+
+# A newer commit makes an in-flight run obsolete. Without this, two pushes a
+# minute apart both ran to completion — three full Rust compiles each.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +60,10 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    # tarpaulin instruments and rebuilds the whole tree, so this doubles the
+    # cost of every run. Coverage is informational and only ever read for the
+    # mainline, so pay for it there rather than on every branch and PR.
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4

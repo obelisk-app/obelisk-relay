@@ -1,154 +1,145 @@
 # Remaining work
 
-Snapshot of what is **not** done, as of 2026-09-15. Everything listed under
-"Shipped" below is deployed and verified; everything under "Open" is not.
-
-Full plan with reasoning: the session plan file this was extracted from.
+Updated 2026-09-15. Everything under "Open" is not done; everything under
+"Landed" is committed and pushed to `main`.
 
 ---
 
 ## Open
 
-### A. Arm retention and recover `public.obelisk.ar` — **blocks everything else**
+### A. Free disk on the deployment host — **blocks the build**
 
-The relay is degraded right now. Measured against production, authenticated over
-NIP-42:
-
-```
-kind 39000 (group metadata, limit 100) → TIMEOUT 60s, 0 events
-kind 9     (chat, limit 20)            → 20 events, first at 18.7s
-```
-
-The metadata query is what the channel list depends on, so the client sits at
-*Loading channels…* forever. `data.mdb` is **4.84 GB** on a box with ~2 GB of free
-page cache; LMDB is memory-mapped, so once the working set exceeds RAM every read is
-a disk seek. The relay sits at ~2.4 GB RSS.
-
-It is not chat traffic. The 20,000 newest events contain **3** kind-9 messages. The
-bulk is **358,257 kind-1059 gift wraps** (real NIP-17 DMs, plus sender self-copies —
-two events per message sent) and their index overhead.
-
-Steps:
-
-1. **Ship two committed-but-unreleased fixes first** — `41f3d99` and `9d6a5ca`. The
-   typed-`DELETE` gate rendered at **1.17:1 contrast** (near-white on white) and
-   matched case-sensitively, so typing `delete` silently left Save disabled. That is
-   almost certainly why arming retention has not worked. Needs a new image.
-2. Storage → **count exactly** on 1059 → set **30 days** → type `DELETE` → save →
-   **restart**. Policies are read at startup only.
-3. Expect ~63,566 events removed on the first pass. Re-measure both queries above.
-
-If queries are still slow afterwards, **the cause is not database size** — profile the
-addressable-event query path instead of deleting more.
-
-> LMDB does not return freed pages to the filesystem. `data.mdb` stays 4.84 GB even
-> after a large prune; the win is a smaller working set. To reclaim the file itself,
-> round-trip `scripts/relay-data.sh export` → `import`, which rebuilds it compactly
-> and also clears the stale `deleted-ids` entries both relays report.
-
-### B. `setup.sh` turns people away — `setup.sh:269-273`
-
-Defaults to **pulling** a 259 MB image, but the disk check is unconditional and prints
-*"First build needs ~3GB"* on the pull path too, defaulting to **n**. A real installer
-hit this and stopped. Three bugs in five lines:
-
-1. The warning never consults `BUILD_FROM_SOURCE` (parsed at line 27). Gate it on the
-   mode; ~1 GB for pull, ~3 GB for build.
-2. `disk_avail_gb` truncates (`printf "%d", $4/1024/1024`), so 3.9 GB reports as `3`
-   and fails `-gt 3`. Compare in MB; format for display separately.
-3. `df -k .` measures the directory the script is in. On macOS with colima or Docker
-   Desktop, images live inside a Linux VM with its own disk — the wrong filesystem
-   entirely. Prefer `docker system df`, fall back to `df` only if Docker can't be
-   queried.
-
-Also default the pull-path prompt to **y**.
-
-### C. The published image is arm64 only
-
-Intel Macs and ordinary x86 servers cannot run it, so "anyone can install this" is
-currently false. Decided: attempt the amd64 build locally on the 1-core builder.
-
-Worth knowing before starting: both successful builds so far were **native arm64**.
-This host is aarch64, so amd64 needs QEMU user-mode emulation, which is what produced
-`x86_64-binfmt-P: QEMU internal SIGSEGV` partway through `cargo build` on the first
-attempt. Fewer parallel jobs may help by lowering memory pressure; it does not make
-emulation more stable.
+`/` is at **97%, 2.7 GB free**. A Rust release build needs ~3 GB of cache alone,
+so a local build fails partway through with `ENOSPC`, and the multi-arch CI route
+was cancelled at 42 minutes. Nothing else here can ship until this is done.
 
 ```
-docker buildx build --builder obelisk-1core --load \
-  --build-arg CARGO_BUILD_JOBS=1 --platform linux/amd64 \
-  -t ghcr.io/obelisk-app/obelisk-relay:<tag>-amd64 .
+rm -rf /root/relay-backups/obelisk-relays/20260914T170030Z   # 4.3 GB
+docker image prune -a -f                                      # up to 2.8 GB
 ```
 
-Run detached and grep the log for `SIGSEGV` — do **not** trust the exit code. A build
-piped into `tail` returns `tail`'s status, which is how the first failure initially
-looked like success.
+The backup is superseded by `20260915T014037Z`, which is 8.5 h newer and holds a
+complete 4.58 GB `data.mdb` for both relays plus integrity reports — verified.
+The image prune removes `v2026.09.14-admin-ux`, `v2026.07.25-main-339d70a` and
+`alpine:latest`; `v2026.09.14-retention` is what is running and is left alone.
 
-Fallback: `.github/workflows/docker.yml` already builds `linux/amd64,linux/arm64` on
-x86 runners where amd64 is native. One `workflow_dispatch`, no new code.
+### B. Build and deploy `v2026.09.15-multiarch`
 
-Either way publish a **multi-arch manifest** so `docker pull` resolves per platform.
+Tag exists at `ee2cf25` and is pushed; **no image was ever published** under it.
+Two CI attempts: the first failed on the `CARGO_BUILD_JOBS` bug (now fixed), the
+second was cancelled at 42 min while compiling.
+
+This host is **aarch64**, and on x86 GitHub runners arm64 is the QEMU-emulated
+leg — so CI pays emulation cost on precisely the architecture we deploy. Once
+disk is free, prefer a **native arm64 build here** and let CI do amd64 natively,
+then join them:
+
+```
+docker buildx imagetools create -t <tag> <tag>-arm64 <tag>-amd64
+```
+
+Then bump the pin at `compose.yml:9` and `:35` and recreate. Rollback is
+`v2026.09.14-retention`, still on the host.
+
+> Verify the run's `conclusion`, never the exit code. `gh run watch --exit-status
+> | tail` returns *tail's* status — that is how a failed build read as success
+> twice tonight.
+
+### C. The 7 d retention window is written but inert
+
+`public-config/settings.local.yml` holds `{1059: "7d"}` (set from the Storage
+screen) with `prune_interval: "360m"`. Policies are read **only at startup**, so
+it takes effect on the next restart and will delete substantially more than the
+58,032 the 30 d pass took. Watch `docker stats` through the first pass — it is
+one unbounded LMDB write transaction on a box with no swap headroom.
 
 ### D. Operator controls still missing
 
-**Delete by kind and age, in one action.** Today you can delete selected events, or all
-of one user's, or wait for the pruner. There is no "delete kind 1059 older than 30
-days, now". Add it per policy row on the Storage screen: preview with
-`admin_exact_kind_count` (already returns total *and* older-than-N), then a bounded
-delete over the same filter the pruner uses, behind the typed-`DELETE` gate.
+**Delete by kind and age, in one action.** Preview with `admin_exact_kind_count`
+(already returns total *and* older-than-N), then a bounded delete over the same
+filter the pruner uses, behind the typed-`DELETE` gate. Must use `list_scopes()`,
+not `self.groups` — `admin_delete_user_events` derives scopes from the latter and
+silently misses any scope holding no loaded group.
 
-**Space used per kind.** The screen shows counts, not bytes. Exact sizes mean reading
-every event, which is not affordable — but the sampling pass already walks 20k events,
-so accumulate `content.len()` per kind and report **average bytes × exact count**,
-labelled as an estimate.
+**Space used per kind.** The screen shows counts, not bytes. The sampling pass
+already walks 20k events, so accumulate size per kind and report average × exact
+count, labelled an estimate. Count tags, not just `content.len()` — a kind-9000
+event is nearly all tags and would otherwise read as zero.
 
 ### E. README and Reddit posts
 
-Login-flow screenshots are captured in `screenshots/` (see below). The authenticated
-console shots still need a NIP-46 approval, and are only worth taking **after A** —
-right now an honest screenshot shows a console that cannot load its own channel list.
+Login screenshots are in `screenshots/`. The authenticated console shots need a
+NIP-46 approval and are only worth taking after B and C.
+
+### F. Housekeeping
+
+`obelisk-relay-backup.timer` is `disabled`/`inactive`. Arm it only after A, and
+shorten its 210-day retention first or it refills the disk. Each backup is 4.3 GB.
 
 ---
 
-## Shipped and deployed
+## Landed
 
-Both relays run `v2026.09.14-retention`; both repos pushed.
+### Group discovery no longer scans the database — `73391b7`
 
-- Per-kind retention policies (`prune_retention_by_kind`), replacing the single window
-- Pruner refuses **protected** kinds (9000–9011, 39000–39003) *and* anything
-  replaceable or addressable — one event per user, so deleting frees nothing and
-  destroys live state
-- `admin_delete_user_events` no longer deletes group-management events; wiping a
-  group's creator used to orphan it
-- Bulk moderation by author **and** by recipient (`p` tag) — gift wraps have throwaway
-  authors, so recipient is the only per-user handle
-- Storage policy table, on-demand exact counts (background + poll; 1059 measured at
-  **434 s** on the 4.84 GB database), top-recipient panel
-- NIP-11 `retention` advertisement, derived from the live pruner config so it cannot
-  drift from what is enforced
-- `docs/retention.md`, retention section in `docs/deploy-a-relay.md`
-- obelisk-dex: groups read-state moved to a replaceable kind-30078 (one event per
-  user, was unbounded); DM gift wraps now publish through `publishSignedEvent` —
-  `publishEvent` re-signs, which silently broke read-state sync *and* stamped the
-  user's identity onto wraps built to hide it
+The channel list hung because its query was the slowest one the storage layer can
+run. nostr-lmdb's six indexes are all keyed on an **author or a tag**, so a filter
+naming only `kinds` matches none and falls through to `query_by_scraping`. Cost is
+scan depth, not match count — the rarer the kind, the slower the query.
 
-## Captured
+Measured on production, 5.2 GB, authenticated over NIP-42:
 
-`screenshots/` — login states from live production:
+```
+{"kinds":[39000,39001,39002]}                  62 events   29.3s
+{"kinds":[39000,39001,39002],"authors":[...]}  62 events    0.45s
+{"kinds":[31337]}   (no such events exist)      0 events   49.9s
+```
 
-| File | What |
-|---|---|
-| `01-admin-login.png` | Method list |
-| `02-login-extension.png` | NIP-07 with no extension present (inline error, list stays) |
-| `03-login-bunker-qr.png` | NIP-46 pairing QR |
-| `04-login-paste-key.png` | nsec / hex entry |
+The last line proves it is a scan, not a volume problem. The relay now supplies
+the author set, because nothing else can: a discovering client has no `d`/`h` tag
+yet, and the 2026-08-11 key rotation left **four** pubkeys holding live group
+state — the current key covers only 2 of 20 kind-39000 events, so scoping to it
+alone would hide 18 groups. The set is scanned once at startup, detached; until it
+lands filters pass through unrewritten, because a slow channel list is recoverable
+and a silently incomplete one is not. See `src/group_state_filter.rs`.
 
-## Housekeeping
+Chat was never affected — clients send kind 9 with an `h` tag, already served by
+`(kind, tag, created_at)` in 0.45 s.
 
-- `bunker-qr*.png` and `bunker-uri.txt` in the repo root are a **live NIP-46 pairing
-  credential**. Delete them once the authenticated screenshots are taken; do not
-  commit them.
-- `obelisk-relay-backup.timer` is still inactive. The script works now (it used to
-  abort on any integrity finding, and both relays report stale `deleted-ids` entries).
-- Disk was at **96%** (3.5 GB free) at the time of writing. Each backup is 4.3 GB and
-  the script only prunes at 210 days. A Rust build needs headroom.
+### Storage settings could write unstartable YAML — `a672f37`
+
+`upsert_relay_value` replaced a key's first line only, stranding the children of a
+block-style setting. The result does not parse, and since config is read only at
+startup the console reported success while the **next restart** was what broke.
+Reachable by following `docs/retention.md` and then saving from the Storage
+screen; it happened on public.obelisk.ar on 2026-09-15 and was caught by hand.
+
+### Build and installer
+
+- `ad9b94f` — `ARG CARGO_BUILD_JOBS` with no default expands to `ENV
+  CARGO_BUILD_JOBS=`, and cargo aborts parsing `""` at exit 101. **CI could not
+  build this image at all since `5cd6b11`**; local releases were unaffected only
+  because they always passed `--build-arg CARGO_BUILD_JOBS=1`, which is why it
+  looked like a QEMU problem.
+- `ee2cf25` — cap cargo at 3 jobs in CI so the emulated arm64 leg has headroom.
+- `bc05557` — `setup.sh` measured the wrong filesystem. The alpine probe could
+  never work (`/var/lib/docker` does not exist in the container) and the pipeline
+  after it returned awk's status, so the function "succeeded" with an empty string
+  and never reached its fallback — every macOS user got "Could not determine free
+  disk space". `NR==2` also broke on `df`'s device-name wrap, reporting 0 GB on
+  healthy hosts.
+- `d94f625` — `setup.sh` no longer warns "first build needs ~3GB" on the pull
+  path, which only downloads a 259 MB image, and no longer defaults to **n**.
+
+### Retention, armed 2026-09-15
+
+Pruner enabled with `{1059: "30d"}`; first pass deleted **58,032** gift wraps in
+~38 s with no OOM. NIP-11 now advertises `retention`. `data.mdb` stays at 5.20 GB
+— LMDB never returns freed pages; the win is a smaller working set. Reclaiming the
+file needs a `scripts/relay-data.sh export` → `import` round trip, which also
+clears the stale `deleted-ids` entries both relays report, and needs ~2× the
+database free.
+
+Measured after the prune: kind 9 improved 23.5 s → 16.0 s and kind 39000 went from
+a 60 s timeout to returning — but both stayed slow, which is what pointed at the
+scan rather than at database size.

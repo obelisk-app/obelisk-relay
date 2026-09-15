@@ -26,11 +26,44 @@ type ScopedGroupKey = (Scope, String);
 type ScopedGroupRef<'a> = Ref<'a, ScopedGroupKey, Group>;
 type ScopedGroupRefMut<'a> = RefMut<'a, ScopedGroupKey, Group>;
 
-/// Event count for a single kind, as stored.
+/// Event count for a single kind, as stored, with the bytes those sampled
+/// events occupy.
 #[derive(Debug, Clone)]
 pub struct StorageKindCount {
     pub kind: u16,
     pub count: usize,
+    /// Summed `estimated_event_bytes` over the sampled events of this kind.
+    /// Divide by `count` for a per-event average that can be scaled against an
+    /// exact count; see the Storage screen.
+    pub sampled_bytes: u64,
+}
+
+/// Fixed per-event storage floor: id (32) + pubkey (32) + signature (64) +
+/// created_at (8) + kind (2), plus record framing.
+const EVENT_OVERHEAD_BYTES: u64 = 160;
+
+/// Roughly what one event occupies: content, tag payload, and the fixed floor.
+///
+/// Content alone is not enough. A kind-9000 membership event has empty content
+/// and is entirely tags, and a reaction is one byte of content but well over a
+/// hundred on disk — attributing by `content.len()` would report the two
+/// heaviest structural categories as almost nothing.
+///
+/// Index entries are deliberately NOT counted, so these figures sum to less
+/// than the file on disk. This answers "which kinds are heavy", it is not an
+/// accounting of the database.
+fn estimated_event_bytes(event: &Event) -> u64 {
+    let tags: u64 = event
+        .tags
+        .iter()
+        .map(|tag| {
+            tag.as_slice()
+                .iter()
+                .map(|s| s.len() as u64 + 1)
+                .sum::<u64>()
+        })
+        .sum();
+    EVENT_OVERHEAD_BYTES + event.content.len() as u64 + tags
 }
 
 /// A gift-wrap recipient and how many wraps in the sample are addressed to them.
@@ -59,6 +92,10 @@ pub struct StorageStats {
     /// event on the relay; otherwise it bounds how far back the sample reaches.
     pub oldest_sampled_unix: u64,
     pub scope_count: usize,
+    /// True when any scope's page came back full, so the sample stopped short
+    /// of the whole database. Exact, unlike comparing counts: `limit` is
+    /// applied per scope.
+    pub sample_truncated: bool,
     /// Exact count of events a prune run would delete right now under the
     /// configured window. Exact because it is the number that decides whether
     /// arming a destructive setting is safe.
@@ -1028,6 +1065,12 @@ impl Groups {
         let mut sampled = 0usize;
         let mut newest_event_unix = 0u64;
         let mut oldest_sampled_unix = 0u64;
+        let mut bytes: HashMap<u16, u64> = HashMap::new();
+        // Set when any scope returns a full page, which is the only exact way
+        // to know the sample was truncated: `limit` applies per scope, so
+        // comparing sampled_events against sample_size is wrong once there is
+        // more than one scope.
+        let mut sample_truncated = false;
 
         for scope in &scopes {
             let events = self
@@ -1035,6 +1078,9 @@ impl Groups {
                 .query(vec![Filter::new().limit(sample_size)], scope)
                 .await
                 .map_err(|e| Error::internal(e.to_string()))?;
+            if events.len() >= sample_size {
+                sample_truncated = true;
+            }
             for event in events {
                 let ts = event.created_at.as_secs();
                 newest_event_unix = newest_event_unix.max(ts);
@@ -1044,6 +1090,7 @@ impl Groups {
                     oldest_sampled_unix.min(ts)
                 };
                 *tally.entry(event.kind.as_u16()).or_insert(0) += 1;
+                *bytes.entry(event.kind.as_u16()).or_insert(0) += estimated_event_bytes(&event);
                 if event.kind.as_u16() == 1059 {
                     if let Some(p) = event
                         .tags
@@ -1060,7 +1107,11 @@ impl Groups {
 
         let mut kinds: Vec<StorageKindCount> = tally
             .into_iter()
-            .map(|(kind, count)| StorageKindCount { kind, count })
+            .map(|(kind, count)| StorageKindCount {
+                kind,
+                count,
+                sampled_bytes: bytes.get(&kind).copied().unwrap_or(0),
+            })
             .collect();
         kinds.sort_by(|a, b| b.count.cmp(&a.count));
         info!(
@@ -1115,6 +1166,7 @@ impl Groups {
             newest_event_unix,
             oldest_sampled_unix,
             scope_count: scopes.len(),
+            sample_truncated,
             prune_preview,
         })
     }

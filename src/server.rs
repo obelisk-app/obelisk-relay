@@ -648,6 +648,31 @@ pub async fn run_server(
         }
     });
 
+    // Disk usage over time. Hourly is fine -- this is for spotting a growth
+    // trend over days, not for catching a spike -- and the file is bounded, so
+    // it cannot become the next thing that fills the disk. Recorded alongside a
+    // Prometheus gauge for anyone who does scrape this relay.
+    {
+        let db_path = settings.db_path.clone();
+        let config_dir = "config".to_string();
+        tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let bytes = crate::storage_history::measure_db_bytes(&db_path);
+                if bytes == 0 {
+                    continue;
+                }
+                metrics::database_bytes().set(bytes as f64);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                crate::storage_history::record(&config_dir, bytes, now);
+            }
+        });
+    }
+
     info!("Starting server on {}", addr);
     axum_server::bind(addr)
         .handle(handle.clone())

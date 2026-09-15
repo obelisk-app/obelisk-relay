@@ -209,6 +209,10 @@ struct StorageStatsEnvelope {
 struct StorageKindStat {
     kind: u16,
     count: usize,
+    /// Bytes the sampled events of this kind occupy.
+    sampled_bytes: u64,
+    /// Mean bytes per event, divided here so the client never divides by zero.
+    avg_bytes: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1564,6 +1568,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/stats", get(handle_stats))
         .route("/storage/stats", get(handle_storage_stats))
         .route("/storage/exact-count", get(handle_exact_kind_count))
+        .route("/storage/history", get(handle_storage_history))
         .route(
             "/reference-accounts",
             get(handle_reference_accounts_list).post(handle_reference_accounts_add),
@@ -2310,6 +2315,36 @@ async fn handle_storage_settings(
     Ok(Json(storage_settings_response(&state, false)))
 }
 
+/// Disk usage over time, so growth is visible rather than inferred from a
+/// single current number. See `crate::storage_history`.
+async fn handle_storage_history(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let mut history = crate::storage_history::load(&state.config_dir);
+
+    // Always append the live figure so the graph ends at "now" rather than at
+    // the last tick, which can be up to a sampling interval stale.
+    let now_bytes = crate::storage_history::measure_db_bytes(&state.db_path);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if now_bytes > 0 {
+        history.samples.push(crate::storage_history::StorageSample {
+            at: now,
+            db_bytes: now_bytes,
+        });
+    }
+
+    Ok(Json(history))
+}
+
 async fn handle_storage_settings_update(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -2750,13 +2785,22 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
     let response = StorageStatsResponse {
         sampled_events: stats.sampled_events,
         sample_size: stats.sample_size,
-        sample_is_complete: stats.sampled_events < stats.sample_size,
+        // Exact: set when a scope's page came back full. The old check
+        // compared sampled_events against sample_size, which breaks once there
+        // is more than one scope, because `limit` applies per scope.
+        sample_is_complete: !stats.sample_truncated,
         kinds: stats
             .kinds
             .iter()
             .map(|k| StorageKindStat {
                 kind: k.kind,
                 count: k.count,
+                sampled_bytes: k.sampled_bytes,
+                avg_bytes: if k.count > 0 {
+                    k.sampled_bytes / k.count as u64
+                } else {
+                    0
+                },
             })
             .collect(),
         top_recipients: stats

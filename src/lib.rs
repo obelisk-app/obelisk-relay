@@ -25,6 +25,7 @@ pub mod relay_middleware_tests;
 pub mod sampled_metrics_handler;
 pub mod search_capability_middleware;
 pub mod server;
+pub mod storage_history;
 pub mod unindexed_query;
 pub mod utils;
 pub mod validation_middleware;

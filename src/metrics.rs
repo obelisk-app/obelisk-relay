@@ -95,6 +95,15 @@ pub fn unindexed_queries() -> Counter {
     metrics::counter!("unindexed_queries")
 }
 
+/// Bytes the LMDB files occupy on disk, including free-list slack.
+///
+/// Slack is the interesting part: a flat event count beside a rising file size
+/// is a database that needs rebuilding rather than pruning, which is not
+/// visible from event counts alone.
+pub fn database_bytes() -> Gauge {
+    metrics::gauge!("database_bytes")
+}
+
 /// Groups gauge by privacy settings
 pub fn groups_by_privacy(private: bool, closed: bool) -> Gauge {
     metrics::gauge!("groups_by_privacy", "private" => private.to_string(), "closed" => closed.to_string())
@@ -113,6 +122,10 @@ pub fn setup_metrics() -> Result<PrometheusHandle, anyhow::Error> {
         .get_or_try_init(|| {
             // Describe metrics
             describe_counter!("groups_created", "Total number of groups created");
+            describe_gauge!(
+                "database_bytes",
+                "Size of the LMDB files on disk in bytes, including free-list slack"
+            );
             describe_counter!(
                 "unindexed_queries",
                 "REQ filters with no author, tag or id, which the storage layer must answer by scanning"

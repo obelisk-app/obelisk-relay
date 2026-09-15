@@ -165,8 +165,31 @@ port_in_use() {
   return 1
 }
 
-disk_avail_gb() {
-  df -k . 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024/1024 }'
+# Free space in MB where Docker actually stores images.
+#
+# `df .` is the wrong filesystem on macOS and on any Docker-in-a-VM setup
+# (Docker Desktop, colima, Rancher): images live inside the VM, which has its
+# own disk, while `.` is the user's home directory. Ask Docker first and fall
+# back to `df` only when it cannot answer.
+#
+# Returns MB, not GB — integer-truncating to GB turned 3.9GB into "3" and
+# tripped a `-gt 3` test that was meant to pass.
+disk_avail_mb() {
+  local root
+  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || root=""
+  if [ -n "$root" ]; then
+    # On Docker-in-a-VM the root dir is a path *inside* the VM, so df on the
+    # host will not find it; that failure falls through to the host check.
+    local in_vm
+    in_vm="$(docker run --rm --entrypoint df alpine -k /var/lib/docker 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }')"
+    [ -n "$in_vm" ] && { printf '%s' "$in_vm"; return; }
+    df -k "$root" 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }' && return
+  fi
+  df -k . 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }'
+}
+
+fmt_gb() {
+  awk -v mb="$1" 'BEGIN { printf "%.1f", mb/1024 }'
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -266,12 +289,29 @@ else
   ok "Port 8080 is available"
 fi
 
-DISK_AVAIL="$(disk_avail_gb)"
-if [ -n "$DISK_AVAIL" ] && [ "$DISK_AVAIL" -gt 3 ] 2>/dev/null; then
-  ok "Disk space: ${DISK_AVAIL}GB available"
+# The two modes need very different amounts of room, and conflating them was
+# turning people away from an install that would have worked: the published
+# image is ~260MB, but everyone was told "first build needs ~3GB" and prompted
+# with a default of "no".
+if [ "$BUILD_FROM_SOURCE" = true ]; then
+  DISK_NEED_MB=3072
+  DISK_NEED_LABEL="Building from source needs ~3GB"
 else
-  warn "Low disk space (${DISK_AVAIL:-?}GB). First build needs ~3GB."
-  prompt_yn "Continue anyway?" "n" || exit 1
+  DISK_NEED_MB=1024
+  DISK_NEED_LABEL="Pulling the image needs ~1GB"
+fi
+
+DISK_AVAIL_MB="$(disk_avail_mb)"
+if [ -n "$DISK_AVAIL_MB" ] && [ "$DISK_AVAIL_MB" -ge "$DISK_NEED_MB" ] 2>/dev/null; then
+  ok "Disk space: $(fmt_gb "$DISK_AVAIL_MB")GB available"
+elif [ -z "$DISK_AVAIL_MB" ]; then
+  # Could not measure. Say so rather than inventing a number, and do not block.
+  warn "Could not determine free disk space; continuing."
+else
+  warn "Low disk space ($(fmt_gb "$DISK_AVAIL_MB")GB). ${DISK_NEED_LABEL}."
+  # Default yes: this is a warning, not a failure, and the measurement can be
+  # of the wrong filesystem on Docker-in-a-VM setups.
+  prompt_yn "Continue anyway?" "y" || exit 1
 fi
 
 # ── Step 3: Admin & whitelist ─────────────────────────────────

@@ -146,14 +146,23 @@ export class AdminApiClient {
 
   async updateStorageSettings(settings: {
     pruning_enabled: boolean
-    retention_days: number
     prune_interval_minutes: number
-    prune_kinds: number[]
+    /** Retention in days, per kind. */
+    retention_days_by_kind: Record<number, number>
   }): Promise<StorageSettings> {
     return this.request('/api/admin/storage-settings', {
       method: 'POST',
       body: JSON.stringify(settings),
     })
+  }
+
+  /**
+   * Exact count for one kind (~12s on a multi-GB database). One kind at a time
+   * by design — a full sweep exceeded ten minutes when measured.
+   */
+  async getExactKindCount(kind: number, olderThanDays?: number): Promise<ExactCountEnvelope> {
+    const q = olderThanDays ? `&older_than_days=${olderThanDays}` : ''
+    return this.request(`/api/admin/storage/exact-count?kind=${kind}${q}`)
   }
 
   async getStorageStats(refresh = false): Promise<StorageStatsEnvelope> {
@@ -479,6 +488,10 @@ export interface StorageSettings {
   total_pruned: number
   runs: number
   last_run_unix: number
+  /** Retention seconds per kind currently in force. */
+  policies_secs: Record<number, number> | null
+  /** Events deleted per kind since process start. */
+  deleted_by_kind: Record<number, number> | null
   restart_required: boolean
 }
 
@@ -497,6 +510,8 @@ export interface StorageStats {
   /** True when the sample covered every stored event. */
   sample_is_complete: boolean
   kinds: StorageKindStat[]
+  /** Busiest gift-wrap recipients in the sample. */
+  top_recipients: RecipientStat[]
   newest_event_unix: number
   oldest_sampled_unix: number
   scope_count: number
@@ -508,6 +523,25 @@ export interface StorageStats {
   prune_preview_kinds: number[]
   computed_at: number
   cached: boolean
+}
+
+export interface ExactCountResponse {
+  kind: number
+  total: number
+  older_than?: number
+  older_than_days: number | null
+  computed_at: number
+}
+
+/** Counting a kind outlives an HTTP request, so the client polls. */
+export interface ExactCountEnvelope {
+  computing: boolean
+  result: ExactCountResponse | null
+}
+
+export interface RecipientStat {
+  pubkey: string
+  count: number
 }
 
 export interface StorageStatsEnvelope {

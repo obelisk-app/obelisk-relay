@@ -113,10 +113,17 @@ export const StorageManager = () => {
   // Local draft of the pruning form. Kept separate from `settings` so the
   // server's fallback display values never masquerade as configured policy.
   const [armed, setArmed] = useState(false)
-  const [retentionDays, setRetentionDays] = useState<string>('')
   const [intervalMinutes, setIntervalMinutes] = useState<string>('')
-  const [selectedKinds, setSelectedKinds] = useState<number[]>([])
+  // Retention per kind, in days, as strings so a half-typed value does not
+  // momentarily read as 0 days.
+  const [policyDays, setPolicyDays] = useState<Record<number, string>>({})
   const [confirmText, setConfirmText] = useState('')
+  // Exact counts fetched on demand, keyed by kind.
+  const [exact, setExact] = useState<Record<number, { total: number; olderThan?: number }>>({})
+  const [countingKind, setCountingKind] = useState<number | null>(null)
+  const [recipientTarget, setRecipientTarget] = useState<string | null>(null)
+  const [recipientConfirm, setRecipientConfirm] = useState('')
+  const [recipientBusy, setRecipientBusy] = useState(false)
 
   const loadSettings = () => {
     setLoading(true)
@@ -128,9 +135,13 @@ export const StorageManager = () => {
         // configured. On a relay that never enabled it, these stay blank so
         // the operator has to choose a window deliberately.
         if (data.configured_pruning_enabled) {
-          setRetentionDays(String(data.retention_days))
           setIntervalMinutes(String(data.prune_interval_minutes))
-          setSelectedKinds(data.prune_kinds)
+          const secs = data.policies_secs ?? {}
+          const asDays: Record<number, string> = {}
+          for (const [kind, s] of Object.entries(secs)) {
+            asDays[Number(kind)] = String(Math.round(Number(s) / 86400))
+          }
+          setPolicyDays(asDays)
         }
         setError(null)
       })
@@ -166,22 +177,67 @@ export const StorageManager = () => {
     return () => clearInterval(id)
   }, [counting])
 
-  const toggleKind = (kind: number) => {
-    setSelectedKinds(prev =>
-      prev.includes(kind) ? prev.filter(k => k !== kind) : [...prev, kind],
-    )
-  }
+  const activePolicies = Object.entries(policyDays)
+    .map(([kind, days]) => [Number(kind), Number(days)] as const)
+    .filter(([, days]) => Number.isInteger(days) && days >= 1)
 
   const isEnabling = armed && !settings?.configured_pruning_enabled
   const confirmed = !isEnabling || confirmText.trim() === 'DELETE'
-
-  const retentionNum = Number(retentionDays)
   const intervalNum = Number(intervalMinutes)
   const formValid = !armed || (
-    Number.isInteger(retentionNum) && retentionNum >= 1 &&
-    Number.isInteger(intervalNum) && intervalNum >= 1 &&
-    selectedKinds.length > 0
+    Number.isInteger(intervalNum) && intervalNum >= 1 && activePolicies.length > 0
   )
+
+  // Counting one kind takes tens of seconds on a multi-GB database, so the
+  // server computes in the background and we poll for the result.
+  const countExactly = async (kind: number) => {
+    setCountingKind(kind)
+    const days = Number(policyDays[kind])
+    const olderThan = Number.isInteger(days) && days >= 1 ? days : undefined
+    try {
+      // Measured at 434s for kind 1059 on the 4.2 GB production database --
+      // far longer than the ~12s a smaller kind takes -- so allow 15 minutes.
+      // The server caches the result either way, so giving up early only
+      // costs the operator a second click.
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const res = await adminApi.getExactKindCount(kind, olderThan)
+        if (res.result) {
+          setExact(prev => ({
+            ...prev,
+            [kind]: { total: res.result!.total, olderThan: res.result!.older_than },
+          }))
+          return
+        }
+        await new Promise(r => setTimeout(r, 3000))
+      }
+      setError('Still counting. The result is cached when it lands — click "count exactly" again in a few minutes.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Exact count failed')
+    } finally {
+      setCountingKind(null)
+    }
+  }
+
+  const deleteWrapsFor = async (pubkey: string) => {
+    setRecipientBusy(true)
+    setError(null)
+    try {
+      const res = await adminApi.bulkDeleteByRecipient([pubkey], [1059])
+      setToast(
+        res.failed === 0
+          ? `Deleted ${res.deleted} gift wrap${res.deleted !== 1 ? 's' : ''} addressed to that pubkey.`
+          : `Deleted ${res.deleted}; the request reported ${res.failed} failure(s).`,
+      )
+      setTimeout(() => setToast(null), 6000)
+      setRecipientTarget(null)
+      setRecipientConfirm('')
+      loadStats(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete gift wraps')
+    } finally {
+      setRecipientBusy(false)
+    }
+  }
 
   const save = async () => {
     if (!settings) return
@@ -190,15 +246,14 @@ export const StorageManager = () => {
     try {
       const next = await adminApi.updateStorageSettings({
         pruning_enabled: armed,
-        retention_days: armed ? retentionNum : (settings.retention_days || 30),
         prune_interval_minutes: armed ? intervalNum : (settings.prune_interval_minutes || 60),
-        prune_kinds: armed ? selectedKinds : (settings.prune_kinds.length ? settings.prune_kinds : [9, 11, 12]),
+        retention_days_by_kind: Object.fromEntries(activePolicies),
       })
       setSettings(next)
       setConfirmText('')
       setToast(
         armed
-          ? 'Pruning armed. It takes effect on the next relay restart.'
+          ? `Pruning armed for ${activePolicies.length} kind${activePolicies.length !== 1 ? 's' : ''}. It takes effect on the next relay restart.`
           : 'Pruning disabled. No events will be deleted.',
       )
       setTimeout(() => setToast(null), 6000)
@@ -377,9 +432,8 @@ export const StorageManager = () => {
                   // Start from an empty, deliberate choice rather than a
                   // prefilled window the operator never picked.
                   if (!settings.configured_pruning_enabled) {
-                    setRetentionDays('')
                     setIntervalMinutes('60')
-                    setSelectedKinds([])
+                    setPolicyDays({})
                   }
                 }}
               />
@@ -394,76 +448,125 @@ export const StorageManager = () => {
 
             {armed && (
               <div class="mt-4 space-y-4">
-                <div class="admin-rate-grid">
-                  <label>
-                    <span>Delete events older than (days)</span>
-                    <input
-                      type="number"
-                      min="1"
-                      placeholder="e.g. 90"
-                      value={retentionDays}
-                      onInput={e => setRetentionDays((e.target as HTMLInputElement).value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Check every (minutes)</span>
-                    <input
-                      type="number"
-                      min="1"
-                      placeholder="60"
-                      value={intervalMinutes}
-                      onInput={e => setIntervalMinutes((e.target as HTMLInputElement).value)}
-                    />
-                  </label>
-                </div>
+                <label class="block" style={{ maxWidth: '260px' }}>
+                  <span class="block text-sm font-semibold mb-1">Check every (minutes)</span>
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="60"
+                    value={intervalMinutes}
+                    onInput={e => setIntervalMinutes((e.target as HTMLInputElement).value)}
+                  />
+                </label>
 
                 <div>
-                  <span class="block text-sm font-semibold mb-2">Which events to delete</span>
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {PRUNABLE_KINDS.map(k => {
-                      const stat = stats?.kinds.find(s => s.kind === k.kind)
-                      return (
-                        <label key={k.kind} class="admin-toggle-row">
-                          <input
-                            type="checkbox"
-                            checked={selectedKinds.includes(k.kind)}
-                            onChange={() => toggleKind(k.kind)}
-                          />
-                          <span>
-                            <strong>{k.label} <span class="font-mono opacity-60">({k.kind})</span></strong>
-                            <small>
-                              {stat ? `${formatNumber(stat.count)} stored` : 'none stored'}
-                              {k.hint ? ` · ${k.hint}` : ''}
-                            </small>
-                          </span>
-                        </label>
-                      )
-                    })}
+                  <span class="block text-sm font-semibold mb-1">Retention per kind</span>
+                  <p class="text-xs mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+                    Leave a window blank to keep that kind forever. Each kind has its
+                    own window, so short-lived traffic can go without touching
+                    conversations.
+                  </p>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                      <thead>
+                        <tr style={{ color: 'var(--color-text-secondary)' }}>
+                          <th class="text-left font-medium p-2">Kind</th>
+                          <th class="text-left font-medium p-2">Type</th>
+                          <th class="text-right font-medium p-2">Stored</th>
+                          <th class="text-left font-medium p-2">Delete after (days)</th>
+                          <th class="text-right font-medium p-2">Would delete now</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {PRUNABLE_KINDS.map(k => {
+                          const sampled = stats?.kinds.find(s => s.kind === k.kind)
+                          const ex = exact[k.kind]
+                          const deletedSoFar = settings.deleted_by_kind?.[k.kind]
+                          return (
+                            <tr key={k.kind} style={{ borderTop: '1px solid var(--color-border)' }}>
+                              <td class="p-2 font-mono">{k.kind}</td>
+                              <td class="p-2">
+                                {k.label}
+                                {k.hint && (
+                                  <span class="block text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                                    {k.hint}
+                                  </span>
+                                )}
+                                {deletedSoFar ? (
+                                  <span class="block text-xs" style={{ color: '#fca5a5' }}>
+                                    {formatNumber(deletedSoFar)} deleted so far
+                                  </span>
+                                ) : null}
+                              </td>
+                              <td class="p-2 text-right font-mono">
+                                {ex ? (
+                                  <span title="Exact count">{formatNumber(ex.total)}</span>
+                                ) : sampled ? (
+                                  <span style={{ color: 'var(--color-text-secondary)' }} title="From the sample, not a total">
+                                    ~{formatNumber(sampled.count)}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: 'var(--color-text-secondary)' }}>—</span>
+                                )}
+                                <button
+                                  type="button"
+                                  class="block ml-auto text-xs underline"
+                                  style={{ color: 'var(--color-text-secondary)' }}
+                                  disabled={countingKind !== null}
+                                  onClick={() => countExactly(k.kind)}
+                                >
+                                  {countingKind === k.kind ? 'counting… (minutes)' : 'count exactly'}
+                                </button>
+                              </td>
+                              <td class="p-2">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  style={{ width: '90px' }}
+                                  placeholder="keep"
+                                  value={policyDays[k.kind] ?? ''}
+                                  onInput={e => {
+                                    const v = (e.target as HTMLInputElement).value
+                                    setPolicyDays(prev => {
+                                      const next = { ...prev }
+                                      if (v === '') delete next[k.kind]
+                                      else next[k.kind] = v
+                                      return next
+                                    })
+                                  }}
+                                />
+                              </td>
+                              <td class="p-2 text-right font-mono">
+                                {ex?.olderThan !== undefined ? (
+                                  <span style={{ color: ex.olderThan > 0 ? '#fca5a5' : undefined }}>
+                                    {formatNumber(ex.olderThan)}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: 'var(--color-text-secondary)' }}>
+                                    count to see
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                   <p class="text-xs mt-2" style={{ color: 'var(--color-text-secondary)' }}>
                     Protected kinds ({NEVER_PRUNE_KINDS[0]}–{NEVER_PRUNE_KINDS[11]},{' '}
-                    {NEVER_PRUNE_KINDS[12]}–{NEVER_PRUNE_KINDS[15]}) are not
-                    listed because the relay refuses to delete them.
+                    {NEVER_PRUNE_KINDS[12]}–{NEVER_PRUNE_KINDS[15]}) are not listed
+                    because the relay refuses to delete them.
                   </p>
                 </div>
-
-                {/* Blast radius, computed against the saved config. */}
-                {stats && settings.configured_pruning_enabled && stats.prune_preview > 0 && (
-                  <div class="p-3 rounded-lg text-sm border" style={{ background: 'rgba(248,113,113,0.08)', color: '#fca5a5', borderColor: 'rgba(248,113,113,0.25)' }}>
-                    With the currently saved settings
-                    ({stats.prune_preview_retention_days} days, kinds{' '}
-                    {stats.prune_preview_kinds.join(', ')}),{' '}
-                    <strong>{formatNumber(stats.prune_preview)}</strong> stored
-                    events are already older than the window and would be
-                    deleted on the next prune run.
-                  </div>
-                )}
 
                 {isEnabling && (
                   <div class="p-4 rounded-lg border" style={{ background: 'rgba(248,113,113,0.06)', borderColor: 'rgba(248,113,113,0.25)' }}>
                     <p class="text-sm mb-3" style={{ color: '#fca5a5' }}>
-                      This permanently deletes stored events on every run. There
-                      is no undo and no backup is taken. Type <strong>DELETE</strong> to confirm.
+                      This permanently deletes stored events on every run. There is no
+                      undo and no backup is taken. Gift wraps (1059) are private
+                      messages — the relay holds no other copy, so deleting them
+                      destroys them for the recipients too. Type <strong>DELETE</strong> to confirm.
                     </p>
                     <input
                       type="text"
@@ -492,6 +595,97 @@ export const StorageManager = () => {
               </button>
             </div>
           </section>
+
+          {/* Gift wraps are signed by one-time keys, so the p tag is the only
+              per-user handle on what is usually the bulk of a relay's storage. */}
+          {stats && stats.top_recipients.length > 0 && (
+            <section class="admin-settings-card">
+              <div class="admin-settings-card-header">
+                <div>
+                  <h3>Private message recipients</h3>
+                  <p>
+                    Busiest gift-wrap (kind 1059) recipients in the sample. Senders
+                    cannot be shown — NIP-59 signs every wrap with a throwaway key,
+                    by design.
+                  </p>
+                </div>
+              </div>
+
+              <div class="mt-4 overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr style={{ color: 'var(--color-text-secondary)' }}>
+                      <th class="text-left font-medium p-2">Recipient</th>
+                      <th class="text-right font-medium p-2">Wraps</th>
+                      <th class="text-right font-medium p-2">Share</th>
+                      <th class="p-2" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.top_recipients.map(r => {
+                      const wraps = stats.kinds.find(k => k.kind === 1059)?.count ?? 0
+                      const pct = wraps > 0 ? (r.count / wraps) * 100 : 0
+                      return (
+                        <tr key={r.pubkey} style={{ borderTop: '1px solid var(--color-border)' }}>
+                          <td class="p-2 font-mono text-xs" title={r.pubkey}>
+                            {r.pubkey.slice(0, 16)}…
+                          </td>
+                          <td class="p-2 text-right font-mono">{formatNumber(r.count)}</td>
+                          <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                            {pct.toFixed(1)}%
+                          </td>
+                          <td class="p-2 text-right">
+                            {recipientTarget === r.pubkey ? (
+                              <span class="flex items-center justify-end gap-2">
+                                <input
+                                  type="text"
+                                  style={{ width: '110px' }}
+                                  value={recipientConfirm}
+                                  placeholder="DELETE"
+                                  aria-label="Type DELETE to confirm"
+                                  onInput={e => setRecipientConfirm((e.target as HTMLInputElement).value)}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={recipientBusy || recipientConfirm.trim() !== 'DELETE'}
+                                  onClick={() => deleteWrapsFor(r.pubkey)}
+                                  class="text-xs px-2 py-1 rounded"
+                                  style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.4)' }}
+                                >
+                                  {recipientBusy ? '…' : 'Confirm'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { setRecipientTarget(null); setRecipientConfirm('') }}
+                                  class="text-xs"
+                                  style={{ color: 'var(--color-text-secondary)' }}
+                                >
+                                  Cancel
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => { setRecipientTarget(r.pubkey); setRecipientConfirm('') }}
+                                class="text-xs text-red-400 hover:text-red-300 opacity-60 hover:opacity-100"
+                              >
+                                Delete their wraps
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <p class="text-xs mt-3" style={{ color: '#fca5a5' }}>
+                Deleting a recipient's gift wraps destroys those private messages.
+                The relay holds no other copy and clients fetch DM history from it.
+              </p>
+            </section>
+          )}
 
           <section class="admin-settings-card">
             <div class="admin-settings-card-header">

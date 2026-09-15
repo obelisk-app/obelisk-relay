@@ -456,3 +456,49 @@ impl Settings {
 }
 
 pub use nostr_sdk::Keys;
+
+#[cfg(test)]
+mod policy_config_tests {
+    use super::*;
+
+    /// The admin API writes `prune_retention_by_kind` as a single-line YAML flow
+    /// map. If that does not parse back, a saved policy silently does nothing --
+    /// the pruner would read no policies and quietly delete nothing (or, worse,
+    /// fall through to the legacy single window).
+    #[test]
+    fn flow_map_written_by_the_admin_api_round_trips() {
+        let dir = std::env::temp_dir().join(format!("obelisk-policy-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("settings.yml"),
+            "relay:\n  relay_secret_key: \"\"\n  local_addr: \"127.0.0.1:1\"\n  relay_url: \"ws://127.0.0.1:1\"\n  db_path: \"db\"\n",
+        )
+        .unwrap();
+        // Exactly the shape upsert_relay_value writes.
+        std::fs::write(
+            dir.join("settings.local.yml"),
+            "relay:\n  prune_retention_by_kind: {1059: \"30d\", 2390: \"7d\"}\n",
+        )
+        .unwrap();
+
+        let settings = Config::new(&dir).unwrap().get_settings().unwrap();
+        let policies = settings
+            .prune_retention_by_kind
+            .expect("flow map parses into a policy map");
+
+        assert_eq!(policies.len(), 2);
+        assert_eq!(
+            policies.get(&1059).map(Duration::as_secs),
+            Some(30 * 86_400),
+            "gift wrap window"
+        );
+        assert_eq!(
+            policies.get(&2390).map(Duration::as_secs),
+            Some(7 * 86_400),
+            "game event window"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

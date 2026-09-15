@@ -33,12 +33,21 @@ pub struct StorageKindCount {
     pub count: usize,
 }
 
+/// A gift-wrap recipient and how many wraps in the sample are addressed to them.
+#[derive(Debug, Clone)]
+pub struct RecipientCount {
+    pub pubkey: String,
+    pub count: usize,
+}
+
 /// What the relay currently has on disk, and what pruning would remove.
 ///
 /// The kind breakdown is a newest-first sample; only `prune_preview` is an
 /// exact count. See `admin_storage_stats` for why.
 #[derive(Debug, Clone)]
 pub struct StorageStats {
+    /// Busiest gift-wrap recipients within the sample, descending.
+    pub top_recipients: Vec<RecipientCount>,
     /// Events actually examined. Equal to `sample_size` when the relay holds
     /// at least that many, otherwise the whole database was sampled.
     pub sampled_events: usize,
@@ -897,6 +906,60 @@ impl Groups {
     /// LMDB is multiple GB, so anything that materialises every event (or even
     /// every id+timestamp) would spike memory on a box that also runs the live
     /// relays. Every number below comes from a counted index range.
+    /// Exact count for a single kind, and how many of those are older than a
+    /// window.
+    ///
+    /// One indexed range per figure. Measured at roughly 12s per kind on the
+    /// 4.2 GB production database, which is why the storage overview samples
+    /// instead and this is only ever run for one kind on request.
+    pub async fn admin_exact_kind_count(
+        &self,
+        kind: u16,
+        older_than_days: Option<u32>,
+    ) -> Result<(u64, Option<u64>), Error> {
+        let scopes = self
+            .db
+            .list_scopes()
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+
+        let started = std::time::Instant::now();
+        let mut total = 0u64;
+        let mut older = 0u64;
+
+        for scope in &scopes {
+            total += self
+                .db
+                .count(vec![Filter::new().kind(Kind::from(kind))], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))? as u64;
+
+            if let Some(days) = older_than_days {
+                if days > 0 {
+                    let cutoff = Timestamp::now() - (days as u64) * 86_400;
+                    older += self
+                        .db
+                        .count(
+                            vec![Filter::new().kind(Kind::from(kind)).until(cutoff)],
+                            scope,
+                        )
+                        .await
+                        .map_err(|e| Error::internal(e.to_string()))?
+                        as u64;
+                }
+            }
+        }
+
+        info!(
+            "Exact count for kind {}: {} events in {:?}",
+            kind,
+            total,
+            started.elapsed()
+        );
+
+        Ok((total, older_than_days.map(|_| older)))
+    }
+
     pub async fn admin_storage_stats(
         &self,
         sample_size: usize,
@@ -924,6 +987,10 @@ impl Groups {
         // range read, and the response labels it as a sample so the numbers
         // are never mistaken for totals.
         let mut tally: HashMap<u16, usize> = HashMap::new();
+        // Recipients of gift wraps, tallied from the same pass. Their authors are
+        // one-time keys, so the `p` tag is the only way to attribute that traffic
+        // to anyone -- and on this relay it is the bulk of stored data.
+        let mut recipients: HashMap<String, usize> = HashMap::new();
         let mut sampled = 0usize;
         let mut newest_event_unix = 0u64;
         let mut oldest_sampled_unix = 0u64;
@@ -943,6 +1010,16 @@ impl Groups {
                     oldest_sampled_unix.min(ts)
                 };
                 *tally.entry(event.kind.as_u16()).or_insert(0) += 1;
+                if event.kind.as_u16() == 1059 {
+                    if let Some(p) = event
+                        .tags
+                        .iter()
+                        .find(|tag| tag.kind() == TagKind::p())
+                        .and_then(|tag| tag.content())
+                    {
+                        *recipients.entry(p.to_string()).or_insert(0) += 1;
+                    }
+                }
                 sampled += 1;
             }
         }
@@ -987,7 +1064,17 @@ impl Groups {
             prune_preview
         );
 
+        // Only the head of the distribution is useful; a full recipient list on a
+        // busy relay is thousands of rows the operator will not read.
+        let mut top_recipients: Vec<RecipientCount> = recipients
+            .into_iter()
+            .map(|(pubkey, count)| RecipientCount { pubkey, count })
+            .collect();
+        top_recipients.sort_by(|a, b| b.count.cmp(&a.count));
+        top_recipients.truncate(10);
+
         Ok(StorageStats {
+            top_recipients,
             sampled_events: sampled,
             sample_size,
             kinds,

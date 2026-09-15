@@ -139,9 +139,31 @@ struct AccessSettingsResponse {
 #[derive(Deserialize)]
 struct StorageSettingsRequest {
     pruning_enabled: bool,
-    retention_days: u32,
     prune_interval_minutes: u32,
-    prune_kinds: Vec<u16>,
+    /// Retention in days, per kind. The unit is days rather than a humantime
+    /// string because the UI offers a number input, and a free-text duration
+    /// is an easy way to typo a policy that deletes far more than intended.
+    #[serde(default)]
+    retention_days_by_kind: std::collections::BTreeMap<u16, u32>,
+    /// Pre-per-kind fields, still accepted so an older client keeps working.
+    #[serde(default)]
+    retention_days: Option<u32>,
+    #[serde(default)]
+    prune_kinds: Option<Vec<u16>>,
+}
+
+impl StorageSettingsRequest {
+    /// Per-kind policies, folding the legacy single-window fields in when the
+    /// caller did not send a map.
+    fn policies(&self) -> std::collections::BTreeMap<u16, u32> {
+        if !self.retention_days_by_kind.is_empty() {
+            return self.retention_days_by_kind.clone();
+        }
+        match (self.retention_days, &self.prune_kinds) {
+            (Some(days), Some(kinds)) => kinds.iter().map(|k| (*k, days)).collect(),
+            _ => Default::default(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -190,6 +212,119 @@ struct StorageKindStat {
 }
 
 #[derive(Serialize, Clone)]
+struct RecipientStat {
+    pubkey: String,
+    count: usize,
+}
+
+#[derive(Deserialize)]
+struct ExactCountQuery {
+    kind: u16,
+    /// When set, also report how many of those are older than this many days —
+    /// the blast radius of a policy at that window.
+    older_than_days: Option<u32>,
+}
+
+#[derive(Serialize, Clone)]
+struct ExactCountResponse {
+    kind: u16,
+    total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    older_than: Option<u64>,
+    older_than_days: Option<u32>,
+    computed_at: i64,
+}
+
+/// Envelope mirroring the storage-stats one: counting a kind on a multi-GB
+/// database outlives an HTTP request, so the client polls rather than waits.
+#[derive(Serialize)]
+struct ExactCountEnvelope {
+    computing: bool,
+    result: Option<ExactCountResponse>,
+}
+
+/// Completed exact counts, keyed by kind.
+static EXACT_COUNT_CACHE: OnceCell<RwLock<HashMap<u16, ExactCountResponse>>> = OnceCell::new();
+/// Kind currently being counted, if any. One at a time — these are the most
+/// expensive reads the admin API can issue.
+static EXACT_COUNT_RUNNING: OnceCell<RwLock<Option<u16>>> = OnceCell::new();
+
+/// Exact count for one kind, on request.
+///
+/// Deliberately one kind at a time: a full sweep of every kind was measured at
+/// over ten minutes on the production database, so the overview samples and
+/// this exists for the moment an operator needs a real number before setting a
+/// deletion policy.
+async fn handle_exact_kind_count(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<ExactCountQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let cache = EXACT_COUNT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let running = EXACT_COUNT_RUNNING.get_or_init(|| RwLock::new(None));
+
+    // A cached result for this kind and window is returned as-is; the operator
+    // asks for an exact count precisely when they are about to act on it, and
+    // recomputing on every poll would keep the database busy for minutes.
+    if let Some(hit) = cache.read().get(&params.kind) {
+        if hit.older_than_days == params.older_than_days {
+            return Ok(Json(ExactCountEnvelope {
+                computing: false,
+                result: Some(hit.clone()),
+            }));
+        }
+    }
+
+    {
+        let mut slot = running.write();
+        if slot.is_none() {
+            *slot = Some(params.kind);
+            let state_for_scan = Arc::clone(&state);
+            let kind = params.kind;
+            let days = params.older_than_days;
+            tokio::spawn(async move {
+                match state_for_scan
+                    .http_state
+                    .groups
+                    .admin_exact_kind_count(kind, days)
+                    .await
+                {
+                    Ok((total, older_than)) => {
+                        EXACT_COUNT_CACHE
+                            .get_or_init(|| RwLock::new(HashMap::new()))
+                            .write()
+                            .insert(
+                                kind,
+                                ExactCountResponse {
+                                    kind,
+                                    total,
+                                    older_than,
+                                    older_than_days: days,
+                                    computed_at: Timestamp::now().as_secs() as i64,
+                                },
+                            );
+                    }
+                    Err(e) => warn!("Exact count failed for kind {}: {}", kind, e),
+                }
+                *EXACT_COUNT_RUNNING
+                    .get_or_init(|| RwLock::new(None))
+                    .write() = None;
+            });
+        }
+    }
+
+    Ok(Json(ExactCountEnvelope {
+        computing: true,
+        result: None,
+    }))
+}
+
+#[derive(Serialize, Clone)]
 struct StorageStatsResponse {
     /// Events examined for the kind breakdown below. This is a newest-first
     /// SAMPLE, not a total — exact per-kind counts cost >12s each on the
@@ -201,6 +336,9 @@ struct StorageStatsResponse {
     /// True when the sample covered every stored event.
     sample_is_complete: bool,
     kinds: Vec<StorageKindStat>,
+    /// Busiest gift-wrap recipients in the sample. Gift wraps have no usable
+    /// author, so this is the only per-user view of that traffic.
+    top_recipients: Vec<RecipientStat>,
     newest_event_unix: u64,
     /// Oldest timestamp reached by the sample.
     oldest_sampled_unix: u64,
@@ -1396,6 +1534,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/groups/{id}", delete(handle_group_delete))
         .route("/stats", get(handle_stats))
         .route("/storage/stats", get(handle_storage_stats))
+        .route("/storage/exact-count", get(handle_exact_kind_count))
         .route(
             "/reference-accounts",
             get(handle_reference_accounts_list).post(handle_reference_accounts_add),
@@ -2152,38 +2291,33 @@ async fn handle_storage_settings_update(
         return Err(unauthorized());
     }
 
+    // Protected kinds are dropped before anything is written, so a hand-crafted
+    // request cannot persist a policy the pruner would then have to refuse.
+    let policies: std::collections::BTreeMap<u16, u32> = req
+        .policies()
+        .into_iter()
+        .filter(|(kind, _)| !crate::pruner::NEVER_PRUNE_KINDS.contains(kind))
+        .collect();
+
     if req.pruning_enabled {
-        if req.retention_days == 0 {
-            return Err(error_response(
-                StatusCode::BAD_REQUEST,
-                "Retention must be at least 1 day",
-            ));
-        }
         if req.prune_interval_minutes == 0 {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "Prune interval must be at least 1 minute",
             ));
         }
-        if req.prune_kinds.is_empty() {
+        if policies.is_empty() {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
-                "Choose at least one event kind to prune",
+                "Choose at least one prunable event kind",
             ));
         }
-    }
-
-    let safe_kinds: Vec<u16> = req
-        .prune_kinds
-        .into_iter()
-        .filter(|kind| !crate::pruner::NEVER_PRUNE_KINDS.contains(kind))
-        .collect();
-
-    if req.pruning_enabled && safe_kinds.is_empty() {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "Selected kinds are protected and cannot be pruned",
-        ));
+        if policies.values().any(|days| *days == 0) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Every retention window must be at least 1 day",
+            ));
+        }
     }
 
     let config_dir = StdPath::new(&state.config_dir);
@@ -2203,20 +2337,21 @@ async fn handle_storage_settings_update(
     );
     let contents = upsert_relay_value(
         contents,
-        "event_retention",
-        &format!("\"{}d\"", req.retention_days),
-    );
-    let contents = upsert_relay_value(
-        contents,
         "prune_interval",
         &format!("\"{}m\"", req.prune_interval_minutes),
     );
-    let kind_list = safe_kinds
+    // Written as a YAML flow map on one line so the existing single-line
+    // upsert_relay_value can own the key, the same as every other setting.
+    let policy_map = policies
         .iter()
-        .map(u16::to_string)
+        .map(|(kind, days)| format!("{kind}: \"{days}d\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let contents = upsert_relay_value(contents, "prune_kinds", &format!("[{kind_list}]"));
+    let contents = upsert_relay_value(
+        contents,
+        "prune_retention_by_kind",
+        &format!("{{{policy_map}}}"),
+    );
     std::fs::write(path, contents).map_err(|e| {
         warn!("Failed to persist storage settings: {}", e);
         error_response(
@@ -2593,6 +2728,14 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
             .map(|k| StorageKindStat {
                 kind: k.kind,
                 count: k.count,
+            })
+            .collect(),
+        top_recipients: stats
+            .top_recipients
+            .iter()
+            .map(|r| RecipientStat {
+                pubkey: r.pubkey.clone(),
+                count: r.count,
             })
             .collect(),
         newest_event_unix: stats.newest_event_unix,

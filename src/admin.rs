@@ -846,16 +846,45 @@ fn upsert_relay_scalar(contents: String, key: &str, value: u32) -> String {
     upsert_relay_value(contents, key, &value.to_string())
 }
 
+/// Replace `key` under `relay:` with a single-line value, inserting it if absent.
+///
+/// The key's whole block is consumed, not just its first line. A setting written
+/// in block style owns the indented lines beneath it:
+///
+/// ```yaml
+/// prune_retention_by_kind:
+///   1059: "30d"
+/// ```
+///
+/// Overwriting only the `key:` line leaves those children stranded under a flow
+/// mapping — `prune_retention_by_kind: {1059: "7d"}` followed by an orphaned
+/// `  1059: "30d"` — which is not parseable YAML, so the relay refuses to start
+/// on the next restart. That is reachable from the admin console today: the
+/// block form is what `docs/retention.md` documents, so an operator who follows
+/// the docs and then saves from the Storage screen bricks their own config.
 fn upsert_relay_value(contents: String, key: &str, value: &str) -> String {
     let replacement = format!("  {key}: {value}");
     let mut found = false;
     let mut lines = Vec::new();
 
-    for line in contents.lines() {
+    let mut rest = contents.lines().peekable();
+    while let Some(line) = rest.next() {
         let trimmed = line.trim_start();
         if trimmed.starts_with(&format!("{key}:")) {
             lines.push(replacement.clone());
             found = true;
+
+            // Drop the nested block this key used to own, if it had one. Blank
+            // lines and anything indented no further than the key belong to the
+            // parent mapping and are left alone.
+            let indent = line.len() - trimmed.len();
+            while let Some(next) = rest.peek() {
+                let next_trimmed = next.trim_start();
+                if next_trimmed.is_empty() || next.len() - next_trimmed.len() <= indent {
+                    break;
+                }
+                rest.next();
+            }
         } else {
             lines.push(line.to_string());
         }
@@ -3611,4 +3640,99 @@ pub fn init_admin_state(admin_pubkeys: Vec<PublicKey>, relay_url: String, config
         relay_url,
         config_dir,
     });
+}
+
+#[cfg(test)]
+mod settings_yaml_tests {
+    use super::upsert_relay_value;
+    use crate::config::Config;
+
+    /// Write `local` as settings.local.yml next to a minimal settings.yml and
+    /// load it exactly as the relay does at boot. Returns Err if the file the
+    /// admin API produced is not something the relay can start from.
+    fn boots_with(local: &str, tag: &str) -> Result<crate::config::RelaySettings, String> {
+        let dir =
+            std::env::temp_dir().join(format!("obelisk-upsert-{}-{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.yml"),
+            "relay:\n  relay_secret_key: \"\"\n  local_addr: \"127.0.0.1:1\"\n  relay_url: \"ws://127.0.0.1:1\"\n  db_path: \"db\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("settings.local.yml"), local).unwrap();
+
+        Config::new(&dir)
+            .map_err(|e| e.to_string())?
+            .get_settings()
+            .map_err(|e| e.to_string())
+    }
+
+    /// The exact corruption seen in production on 2026-09-15.
+    ///
+    /// settings.local.yml held the block form that docs/retention.md documents.
+    /// Saving from the Storage screen rewrote the key as a flow map and left the
+    /// indented child stranded, producing YAML the relay could not parse — it
+    /// would have failed to start on the next restart.
+    #[test]
+    fn replacing_a_block_mapping_does_not_orphan_its_children() {
+        let before = "relay:\n  \
+                      force_public_groups: false\n  \
+                      prune_retention_by_kind:\n    \
+                      1059: \"30d\"     # gift wraps\n  \
+                      max_limit: 500\n";
+
+        let after = upsert_relay_value(
+            before.to_string(),
+            "prune_retention_by_kind",
+            "{1059: \"7d\"}",
+        );
+
+        assert!(
+            !after.contains("\"30d\""),
+            "the old block must be gone, got:\n{after}"
+        );
+        assert!(after.contains("  max_limit: 500"), "siblings survive");
+
+        let settings = boots_with(&after, "block").expect("relay must still start");
+        let policies = settings.prune_retention_by_kind.expect("policy parses");
+        assert_eq!(policies.len(), 1);
+        assert_eq!(
+            policies.get(&1059).map(std::time::Duration::as_secs),
+            Some(7 * 86_400),
+            "the new window wins, not the orphaned old one"
+        );
+    }
+
+    #[test]
+    fn replacing_a_single_line_value_leaves_neighbours_untouched() {
+        let before = "relay:\n  relay_name: \"Old\"\n  max_limit: 500\n";
+        let after = upsert_relay_value(before.to_string(), "relay_name", "\"New\"");
+        assert!(!after.contains("Old"));
+        let settings = boots_with(&after, "single").expect("relay must still start");
+        assert_eq!(settings.relay_name.as_deref(), Some("New"));
+        assert_eq!(settings.max_limit, 500);
+    }
+
+    #[test]
+    fn a_sibling_block_further_down_is_not_swallowed() {
+        // websocket: is a sibling of the replaced key, not a child of it.
+        let before = "relay:\n  \
+                      prune_interval: \"1h\"\n  \
+                      websocket:\n    \
+                      idle_timeout: \"2h\"\n";
+        let after = upsert_relay_value(before.to_string(), "prune_interval", "\"360m\"");
+        assert!(after.contains("  websocket:"), "got:\n{after}");
+        assert!(after.contains("    idle_timeout: \"2h\""), "got:\n{after}");
+
+        let settings = boots_with(&after, "sibling").expect("relay must still start");
+        assert_eq!(settings.prune_interval.map(|d| d.as_secs()), Some(360 * 60));
+    }
+
+    #[test]
+    fn an_absent_key_is_inserted() {
+        let before = "relay:\n  relay_name: \"R\"\n  websocket:\n    idle_timeout: \"2h\"\n";
+        let after = upsert_relay_value(before.to_string(), "enable_event_pruner", "true");
+        let settings = boots_with(&after, "insert").expect("relay must still start");
+        assert!(settings.enable_event_pruner);
+    }
 }

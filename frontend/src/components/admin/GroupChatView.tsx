@@ -1,3 +1,4 @@
+import { Fragment } from 'preact'
 import type { EventInfo } from '../../services/AdminApiClient'
 
 /**
@@ -98,7 +99,6 @@ export const GroupChatView = ({
         // shift-click range has to be computed against.
         const row = (children: preact.ComponentChildren) => (
           <div
-            key={ev.id}
             class="group flex items-start gap-2 px-2 rounded"
             style={{ background: isSelected ? 'rgba(180,249,83,0.07)' : undefined }}
           >
@@ -113,8 +113,12 @@ export const GroupChatView = ({
           </div>
         )
 
+        // Keyed on the event id, on the element the map actually returns.
+        // An unkeyed fragment here made Preact reconcile this list by index:
+        // deleting a message from the middle shifted every row after it and
+        // left stale content on screen until a full remount.
         return (
-          <>
+          <Fragment key={ev.id}>
             {newDay && (
               <div class="flex items-center gap-3 px-2 py-3">
                 <div class="flex-1" style={{ borderTop: '1px solid var(--color-border)' }} />
@@ -198,7 +202,7 @@ export const GroupChatView = ({
                     </span>
                   </div>,
                 )}
-          </>
+          </Fragment>
         )
       })}
     </div>

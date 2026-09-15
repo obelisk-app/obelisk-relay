@@ -85,6 +85,16 @@ pub fn event_latency(kind: u32) -> Histogram {
     histogram
 }
 
+/// Subscriptions the storage layer had to answer by scanning.
+///
+/// Every nostr-lmdb index is keyed on an author or a tag, so a filter offering
+/// neither falls through to a full scan whose cost grows with the database
+/// rather than with the result. A rising value here is the early warning for
+/// exactly the degradation that made the channel list take 29 seconds.
+pub fn unindexed_queries() -> Counter {
+    metrics::counter!("unindexed_queries")
+}
+
 /// Groups gauge by privacy settings
 pub fn groups_by_privacy(private: bool, closed: bool) -> Gauge {
     metrics::gauge!("groups_by_privacy", "private" => private.to_string(), "closed" => closed.to_string())
@@ -103,6 +113,10 @@ pub fn setup_metrics() -> Result<PrometheusHandle, anyhow::Error> {
         .get_or_try_init(|| {
             // Describe metrics
             describe_counter!("groups_created", "Total number of groups created");
+            describe_counter!(
+                "unindexed_queries",
+                "REQ filters with no author, tag or id, which the storage layer must answer by scanning"
+            );
             describe_gauge!(
                 "groups_by_privacy",
                 "Number of groups by privacy settings (private/public and closed/open)"

@@ -15,6 +15,7 @@ use crate::{
     reference_accounts::ReferenceAccounts,
     sampled_metrics_handler::SampledMetricsHandler,
     search_capability_middleware::SearchCapabilityMiddleware,
+    unindexed_query::UnindexedQueryMiddleware,
     whitelist::Whitelist,
     RelayDatabase,
 };
@@ -495,6 +496,7 @@ pub async fn run_server(
             .build_with(|chain| {
                 chain
                     .with(group_state_filter)
+                    .with(UnindexedQueryMiddleware)
                     .with(search_capability)
                     .with(rate_limiter)
                     .with(Nip40ExpirationMiddleware::new())

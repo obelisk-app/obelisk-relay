@@ -165,27 +165,47 @@ port_in_use() {
   return 1
 }
 
+# Available space in MB for one path, or empty if df cannot answer.
+#
+# `-P` forces POSIX output, which keeps each filesystem on a single line.
+# Without it df wraps long device names (/dev/mapper/..., NFS, zfs datasets)
+# onto their own line, shifting every number down one row — a fixed NR==2/$4
+# read then picked up a mount point and reported "0GB available" on a perfectly
+# healthy host. Scanning for the capacity column ("96%") and taking the field
+# before it additionally survives mount points containing spaces, since
+# capacity always precedes the mount point.
+df_avail_mb() {
+  df -Pk "$1" 2>/dev/null | awk '
+    NR > 1 {
+      for (i = 1; i <= NF; i++)
+        if ($i ~ /^[0-9]+%$/) { printf "%d", $(i - 1) / 1024; exit }
+    }'
+}
+
 # Free space in MB where Docker actually stores images.
 #
 # `df .` is the wrong filesystem on macOS and on any Docker-in-a-VM setup
 # (Docker Desktop, colima, Rancher): images live inside the VM, which has its
-# own disk, while `.` is the user's home directory. Ask Docker first and fall
-# back to `df` only when it cannot answer.
+# own disk, while `.` is the user's home directory. Ask the daemon where its
+# root is and measure that when this host can see the path — authoritative on
+# Linux, and absent on macOS, where we fall back to the host figure and let the
+# caller treat it as advisory.
+#
+# The result is assigned before it is tested rather than piped into `&& return`:
+# in a pipeline the exit status is awk's, which is 0 even when df failed and
+# produced nothing, so the old form returned "success" with an empty string and
+# never reached the fallback.
 #
 # Returns MB, not GB — integer-truncating to GB turned 3.9GB into "3" and
 # tripped a `-gt 3` test that was meant to pass.
 disk_avail_mb() {
-  local root
+  local root="" mb=""
   root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || root=""
-  if [ -n "$root" ]; then
-    # On Docker-in-a-VM the root dir is a path *inside* the VM, so df on the
-    # host will not find it; that failure falls through to the host check.
-    local in_vm
-    in_vm="$(docker run --rm --entrypoint df alpine -k /var/lib/docker 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }')"
-    [ -n "$in_vm" ] && { printf '%s' "$in_vm"; return; }
-    df -k "$root" 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }' && return
+  if [ -n "$root" ] && [ -d "$root" ]; then
+    mb="$(df_avail_mb "$root")"
+    if [ -n "$mb" ]; then printf '%s' "$mb"; return; fi
   fi
-  df -k . 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024 }'
+  df_avail_mb .
 }
 
 fmt_gb() {

@@ -1515,3 +1515,129 @@ body {
   flex-shrink: 0;
   margin: 1px 0 0;
 }
+
+/*
+ * Native file inputs render as an unstyled button plus "No file chosen", which
+ * on the relay-icon field looked like a broken control dropped into a styled
+ * panel. The element cannot be restyled directly, but ::file-selector-button
+ * can, so the button reads as one of ours and the surrounding text takes the
+ * panel's own muted colour instead of the browser default.
+ */
+:where(.admin-shell) :where(input[type="file"]) {
+  width: 100%;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+:where(.admin-shell) :where(input[type="file"])::file-selector-button {
+  margin-right: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+:where(.admin-shell) :where(input[type="file"])::file-selector-button:hover {
+  border-color: rgba(180, 249, 83, 0.42);
+  background: #202020;
+}
+
+/*
+ * Empty states. A section that says only "none found" reads as a failure and
+ * gives the operator nothing to do with the information. These explain when the
+ * section will fill up, so an empty panel is an answer rather than a dead end.
+ */
+.admin-empty-state {
+  padding: 14px 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.admin-empty-state p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--color-text-secondary);
+}
+
+.admin-empty-state p:first-child {
+  margin-bottom: 6px;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+/* ---------- Disk usage over time ---------- */
+
+.admin-storage-chart-block {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.admin-storage-chart-head h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.admin-storage-chart-head p {
+  margin: 0 0 12px;
+  max-width: 68ch;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-text-secondary);
+}
+
+.admin-storage-chart {
+  display: block;
+  width: 100%;
+  height: 140px;
+  overflow: visible;
+}
+
+/*
+ * preserveAspectRatio="none" stretches the viewBox, which would scale stroke
+ * width with it and leave a line that is thick at one aspect and hairline at
+ * another. Non-scaling-stroke keeps it at 2px however the SVG is stretched.
+ */
+.admin-storage-chart-line {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.admin-storage-chart-axis {
+  stroke: var(--color-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.admin-storage-chart-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .admin-storage-chart {
+    height: 110px;
+  }
+  .admin-storage-chart-legend {
+    flex-direction: column;
+    gap: 2px;
+  }
+}

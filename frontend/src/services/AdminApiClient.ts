@@ -165,6 +165,11 @@ export class AdminApiClient {
     return this.request(`/api/admin/storage/exact-count?kind=${kind}${q}`)
   }
 
+  /** Disk usage over time. Bounded server-side; the last point is live. */
+  async getStorageHistory(): Promise<{ samples: StorageSample[] }> {
+    return this.request('/api/admin/storage/history')
+  }
+
   async getStorageStats(refresh = false): Promise<StorageStatsEnvelope> {
     return this.request(`/api/admin/storage/stats${refresh ? '?refresh=true' : ''}`)
   }
@@ -498,6 +503,17 @@ export interface StorageSettings {
 export interface StorageKindStat {
   kind: number
   count: number
+  /** Bytes the sampled events of this kind occupy. */
+  sampled_bytes: number
+  /** Mean bytes per event, divided server-side so this is never NaN. */
+  avg_bytes: number
+}
+
+export interface StorageSample {
+  /** Unix seconds. */
+  at: number
+  /** LMDB files on disk, including free-list slack. */
+  db_bytes: number
 }
 
 export interface StorageStats {

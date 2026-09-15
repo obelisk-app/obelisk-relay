@@ -3,6 +3,7 @@ import {
   adminApi,
   type StorageSettings,
   type StorageStats,
+  type StorageSample,
 } from '../../services/AdminApiClient'
 import { StorageIcon } from './icons'
 import { confirmMatches } from './confirmPhrase'
@@ -87,6 +88,87 @@ const formatBytes = (bytes: number) => {
 
 const formatNumber = (n: number) => n.toLocaleString()
 
+/**
+ * Disk usage over time, as an inline SVG area chart.
+ *
+ * Hand-drawn rather than pulled from a charting library: the relay serves its
+ * frontend under a strict CSP with no external origins, the bundle is already
+ * 1.1MB, and this is one series of at most 720 points. An SVG path is a few
+ * lines and has no supply chain.
+ *
+ * Reads the LMDB file size, so it includes reclaimable free-list slack. A flat
+ * event count beside a rising line is a database that wants compacting rather
+ * than pruning -- which is exactly what happened here, and what event counts
+ * alone could never have shown.
+ */
+const StorageChart = ({ samples }: { samples: StorageSample[] }) => {
+  if (samples.length < 2) {
+    return (
+      <p class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+        Collecting — the relay samples its own size hourly, so the first points
+        appear over the next few hours.
+      </p>
+    )
+  }
+
+  const W = 640
+  const H = 140
+  const PAD_L = 8
+  const PAD_B = 18
+
+  const values = samples.map(s => s.db_bytes)
+  const peak = Math.max(...values)
+  const floor = 0 // anchor at zero: a truncated axis exaggerates growth
+  const span = peak - floor || 1
+
+  const first = samples[0].at
+  const last = samples[samples.length - 1].at
+  const timeSpan = last - first || 1
+
+  const x = (at: number) => PAD_L + ((at - first) / timeSpan) * (W - PAD_L * 2)
+  const y = (b: number) => (H - PAD_B) - ((b - floor) / span) * (H - PAD_B - 8)
+
+  const line = samples.map((s, i) => `${i === 0 ? 'M' : 'L'}${x(s.at).toFixed(1)},${y(s.db_bytes).toFixed(1)}`).join(' ')
+  const area = `${line} L${x(last).toFixed(1)},${H - PAD_B} L${x(first).toFixed(1)},${H - PAD_B} Z`
+
+  const current = values[values.length - 1]
+  const earliest = values[0]
+  const delta = current - earliest
+
+  return (
+    <div>
+      <svg
+        class="admin-storage-chart"
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`Database size over time, currently ${formatBytes(current)}`}
+      >
+        <defs>
+          <linearGradient id="storageFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--color-accent)" stop-opacity="0.22" />
+            <stop offset="100%" stop-color="var(--color-accent)" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+        <line x1={PAD_L} y1={H - PAD_B} x2={W - PAD_L} y2={H - PAD_B} class="admin-storage-chart-axis" />
+        <path d={area} fill="url(#storageFill)" />
+        <path d={line} class="admin-storage-chart-line" />
+      </svg>
+      <div class="admin-storage-chart-legend">
+        <span>{formatUnix(first)}</span>
+        <span>
+          {formatBytes(current)} now
+          {delta !== 0 && (
+            <span style={{ color: delta > 0 ? '#eab308' : 'var(--color-accent)' }}>
+              {' '}({delta > 0 ? '+' : '−'}{formatBytes(Math.abs(delta))} over this window)
+            </span>
+          )}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 const formatUnix = (unix: number) => {
   if (!unix) return 'Never'
   return new Date(unix * 1000).toLocaleString()
@@ -125,6 +207,14 @@ export const StorageManager = () => {
   const [recipientTarget, setRecipientTarget] = useState<string | null>(null)
   const [recipientConfirm, setRecipientConfirm] = useState('')
   const [recipientBusy, setRecipientBusy] = useState(false)
+  const [history, setHistory] = useState<StorageSample[]>([])
+
+  const loadHistory = () => {
+    adminApi.getStorageHistory()
+      .then(r => setHistory(r.samples))
+      // Advisory: a missing history must not blank the screen.
+      .catch(() => setHistory([]))
+  }
 
   const loadSettings = () => {
     setLoading(true)
@@ -163,7 +253,7 @@ export const StorageManager = () => {
       .catch(e => { setStatsError(e.message); setCounting(false) })
   }
 
-  useEffect(() => { loadSettings(); loadStats() }, [])
+  useEffect(() => { loadSettings(); loadStats(); loadHistory() }, [])
 
   useEffect(() => {
     if (!counting) return
@@ -341,6 +431,20 @@ export const StorageManager = () => {
               </div>
             </div>
 
+            <div class="admin-storage-chart-block">
+              <div class="admin-storage-chart-head">
+                <h4>Disk used over time</h4>
+                <p>
+                  The file on disk, sampled hourly. Includes space freed by
+                  deletion but not yet returned to the filesystem — LMDB reuses
+                  it internally and never shrinks the file, so a flat event count
+                  beside a rising line means the database wants compacting rather
+                  than pruning.
+                </p>
+              </div>
+              <StorageChart samples={history} />
+            </div>
+
             {statsError && (
               <div class="mt-4 p-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
                 {statsError}
@@ -357,6 +461,7 @@ export const StorageManager = () => {
                       <th class="text-left font-medium p-2">Kind</th>
                       <th class="text-left font-medium p-2">Type</th>
                       <th class="text-right font-medium p-2">Events</th>
+                      <th class="text-right font-medium p-2">Est. size</th>
                       <th class="text-right font-medium p-2">Share</th>
                     </tr>
                   </thead>
@@ -378,6 +483,12 @@ export const StorageManager = () => {
                             )}
                           </td>
                           <td class="p-2 text-right font-mono">{formatNumber(k.count)}</td>
+                          <td
+                            class="p-2 text-right font-mono"
+                            title={`${formatBytes(k.avg_bytes)} average per event across the sample. Content and tags only — index overhead is not counted, so these do not sum to the file on disk.`}
+                          >
+                            {stats.sample_is_complete ? '' : '≈'}{formatBytes(k.sampled_bytes)}
+                          </td>
                           <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
                             {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
                           </td>
@@ -391,7 +502,9 @@ export const StorageManager = () => {
                     Based on the {formatNumber(stats.sampled_events)} most recent
                     events (back to {formatUnix(stats.oldest_sampled_unix)}), not the
                     whole database — exact per-kind totals are too slow to compute
-                    on a database this size. Shares are of the sample.
+                    on a database this size. Shares are of the sample. Sizes count
+                    content and tags only, so they will not add up to the file on
+                    disk: index entries and reclaimable free space are excluded.
                   </p>
                 )}
               </div>

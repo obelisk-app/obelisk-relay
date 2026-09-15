@@ -614,12 +614,25 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
                 <h3>Config Backups</h3>
                 <p>Download or restore timestamped config backups created before reset or restore operations.</p>
               </div>
-              <span class="admin-status-badge">{backups.length}</span>
+              {/* A "0" badge is noise: it draws the eye to a count that means
+                  nothing happened. Show it only once there is something to count. */}
+              {backups.length > 0 && (
+                <span class="admin-status-badge">{backups.length}</span>
+              )}
             </div>
 
             {backups.length === 0 ? (
-              <div class="mt-4 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                No config backups found.
+              /* An empty state should say when the section will have something
+                 in it, not just assert that it does not. "None found" reads as
+                 a failure; this reads as "nothing has needed one yet". */
+              <div class="admin-empty-state mt-4">
+                <p>Nothing here yet — and that is the expected state.</p>
+                <p>
+                  The relay snapshots this config automatically just before it
+                  overwrites it, which happens when you reset settings or restore
+                  a previous version. One will appear here the first time that
+                  runs, and you can download or roll back to it from here.
+                </p>
               </div>
             ) : (
               <div class="admin-list mt-4">

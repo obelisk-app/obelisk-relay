@@ -24,8 +24,18 @@ ENV RUSTFLAGS="--cfg tokio_unstable --cfg tokio_taskdump"
 # Parallelism cap for constrained build hosts. Limiting the builder's CPU alone
 # is not enough: cargo still spawns one rustc per core, which thrashes against
 # the cgroup quota and multiplies peak memory. Set CARGO_BUILD_JOBS=1 when
-# building on a box that is also serving traffic. Unset means "use all cores".
-ARG CARGO_BUILD_JOBS
+# building on a box that is also serving traffic.
+#
+# The default is the literal "default" — cargo's own word for "use all cores" —
+# and not an empty value. `ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}` with the
+# arg unset does not leave the variable unset, it sets it to "", and cargo then
+# tries to parse "" as a job count and aborts:
+#
+#   error: could not parse ``. Number of parallel jobs should be `default` or a number.
+#
+# Every build that did not pass the arg therefore failed at exit 101, which is
+# why CI could not build this image at all.
+ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN cargo build --release --bins

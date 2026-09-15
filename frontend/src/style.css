@@ -502,6 +502,90 @@ body {
 }
 
 /*
+ * Baseline form controls for the admin console.
+ *
+ * Styling used to be opt-in: a field looked right only if someone remembered
+ * to add .admin-access-input or similar. Eighteen inputs across five screens
+ * never got one, so they rendered at browser defaults -- white boxes with grey
+ * placeholder text inside a dark panel. That is how the typed-DELETE
+ * confirmation ended up at 1.17:1 contrast, invisible on the one control
+ * standing between an operator and irreversible deletion.
+ *
+ * This inverts it. Every control inside the admin shell is styled by element,
+ * so a new field is correct by default and has to opt *out* to be wrong.
+ *
+ * Both sides are wrapped in :where() so the whole rule carries zero
+ * specificity. Every existing class -- .admin-confirm-input's red border,
+ * .admin-search-input, .admin-inline-input -- still wins without needing
+ * !important or a specificity fight. This is a floor, not an override.
+ */
+:where(.admin-shell) :where(
+  input[type="text"],
+  input[type="number"],
+  input[type="search"],
+  input[type="password"],
+  input[type="url"],
+  input[type="email"],
+  input:not([type]),
+  select,
+  textarea
+) {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  outline: none;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+:where(.admin-shell) :where(input, select, textarea)::placeholder {
+  color: var(--color-text-secondary);
+  opacity: 0.6;
+}
+
+:where(.admin-shell) :where(input, select, textarea):focus-visible {
+  border-color: rgba(180, 249, 83, 0.42);
+  background: #202020;
+}
+
+/* Disabled controls must read as unavailable, not as empty. */
+:where(.admin-shell) :where(input, select, textarea):disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Checkboxes and radios take the accent rather than the box treatment. */
+:where(.admin-shell) :where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--color-accent);
+  width: auto;
+  min-height: 0;
+}
+
+/*
+ * Counts and retention windows are numbers, so align them as numbers: tabular
+ * figures keep digits in the same column while a value is being typed, and the
+ * spinners are dropped because they shrink the usable field and encourage
+ * click-stepping through a value that should be typed.
+ */
+:where(.admin-shell) :where(input[type="number"]) {
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+:where(.admin-shell) :where(input[type="number"])::-webkit-outer-spin-button,
+:where(.admin-shell) :where(input[type="number"])::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/*
  * Typed confirmation for a destructive action ("type DELETE").
  *
  * These were bare <input> elements, so they fell through every admin input

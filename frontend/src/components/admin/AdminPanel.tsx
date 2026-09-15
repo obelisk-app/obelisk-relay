@@ -214,7 +214,7 @@ export const AdminPanel = (_props: { path?: string }) => {
   }
 
   return (
-    <div class="min-h-screen flex flex-col md:flex-row" style={{ background: 'var(--color-bg-primary)' }}>
+    <div class="admin-shell min-h-screen flex flex-col md:flex-row" style={{ background: 'var(--color-bg-primary)' }}>
       {/* Sidebar is pinned to the viewport so its footer actions stay reachable.
           Without md:h-screen the aside stretches to the full page height on
           content-heavy tabs, and md:flex-1 on the nav pushes Open Chat / Sign

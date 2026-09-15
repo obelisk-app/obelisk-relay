@@ -59,6 +59,13 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # Runners are x86, so amd64 builds natively while arm64 goes through
+          # QEMU user-mode emulation. The emulated leg is the memory-hungry one,
+          # and cargo defaults to one rustc per core regardless — capping jobs
+          # below the core count trades a little wall-clock for headroom so the
+          # arm64 half does not get OOM-killed mid-compile.
+          build-args: |
+            CARGO_BUILD_JOBS=3
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

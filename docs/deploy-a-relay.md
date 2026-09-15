@@ -69,9 +69,20 @@ Two values usually need attention for a real deployment:
   used to brand the admin console and browser tab. Useful when you run more than
   one instance.
 
-Nothing deletes data by default. Automatic retention pruning is off unless you
-explicitly arm it on the Storage screen, which also shows what the relay is
-currently storing, by kind.
+## Retention
+
+Nothing deletes data by default. Automatic pruning is off unless you explicitly
+arm it on the Storage screen, which also shows what the relay is currently
+storing, by kind.
+
+Retention is set **per event kind**, so short-lived traffic can expire without
+touching conversations. Group management and state kinds are never deleted, and
+neither is anything replaceable or addressable — the relay keeps only one of
+those per user, so deleting them would destroy live state for no space saved.
+
+See [retention.md](retention.md) for the kind catalogue and what breaks if you
+prune each one. Count exactly before arming a policy: the overview samples, and
+the sample over-represents gift wraps.
 
 ## Reverse proxy
 

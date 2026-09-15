@@ -88,12 +88,49 @@ struct IndexedBootstrapCapability {
     auth: &'static str,
 }
 
+/// NIP-11 `retention` entry: these kinds are kept for at most `time` seconds.
+///
+/// Derived from the live PrunerConfig rather than from config text, so what is
+/// advertised cannot drift from what is actually enforced. Absent entirely when
+/// nothing is being deleted — the NIP-11 default is "kept indefinitely", which
+/// is then the truth.
+#[derive(Clone, Debug, Serialize)]
+struct RetentionEntry {
+    kinds: Vec<u16>,
+    time: u64,
+}
+
 #[derive(Serialize)]
 struct RelayInfoWithObelisk<'a> {
     #[serde(flatten)]
     relay_info: &'a RelayInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     obelisk: Option<&'a ObeliskNip11Capability>,
+    /// Clients cannot otherwise discover that this relay drops events after a
+    /// window — and for a kind like 1059 that is the difference between "your
+    /// history is here" and "it is not".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention: Option<Vec<RetentionEntry>>,
+}
+
+/// Group the live policies by window so the advertisement matches the shape
+/// NIP-11 expects: a list of {kinds, time}.
+fn retention_from_pruner(config: Option<&PrunerConfig>) -> Option<Vec<RetentionEntry>> {
+    let config = config?;
+    let mut by_window: std::collections::BTreeMap<u64, Vec<u16>> =
+        std::collections::BTreeMap::new();
+    for (kind, window) in config.policies_as_secs() {
+        by_window.entry(window).or_default().push(kind);
+    }
+    if by_window.is_empty() {
+        return None;
+    }
+    Some(
+        by_window
+            .into_iter()
+            .map(|(time, kinds)| RetentionEntry { kinds, time })
+            .collect(),
+    )
 }
 
 fn accepts_nostr_json(headers: &HeaderMap) -> bool {
@@ -145,10 +182,12 @@ fn resolve_prune_policies(
 fn relay_info_response(
     relay_info: &RelayInfo,
     obelisk: Option<&ObeliskNip11Capability>,
+    retention: Option<Vec<RetentionEntry>>,
 ) -> Response {
     let body = RelayInfoWithObelisk {
         relay_info,
         obelisk,
+        retention,
     };
     match serde_json::to_string(&body) {
         Ok(body) => ([(header::CONTENT_TYPE, NOSTR_JSON_CONTENT_TYPE)], body).into_response(),
@@ -392,6 +431,9 @@ pub async fn run_server(
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: relay_icon.clone(),
     };
+    // Advertised once at startup from the live pruner config, so NIP-11 cannot
+    // claim a retention policy the relay is not actually running.
+    let retention_advertisement = retention_from_pruner(pruner_config_opt.as_ref());
     let obelisk_capability = settings
         .obelisk_index
         .enabled
@@ -492,6 +534,7 @@ pub async fn run_server(
             let handler_factory = handler_factory.clone();
             let relay_info = relay_info.clone();
             let obelisk_capability = obelisk_capability.clone();
+            let retention_advertisement = retention_advertisement.clone();
 
             async move {
                 match ws {
@@ -503,7 +546,11 @@ pub async fn run_server(
                     None => {
                         // Check for NIP-11 JSON request
                         if accepts_nostr_json(&headers) {
-                            return relay_info_response(&relay_info, obelisk_capability.as_ref());
+                            return relay_info_response(
+                                &relay_info,
+                                obelisk_capability.as_ref(),
+                                retention_advertisement.clone(),
+                            );
                         }
 
                         // Serve frontend
@@ -653,12 +700,47 @@ mod tests {
 
     #[test]
     fn relay_info_response_uses_nip11_content_type() {
-        let response = relay_info_response(&test_relay_info(), None);
+        let response = relay_info_response(&test_relay_info(), None, None);
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static(NOSTR_JSON_CONTENT_TYPE))
+        );
+    }
+
+    #[test]
+    fn retention_is_absent_when_nothing_is_pruned() {
+        // NIP-11 treats a missing `retention` as "kept indefinitely", which is
+        // exactly the truth when the pruner is off. Advertising an empty list
+        // would instead read as "nothing is retained".
+        assert!(retention_from_pruner(None).is_none());
+    }
+
+    #[test]
+    fn retention_groups_kinds_by_window() {
+        use std::collections::BTreeMap;
+        let policies: BTreeMap<u16, Duration> = [
+            (9u16, Duration::from_secs(86_400)),
+            (11, Duration::from_secs(86_400)),
+            (1059, Duration::from_secs(3_600)),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = PrunerConfig::from_policies(policies, None).expect("arms");
+
+        let entries = retention_from_pruner(Some(&cfg)).expect("advertised");
+        assert_eq!(entries.len(), 2, "two distinct windows");
+        let short = entries.iter().find(|e| e.time == 3_600).expect("1h entry");
+        assert_eq!(short.kinds, vec![1059]);
+        let long = entries
+            .iter()
+            .find(|e| e.time == 86_400)
+            .expect("24h entry");
+        assert_eq!(
+            long.kinds,
+            vec![9, 11],
+            "kinds sharing a window are grouped"
         );
     }
 
@@ -675,6 +757,7 @@ mod tests {
         let body = RelayInfoWithObelisk {
             relay_info: &relay_info,
             obelisk: Some(&capability),
+            retention: None,
         };
         let json = serde_json::to_value(body).unwrap();
 

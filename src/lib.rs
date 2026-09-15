@@ -8,6 +8,7 @@ pub mod create_client;
 pub mod error;
 pub mod follow_sync;
 pub mod group;
+pub mod group_state_filter;
 pub mod groups;
 pub mod groups_event_processor;
 pub mod handler;

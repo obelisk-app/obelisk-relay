@@ -16,7 +16,7 @@ use dashmap::{
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use relay_builder::{Error, RelayDatabase};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -906,6 +906,40 @@ impl Groups {
     /// LMDB is multiple GB, so anything that materialises every event (or even
     /// every id+timestamp) would spike memory on a box that also runs the live
     /// relays. Every number below comes from a counted index range.
+    /// Every pubkey that has signed an addressable group-state event.
+    ///
+    /// Group state is written by the relay, but a relay that rotates its
+    /// identity does not re-sign what it wrote under the old key — this one
+    /// rotated on 2026-08-11 and four distinct pubkeys hold live group state as
+    /// a result. A client discovering groups therefore cannot guess the author
+    /// set, and without an author the query cannot use an index at all (see
+    /// `crate::group_state_filter`). This is the scan that produces the set,
+    /// run once at startup so every later discovery query is indexed.
+    pub async fn group_state_authors(&self) -> Result<BTreeSet<PublicKey>, Error> {
+        let scopes = self
+            .db
+            .list_scopes()
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+
+        let mut authors = BTreeSet::new();
+        for scope in &scopes {
+            let events = self
+                .db
+                .query(
+                    vec![Filter::new().kinds(ADDRESSABLE_EVENT_KINDS.iter().copied())],
+                    scope,
+                )
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+            for event in events {
+                authors.insert(event.pubkey);
+            }
+        }
+
+        Ok(authors)
+    }
+
     /// Exact count for a single kind, and how many of those are older than a
     /// window.
     ///

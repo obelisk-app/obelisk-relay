@@ -3,6 +3,7 @@ use crate::{
     app_state::HttpServerState,
     blacklist::Blacklist,
     config, follow_sync,
+    group_state_filter::{GroupStateAuthors, GroupStateFilterMiddleware},
     groups::Groups,
     groups_event_processor::GroupsRelayProcessor,
     handler, metrics,
@@ -473,6 +474,15 @@ pub async fn run_server(
     let rate_limiter = RateLimitMiddleware::<()>::with_global_limit(per_conn_quota, global_quota);
     let search_capability = SearchCapabilityMiddleware::new(settings.enable_indexed_search);
 
+    // Group discovery arrives as `{"kinds":[39000]}`, which matches no index in
+    // nostr-lmdb and so costs a full scan of the event table. The relay is the
+    // only party that knows which keys signed group state, so it supplies them
+    // and moves the query onto (author, kind, created_at). See
+    // `crate::group_state_filter` for the measurements.
+    let group_state_authors = GroupStateAuthors::new();
+    group_state_authors.spawn_refresh(groups.clone(), relay_keys.public_key);
+    let group_state_filter = GroupStateFilterMiddleware::new(group_state_authors);
+
     // Build the relay service
     let handler_factory = Arc::new(
         RelayBuilder::<(), GroupsRelayProcessor>::new(relay_config)
@@ -484,6 +494,7 @@ pub async fn run_server(
             .relay_info(_relay_info.clone())
             .build_with(|chain| {
                 chain
+                    .with(group_state_filter)
                     .with(search_capability)
                     .with(rate_limiter)
                     .with(Nip40ExpirationMiddleware::new())

@@ -40,8 +40,16 @@ backups/
 *.pre-*
 *-candidate
 
-# Ad-hoc UI reference screenshots dropped in the repo root.
+# Ad-hoc UI reference screenshots dropped in the repo root, and the directory
+# they accumulate in. Useful while working on a screen, not worth versioning.
 /image*.png
+/screenshots/
+
+# Runtime state the relay writes into its own config directory: the bounded
+# disk-usage series behind the Storage screen's graph. Per-deployment data,
+# regenerated on its own, and meaningless in another operator's checkout.
+*/storage-history.json
+storage-history.json
 
 # NIP-46 pairing artefacts. A `nostrconnect://` URI carries the secret that
 # authenticates a signer to a browser session, and the QR renders it in a form

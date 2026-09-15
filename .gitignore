@@ -43,6 +43,14 @@ backups/
 # Ad-hoc UI reference screenshots dropped in the repo root.
 /image*.png
 
+# NIP-46 pairing artefacts. A `nostrconnect://` URI carries the secret that
+# authenticates a signer to a browser session, and the QR renders it in a form
+# anyone can scan off a screenshot. These are credentials, not screenshots —
+# they are generated locally when pairing and must never reach the repo.
+/bunker-*.png
+/bunker-uri.txt
+/bunker-status.txt
+
 frontend/node_modules/*
 frontend/dist/*
 

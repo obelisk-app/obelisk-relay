@@ -5,15 +5,29 @@ use crate::groups::{
     KIND_GROUP_USER_JOIN_REQUEST_9021, KIND_GROUP_USER_LEAVE_REQUEST_9022, NON_GROUP_ALLOWED_KINDS,
 };
 use crate::obelisk_index::ObeliskIndex;
-use crate::whitelist::Whitelist;
+use crate::whitelist::{AccessTier, Whitelist};
 use crate::Groups;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use nostr_sdk::prelude::*;
 use relay_builder::{EventContext, EventProcessor, Result, StoreCommand};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::debug;
+
+/// NIP-46 remote-signing coordination (nostr-connect).
+///
+/// Exempt from the whitelist, deliberately. The admin console's login uses this
+/// relay as its first NIP-46 rendezvous, so a bunker's ephemeral client key has
+/// to be able to publish and subscribe here *before* anyone is authenticated.
+/// Without the exemption, turning on any access restriction locks the operator
+/// out of the console that would let them turn it off again — which is exactly
+/// what happened when Web-of-Trust admission was first enabled.
+///
+/// Safe to exempt: kind 24133 is ephemeral, so it is never stored, and its
+/// payloads are NIP-44 encrypted between two keys that already know each other.
+const KIND_NIP46_SIGNER: u16 = 24133;
 
 /// Per-pubkey token-bucket rate limiter. Keyed by pubkey hex; spammers reconnecting
 /// or rotating connections still hit the same bucket as long as they sign with the same key.
@@ -37,7 +51,10 @@ pub struct GroupsRelayProcessor {
     admin_pubkeys: Vec<PublicKey>,
     whitelist: Whitelist,
     /// Optional per-pubkey rate limiter. None disables per-pubkey rate limiting.
+    /// Kept as the fallback bucket for tiers with no entry of their own.
     pubkey_limiter: Option<Arc<PubkeyLimiter>>,
+    /// One bucket per access tier, so publishing budget falls off with distance.
+    tier_limiters: Option<Arc<HashMap<&'static str, Arc<PubkeyLimiter>>>>,
     /// Optional optimized Obelisk read index. Normal relay behavior does not
     /// depend on this; it is updated only after events pass relay validation.
     obelisk_index: Option<Arc<ObeliskIndex>>,
@@ -73,17 +90,57 @@ impl GroupsRelayProcessor {
             admin_pubkeys,
             whitelist,
             pubkey_limiter: None,
+            tier_limiters: None,
             obelisk_index: None,
         }
     }
 
-    /// Attach a per-pubkey rate limiter. `events_per_minute = 0` is treated as disabled.
+    /// Attach per-pubkey rate limiters, one bucket per access tier.
+    ///
+    /// `events_per_minute` is the budget for a fully trusted key; every other
+    /// tier gets a share of it via [`AccessTier::budget_percent`]. One limiter
+    /// for everyone would mean an account admitted on a three-hop follow chain
+    /// publishing as freely as the operator, which is the whole point of
+    /// measuring distance. `0` disables rate limiting entirely.
     pub fn with_pubkey_rate_limit(mut self, events_per_minute: u32) -> Self {
+        if events_per_minute == 0 {
+            return self;
+        }
+
+        let mut tiers = HashMap::new();
+        for tier in [
+            AccessTier::Manual,
+            AccessTier::FollowSync,
+            AccessTier::WebOfTrust(2),
+            AccessTier::WebOfTrust(3),
+            AccessTier::Open,
+        ] {
+            // At least one event a minute: a tier throttled to zero would be
+            // admitted and then unable to say anything, which is a confusing
+            // way to express "denied".
+            let budget = (events_per_minute * tier.budget_percent() / 100).max(1);
+            if let Some(n) = NonZeroU32::new(budget) {
+                tiers.insert(
+                    tier.as_budget_key(),
+                    Arc::new(RateLimiter::keyed(Quota::per_minute(n))),
+                );
+            }
+        }
+
+        self.tier_limiters = Some(Arc::new(tiers));
         if let Some(n) = NonZeroU32::new(events_per_minute) {
-            let quota = Quota::per_minute(n);
-            self.pubkey_limiter = Some(Arc::new(RateLimiter::keyed(quota)));
+            self.pubkey_limiter = Some(Arc::new(RateLimiter::keyed(Quota::per_minute(n))));
         }
         self
+    }
+
+    /// The bucket for whichever tier admitted this pubkey.
+    fn limiter_for(&self, pubkey: &PublicKey) -> Option<&Arc<PubkeyLimiter>> {
+        let tiers = self.tier_limiters.as_ref()?;
+        let tier = self.whitelist.tier_of(pubkey);
+        tiers
+            .get(&tier.as_budget_key())
+            .or(self.pubkey_limiter.as_ref())
     }
 
     pub fn with_obelisk_index(mut self, obelisk_index: Arc<ObeliskIndex>) -> Self {
@@ -153,8 +210,18 @@ impl EventProcessor for GroupsRelayProcessor {
         _custom_state: Arc<RwLock<()>>,
         context: &EventContext,
     ) -> Result<()> {
+        // A NIP-46 signer subscribes for its replies before anyone has
+        // authenticated, so a filter that asks only for signer traffic is
+        // exempt. Anything broader still needs admission.
+        let signer_handshake = !filters.is_empty()
+            && filters.iter().all(|f| {
+                f.kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.iter().all(|k| k.as_u16() == KIND_NIP46_SIGNER))
+            });
+
         // Enforce pubkey whitelist
-        if !self.is_allowed(&context.authed_pubkey) {
+        if !signer_handshake && !self.is_allowed(&context.authed_pubkey) {
             return Err(relay_builder::Error::auth_required(
                 "Authentication required: this relay only accepts whitelisted pubkeys".to_string(),
             ));
@@ -228,8 +295,12 @@ impl EventProcessor for GroupsRelayProcessor {
         _custom_state: Arc<RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>> {
+        // Signer coordination is exempt: it is how an operator authenticates in
+        // the first place. See KIND_NIP46_SIGNER.
+        let is_signer_traffic = event.kind.as_u16() == KIND_NIP46_SIGNER;
+
         // Enforce pubkey whitelist
-        if !self.is_allowed(&context.authed_pubkey) {
+        if !is_signer_traffic && !self.is_allowed(&context.authed_pubkey) {
             return Err(relay_builder::Error::restricted(
                 "Access denied: your pubkey is not whitelisted on this relay".to_string(),
             ));
@@ -237,8 +308,11 @@ impl EventProcessor for GroupsRelayProcessor {
 
         // Per-pubkey rate limit: spammers signing with the same key share one bucket.
         // Relay's own pubkey is exempt (used for replaceable group state events).
-        if let Some(limiter) = &self.pubkey_limiter {
-            if event.pubkey != self.relay_pubkey && limiter.check_key(&event.pubkey).is_err() {
+        if let Some(limiter) = self.limiter_for(&event.pubkey) {
+            if !is_signer_traffic
+                && event.pubkey != self.relay_pubkey
+                && limiter.check_key(&event.pubkey).is_err()
+            {
                 return Err(relay_builder::Error::restricted(
                     "rate limit exceeded for this pubkey".to_string(),
                 ));
@@ -372,7 +446,7 @@ impl EventProcessor for GroupsRelayProcessor {
 mod tests {
     use super::*;
     use crate::test_utils::{create_test_event, create_test_keys, setup_test};
-    use crate::whitelist::Whitelist;
+    use crate::whitelist::{AccessTier, Whitelist};
     use nostr_lmdb::Scope;
 
     fn empty_state() -> Arc<RwLock<()>> {
@@ -402,6 +476,89 @@ mod tests {
         // Verify the logic was created correctly
         assert_eq!(processor.relay_pubkey(), &admin_keys.public_key());
         assert!(Arc::ptr_eq(processor.groups(), &groups));
+    }
+
+    /// The console logs in over NIP-46 using this relay as its rendezvous, so
+    /// signer traffic has to pass before anyone is authenticated. Without this,
+    /// enabling any access restriction locks the operator out of the console
+    /// that would let them lift it -- which is precisely what happened when
+    /// Web-of-Trust admission was first switched on in production.
+    #[tokio::test]
+    async fn nip46_signer_traffic_bypasses_a_closed_whitelist() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+
+        // A whitelist with someone on it: closed to everyone else.
+        let stranger = Keys::generate();
+        let whitelist = Whitelist::new(
+            vec![Keys::generate().public_key()],
+            None,
+            crate::blacklist::Blacklist::new(None),
+        );
+        assert!(!whitelist.is_empty());
+        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), whitelist);
+
+        let context = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        // Subscribing for signer replies must be allowed unauthenticated.
+        let signer_filter = vec![Filter::new().kind(Kind::from(24133u16))];
+        assert!(
+            processor
+                .verify_filters(&signer_filter, empty_state(), &context)
+                .is_ok(),
+            "a NIP-46 handshake subscription must not require admission"
+        );
+
+        // Publishing a signer message likewise.
+        let signer_event = create_test_event(&stranger, 24133, vec![]).await;
+        assert!(
+            processor
+                .handle_event(signer_event, empty_state(), &context)
+                .await
+                .is_ok(),
+            "a NIP-46 signer message must not require admission"
+        );
+
+        // Everything else stays closed.
+        let ordinary = vec![Filter::new().kind(Kind::from(1u16))];
+        assert!(
+            processor
+                .verify_filters(&ordinary, empty_state(), &context)
+                .is_err(),
+            "the exemption must not open the relay to ordinary traffic"
+        );
+
+        let note = create_test_event(&stranger, 1, vec![]).await;
+        assert!(
+            processor
+                .handle_event(note, empty_state(), &context)
+                .await
+                .is_err(),
+            "a non-whitelisted pubkey must still be refused for ordinary events"
+        );
+
+        // A filter that merely includes 24133 alongside other kinds is not a
+        // handshake and must not inherit the exemption.
+        let mixed = vec![Filter::new().kinds(vec![Kind::from(24133u16), Kind::from(1u16)])];
+        assert!(
+            processor
+                .verify_filters(&mixed, empty_state(), &context)
+                .is_err(),
+            "mixing 24133 with other kinds must not smuggle access"
+        );
     }
 
     #[tokio::test]

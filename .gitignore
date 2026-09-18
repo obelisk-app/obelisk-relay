@@ -21,6 +21,33 @@ config/admin_pubkeys_runtime.json
 config/blacklist.json
 config/backups/
 
+# The same state for the public instance. Previously only the `config/` copies
+# were ignored, so these sat untracked-but-committable in a public repo: they
+# hold the owner and admin pubkeys, and whitelist_follows.json is a 16KB list of
+# every account allowed to connect -- publishing it would publish the relay's
+# social graph, not just its configuration.
+public-config/admin_pubkeys_runtime.json
+public-config/relay_owner_pubkey.json
+public-config/whitelist_runtime.json
+public-config/whitelist_follows.json
+public-config/reference_accounts.json
+public-config/blacklist.json
+public-config/backups/
+
+# Maintenance state exchanged between the console, the relay's own startup, and
+# the host update agent. Per-deployment and transient by nature; a committed
+# request file would ask every checkout to compact or update itself.
+config/compaction-request.json
+config/compaction-log.json
+config/update-request.json
+config/update-result.json
+config/update-agent.json
+public-config/compaction-request.json
+public-config/compaction-log.json
+public-config/update-request.json
+public-config/update-result.json
+public-config/update-agent.json
+
 # Host repair/install helpers often include a real hostname, admin pubkey,
 # relay key, local username, tunnel name, or port. Keep them local unless they
 # are rewritten as generic scripts with examples only.

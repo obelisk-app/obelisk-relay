@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use groups_relay::{config, groups::Groups, server, RelayDatabase};
+use groups_relay::{compaction, config, groups::Groups, server, RelayDatabase};
 use nostr_sdk::RelayUrl;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,6 +153,7 @@ async fn async_main() -> Result<()> {
         enable_indexed_search: relay_settings.enable_indexed_search,
         advertise_indexed_search: relay_settings.advertise_indexed_search,
         obelisk_index: relay_settings.obelisk_index.clone(),
+        wot: relay_settings.wot.clone(),
     };
 
     if let Some(target_url) = args.relay_url {
@@ -169,6 +170,12 @@ async fn async_main() -> Result<()> {
 
     let relay_keys = relay_settings.relay_keys()?;
     let _cancellation_token = CancellationToken::new();
+
+    // Reclaim free-list slack if the admin console staged a compaction. This has
+    // to run here, with nothing holding the environment open: the copy is taken
+    // from a snapshot, so any write landing after it would be lost when the copy
+    // replaces the original. Blocking on purpose.
+    compaction::run_pending(&settings.db_path, "config");
 
     // Create database (CryptoHelper is created internally)
     let database = RelayDatabase::new(settings.db_path.clone()).await?;

@@ -1,11 +1,19 @@
 import { useEffect, useState } from 'preact/hooks'
 import {
   adminApi,
+  type Attribution,
+  type StorageAuthorStat,
+  type StorageKindAuthors,
+  type PruneResult,
   type StorageSettings,
   type StorageStats,
   type StorageSample,
+  type CompactionStatus,
 } from '../../services/AdminApiClient'
 import { confirmMatches } from './confirmPhrase'
+import { useDirtySection } from './settingsDirty'
+import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
+import { ProfileCard, CopyNpubButton } from './ProfileCard'
 
 /**
  * Kinds the relay refuses to prune under any configuration — mirrors
@@ -182,6 +190,615 @@ const relativeAge = (unix: number) => {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
+/**
+ * Reclaiming the disk that pruning does not.
+ *
+ * Deleting events frees LMDB pages for reuse but never returns them to the
+ * filesystem, so the file stays at its high-water mark and the graph above it
+ * never goes down. This is the control that fixes that. It is its own card
+ * rather than a line in the stats grid because it costs a restart, and because
+ * "how much would this get back" is the number an operator needs before
+ * agreeing to one.
+ *
+ * Self-contained state: measuring walks the free list in a child process on the
+ * relay, so it must not be tied to the stats polling loop above.
+ */
+const CompactionCard = () => {
+  const [status, setStatus] = useState<CompactionStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  /** Set once the relay has been told to restart, so the card can wait for it. */
+  const [restarting, setRestarting] = useState(false)
+
+  const load = async (refresh = false) => {
+    setLoading(true)
+    setError('')
+    try {
+      setStatus(await adminApi.getCompactionStatus(refresh))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read compaction status')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  /**
+   * Wait out the restart, then show what the compaction actually did.
+   *
+   * The failures here are the expected middle of the operation, not errors: the
+   * relay exits, Docker restarts it, and the compaction runs before it starts
+   * listening. Anything that treated a refused connection as a failure would
+   * report every successful compaction as broken.
+   */
+  const waitForRelay = async () => {
+    const deadline = Date.now() + 5 * 60 * 1000
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      try {
+        const fresh = await adminApi.getCompactionStatus(true)
+        setStatus(fresh)
+        setRestarting(false)
+        return
+      } catch {
+        // Still down, or still compacting. Keep waiting.
+      }
+    }
+    setRestarting(false)
+    setError('The relay did not come back within five minutes. Check the container logs.')
+  }
+
+  const compact = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await adminApi.compactDatabase(confirm)
+      setConfirm('')
+      setRestarting(true)
+      void waitForRelay()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start the compaction')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reclaimable = status?.reclaimable_bytes ?? null
+  const lastRun = status?.history.length ? status.history[status.history.length - 1] : null
+  const ready = confirmMatches(confirm, 'COMPACT')
+
+  return (
+    <div class="admin-storage-chart-block">
+      <div class="admin-storage-chart-head">
+        <h4>Reclaim disk space</h4>
+        <p>
+          Rebuilds the database file without the pages that deleted events left
+          behind, and hands that space back to the filesystem. The relay
+          restarts to do it — the copy is taken from a snapshot, so it cannot
+          run while the relay is writing. Events, groups and membership are
+          carried across unchanged.
+        </p>
+      </div>
+
+      {loading && !status && <div class="lc-skeleton h-24 w-full" />}
+
+      {status && (
+        <>
+          <div class="admin-storage-stats mt-3">
+            <div
+              class="admin-stat-card"
+              title="The LMDB file as the filesystem sees it."
+            >
+              <span>File on disk</span>
+              <strong>{formatBytes(status.db_file_bytes)}</strong>
+            </div>
+            <div
+              class="admin-stat-card"
+              title="Pages holding data the relay still serves. A compaction leaves the file at about this size."
+            >
+              <span>Actually in use</span>
+              <strong>{status.live_bytes === null ? '—' : formatBytes(status.live_bytes)}</strong>
+            </div>
+            <div
+              class="admin-stat-card"
+              title="Space freed by deletion that LMDB is holding on to. This is what a compaction returns."
+            >
+              <span>Reclaimable</span>
+              <strong>{reclaimable === null ? '—' : formatBytes(reclaimable)}</strong>
+            </div>
+            <div
+              class="admin-stat-card"
+              title="A compaction writes a second copy of the live data before replacing the original, so it needs room for it."
+            >
+              <span>Free disk</span>
+              <strong>
+                {status.free_disk_bytes === null ? '—' : formatBytes(status.free_disk_bytes)}
+              </strong>
+            </div>
+          </div>
+
+          <p class="text-sm mt-2" style={{ color: 'var(--color-text-secondary)' }}>
+            {status.measure_error
+              ? `Measured ${relativeAge(status.measured_at)} — ${status.measure_error}`
+              : `Measured ${relativeAge(status.measured_at)}. Needs ${formatBytes(status.required_free_bytes)} free to run.`}
+            {' '}
+            <button
+              type="button"
+              onClick={() => load(true)}
+              disabled={loading || restarting}
+              class="underline"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              {loading ? 'Measuring...' : 'Measure again'}
+            </button>
+          </p>
+
+          {lastRun && (
+            <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
+              {lastRun.status === 'ok'
+                ? `Last compaction ${relativeAge(lastRun.at)}: ${formatBytes(lastRun.before_bytes)} → ${formatBytes(lastRun.after_bytes)} in ${(lastRun.duration_ms / 1000).toFixed(1)}s.`
+                : `Last compaction ${relativeAge(lastRun.at)} ${lastRun.status}: ${lastRun.detail ?? 'no detail recorded'}`}
+            </p>
+          )}
+
+          {restarting ? (
+            <div class="mt-3 p-3 rounded-lg text-sm bg-amber-500/10 text-amber-300 border border-amber-500/20">
+              Compacting and restarting. The console will be unreachable for a
+              moment — this page is waiting and will report the result.
+            </div>
+          ) : status.pending ? (
+            <div class="mt-3 p-3 rounded-lg text-sm bg-amber-500/10 text-amber-300 border border-amber-500/20">
+              A compaction is staged and will run the next time the relay
+              starts.
+            </div>
+          ) : (
+            <div class="admin-danger-card mt-3">
+              {status.blocked_reason ? (
+                <p class="text-sm">{status.blocked_reason}</p>
+              ) : (
+                <p class="text-sm">
+                  This will reclaim about {formatBytes(reclaimable ?? 0)} and
+                  restart the relay. Clients reconnect on their own.
+                </p>
+              )}
+              <div class="flex gap-2 mt-2">
+                <input
+                  type="text"
+                  value={confirm}
+                  onInput={e => setConfirm((e.target as HTMLInputElement).value)}
+                  placeholder="Type COMPACT to confirm"
+                  disabled={!status.can_compact || busy}
+                  class="lc-input text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={compact}
+                  disabled={!status.can_compact || !ready || busy}
+                  class="lc-pill text-sm"
+                  style={{ borderRadius: '8px', padding: '7px 14px' }}
+                >
+                  {busy ? 'Starting...' : 'Compact and restart'}
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {error && (
+        <div class="mt-3 p-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Says whose data a row is, in the operator's terms.
+ *
+ * "Sender" and "recipient" are not decoration: for kind 1059 the only pubkey
+ * available is the addressee, and blocking them stops them *receiving* mail
+ * rather than stopping a spammer. Labelling both cases "pubkey" would invite
+ * exactly the wrong action.
+ */
+const ATTRIBUTION_LABEL: Record<Attribution, string> = {
+  author: 'Sender',
+  recipient: 'Recipient',
+}
+
+const ATTRIBUTION_HINT: Record<Attribution, string> = {
+  author: 'Charged to the pubkey that signed these events.',
+  recipient:
+    'Charged to the pubkey these events are addressed to. Gift wraps are signed by a throwaway key per message, so the sender cannot be identified — blocking this key stops them receiving, not someone else sending.',
+}
+
+/** Appears only when rows are ticked, so the table is unchanged until then. */
+const BulkBar = ({
+  rows,
+  selected,
+  onClear,
+  onDelete,
+}: {
+  rows: StorageAuthorStat[]
+  selected: Set<string>
+  onClear: () => void
+  onDelete: () => void
+}) => {
+  const count = rows.filter(r => selected.has(r.pubkey)).length
+  if (count === 0) return null
+  return (
+    <div class="admin-bulk-bar">
+      <span>
+        <strong>{count}</strong> selected
+      </span>
+      <span class="flex-1" />
+      <button type="button" class="admin-bulk-clear" onClick={onClear}>
+        Clear
+      </button>
+      <button type="button" class="admin-bulk-delete" onClick={onDelete}>
+        Delete events…
+      </button>
+    </div>
+  )
+}
+
+/** Shared table body for both the per-kind drilldown and the relay-wide list. */
+const AuthorTable = (props: {
+  rows: StorageAuthorStat[]
+  /** Denominator for the share column — bytes of the kind, or of the sample. */
+  totalBytes: number
+  approximate: boolean
+  busyPubkey: string | null
+  profiles: Map<string, NostrProfile>
+  onOpenProfile: (row: StorageAuthorStat) => void
+  onToggleBlacklist: (row: StorageAuthorStat) => void
+  onPrune: (row: StorageAuthorStat) => void
+  /** Selected pubkeys, for the bulk action. */
+  selected: Set<string>
+  onToggleSelect: (pubkey: string) => void
+  onToggleSelectAll: () => void
+  /** Restrict the prune dialog to one kind when opened from a drilldown. */
+  kind?: number
+}) => (
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr style={{ color: 'var(--color-text-secondary)' }}>
+          <th class="p-2 w-8">
+            <input
+              type="checkbox"
+              aria-label="Select all rows"
+              checked={props.rows.length > 0 && props.rows.every(r => props.selected.has(r.pubkey))}
+              onChange={props.onToggleSelectAll}
+            />
+          </th>
+          <th class="text-left font-medium p-2">Pubkey</th>
+          <th class="text-right font-medium p-2">Events</th>
+          <th class="text-right font-medium p-2">Est. size</th>
+          <th class="text-right font-medium p-2">Share</th>
+          <th class="p-2" />
+        </tr>
+      </thead>
+      <tbody>
+        {props.rows.map(row => {
+          const pct = props.totalBytes > 0 ? (row.sampled_bytes / props.totalBytes) * 100 : 0
+          const profile = props.profiles.get(row.pubkey)
+          return (
+            <tr
+              key={row.pubkey}
+              style={{
+                borderTop: '1px solid var(--color-border)',
+                background: props.selected.has(row.pubkey)
+                  ? 'rgba(var(--color-accent-rgb), 0.07)'
+                  : undefined,
+              }}
+            >
+              <td class="p-2">
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${row.npub || row.pubkey}`}
+                  checked={props.selected.has(row.pubkey)}
+                  onChange={() => props.onToggleSelect(row.pubkey)}
+                />
+              </td>
+              <td class="p-2">
+                <div class="flex items-center gap-2.5">
+                  {/* Identity is clickable: a raw npub answers "which key" but
+                      never "who". Opening the profile is how an operator
+                      decides whether a heavy pubkey is a person or a spammer. */}
+                  <button
+                    type="button"
+                    class="admin-author-identity"
+                    onClick={() => props.onOpenProfile(row)}
+                    disabled={!row.npub}
+                    title={row.npub ? 'Show profile' : row.pubkey}
+                  >
+                    {profile?.picture ? (
+                      <img
+                        src={profile.picture}
+                        alt=""
+                        class="w-7 h-7 rounded-full object-cover flex-shrink-0"
+                        style={{ border: '1px solid var(--color-border)' }}
+                        onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                      />
+                    ) : (
+                      <span
+                        class="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold"
+                        style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)' }}
+                      >
+                        {(profile?.name || row.npub.slice(5, 7) || '??').slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
+                    <span class="min-w-0 text-left">
+                      <span class="block text-sm truncate">
+                        {profile ? getDisplayName(profile, row.npub) : (row.npub ? `${row.npub.slice(0, 14)}…` : `${row.pubkey.slice(0, 16)}…`)}
+                      </span>
+                      <span class="block text-[11px] font-mono" style={{ color: 'var(--color-text-secondary)' }}>
+                        {row.npub ? `${row.npub.slice(0, 16)}…` : 'unparseable pubkey'}
+                      </span>
+                    </span>
+                  </button>
+                  {row.npub && <CopyNpubButton npub={row.npub} />}
+                  <span
+                    class="admin-status-badge"
+                    title={ATTRIBUTION_HINT[row.attributed_by]}
+                  >
+                    {ATTRIBUTION_LABEL[row.attributed_by]}
+                  </span>
+                  {row.blacklisted && (
+                    <span class="admin-status-badge admin-status-badge-danger">blocked</span>
+                  )}
+                </div>
+              </td>
+              <td class="p-2 text-right font-mono">{formatNumber(row.count)}</td>
+              <td class="p-2 text-right font-mono">
+                {props.approximate ? '≈' : ''}
+                {formatBytes(row.sampled_bytes)}
+              </td>
+              <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
+              </td>
+              <td class="p-2 text-right whitespace-nowrap">
+                {/* Blocking stops them connecting; it reclaims no disk. Delete
+                    is the other half, so both live here. */}
+                <button
+                  type="button"
+                  onClick={() => props.onPrune(row)}
+                  class="text-xs mr-3"
+                  style={{ color: '#f87171' }}
+                  title="Delete stored events for this pubkey"
+                >
+                  Delete…
+                </button>
+                <button
+                  type="button"
+                  disabled={props.busyPubkey === row.pubkey || !row.npub}
+                  onClick={() => props.onToggleBlacklist(row)}
+                  class="text-xs"
+                  style={{
+                    color: row.blacklisted ? 'var(--color-text-secondary)' : '#f87171',
+                    opacity: row.npub ? 1 : 0.4,
+                  }}
+                  title={
+                    row.npub
+                      ? undefined
+                      : 'This pubkey came from a tag and is not valid hex, so it cannot be blocked.'
+                  }
+                >
+                  {props.busyPubkey === row.pubkey ? '…' : row.blacklisted ? 'Unblock' : 'Block'}
+                </button>
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  </div>
+)
+
+/** What the prune dialog is currently aimed at — one row, or a selection. */
+interface PruneAim {
+  rows: StorageAuthorStat[]
+  /** Kinds offered. One when opened from a drilldown, all seen kinds otherwise. */
+  kinds: number[]
+}
+
+/**
+ * Delete a pubkey's stored events, narrowed by kind and date.
+ *
+ * Always previews first, and the count shown is the count deleted — server-side
+ * both run off the same filter. Protected NIP-29 kinds are refused regardless
+ * of what is selected here, so pruning a group's creator cannot orphan it.
+ */
+const PruneDialog = ({
+  aim,
+  onClose,
+  onDone,
+}: {
+  aim: PruneAim
+  onClose: () => void
+  onDone: (deleted: number) => void
+}) => {
+  const [kinds, setKinds] = useState<number[]>(aim.kinds.slice(0, 1))
+  const [sinceDate, setSinceDate] = useState('')
+  const [untilDate, setUntilDate] = useState('')
+  const [preview, setPreview] = useState<PruneResult | null>(null)
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const toUnix = (d: string, endOfDay = false) => {
+    if (!d) return undefined
+    const ms = new Date(`${d}T${endOfDay ? '23:59:59' : '00:00:00'}`).getTime()
+    return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000)
+  }
+
+  const request = {
+    // Attribution travels per pubkey: a selection can mix gift-wrap recipients
+    // with ordinary authors, and one rule for both would hit the wrong people.
+    targets: aim.rows.map(r => ({ pubkey: r.pubkey, attributed_by: r.attributed_by })),
+    kinds,
+    since: toUnix(sinceDate),
+    until: toUnix(untilDate, true),
+  }
+
+  // Any change to the filter invalidates a previous count.
+  useEffect(() => {
+    setPreview(null)
+    setConfirm('')
+  }, [kinds.join(','), sinceDate, untilDate])
+
+  const runPreview = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      setPreview(await adminApi.pruneEvents({ ...request, dry_run: true }))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runDelete = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await adminApi.pruneEvents({ ...request, confirm })
+      onDone(result.deleted)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const single = aim.rows.length === 1 ? aim.rows[0] : null
+  const label = single
+    ? (single.npub ? `${single.npub.slice(0, 18)}…` : single.pubkey.slice(0, 16))
+    : `${aim.rows.length} pubkeys`
+  // Mixed selections get both explanations, because the rules differ.
+  const modes = [...new Set(aim.rows.map(r => r.attributed_by))]
+
+  return (
+    <div class="admin-modal-backdrop" onClick={onClose}>
+      <div class="admin-modal" onClick={e => e.stopPropagation()}>
+        <h3 class="admin-modal-title">Delete stored events</h3>
+        <p class="admin-modal-copy">
+          {single ? (
+            <>{ATTRIBUTION_LABEL[single.attributed_by]} <code>{label}</code>.</>
+          ) : (
+            <><code>{label}</code> selected.</>
+          )}{' '}
+          {modes.map(m => ATTRIBUTION_HINT[m]).join(' ')}
+        </p>
+
+        <div class="admin-modal-field">
+          <span>Kinds</span>
+          <div class="admin-kind-chips">
+            {aim.kinds.map(k => (
+              <label key={k} class={`admin-kind-chip ${kinds.includes(k) ? 'is-on' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={kinds.includes(k)}
+                  onChange={e =>
+                    setKinds(prev =>
+                      (e.target as HTMLInputElement).checked
+                        ? [...prev, k]
+                        : prev.filter(x => x !== k),
+                    )
+                  }
+                />
+                {k} · {kindLabel(k)}
+              </label>
+            ))}
+          </div>
+          {kinds.some(k => NEVER_PRUNE_KINDS.includes(k)) && (
+            <p class="admin-modal-note">
+              Protected kinds stay selected but are refused server-side — group
+              identity and membership are never deleted.
+            </p>
+          )}
+        </div>
+
+        <div class="admin-rate-grid">
+          <label>
+            <span>From (optional)</span>
+            <input type="date" value={sinceDate} onInput={e => setSinceDate((e.target as HTMLInputElement).value)} />
+          </label>
+          <label>
+            <span>Until (optional)</span>
+            <input type="date" value={untilDate} onInput={e => setUntilDate((e.target as HTMLInputElement).value)} />
+          </label>
+        </div>
+        <p class="admin-modal-note">
+          Leave both empty to delete every matching event regardless of age.
+        </p>
+
+        {error && <p class="admin-modal-error">{error}</p>}
+
+        {preview && (
+          <div class="admin-modal-preview">
+            {preview.matched === 0 ? (
+              <strong>Nothing matches this filter.</strong>
+            ) : (
+              <>
+                <strong>{formatNumber(preview.matched)} event{preview.matched === 1 ? '' : 's'} will be deleted.</strong>
+                <span>
+                  This is exact, not sampled, and cannot be undone. The relay keeps
+                  no other copy.
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
+        {preview && preview.matched > 0 && (
+          <div class="admin-modal-field">
+            <span>Type DELETE to confirm</span>
+            <input
+              type="text"
+              class={`admin-confirm-input ${confirmMatches(confirm, 'DELETE') ? 'is-valid' : ''}`}
+              value={confirm}
+              placeholder="DELETE"
+              onInput={e => setConfirm((e.target as HTMLInputElement).value)}
+            />
+          </div>
+        )}
+
+        <div class="admin-modal-actions">
+          <button type="button" class="admin-save-bar-discard" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          {!preview ? (
+            <button
+              type="button"
+              class="admin-save-bar-save"
+              onClick={runPreview}
+              disabled={busy || kinds.length === 0}
+            >
+              {busy ? 'Counting…' : 'Preview'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              class="admin-modal-danger"
+              onClick={runDelete}
+              disabled={busy || preview.matched === 0 || !confirmMatches(confirm, 'DELETE')}
+            >
+              {busy ? 'Deleting…' : `Delete ${formatNumber(preview.matched)}`}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export const StorageManager = () => {
   const [settings, setSettings] = useState<StorageSettings | null>(null)
   const [stats, setStats] = useState<StorageStats | null>(null)
@@ -207,6 +824,143 @@ export const StorageManager = () => {
   const [recipientConfirm, setRecipientConfirm] = useState('')
   const [recipientBusy, setRecipientBusy] = useState(false)
   const [history, setHistory] = useState<StorageSample[]>([])
+  // Per-kind drilldown: which row is open, and the breakdowns fetched so far.
+  // Cached by kind so re-opening a row is free — the server reads the same
+  // snapshot either way.
+  const [expandedKind, setExpandedKind] = useState<number | null>(null)
+  const [kindAuthors, setKindAuthors] = useState<Record<number, StorageKindAuthors>>({})
+  const [kindAuthorsLoading, setKindAuthorsLoading] = useState<number | null>(null)
+  const [kindAuthorsError, setKindAuthorsError] = useState<string | null>(null)
+  const [blacklistBusy, setBlacklistBusy] = useState<string | null>(null)
+  // Profiles for the attribution tables, keyed by hex. Fetched lazily and
+  // merged across the relay-wide table and every drilldown, so switching
+  // between them never refetches a face already on screen.
+  const [authorProfiles, setAuthorProfiles] = useState<Map<string, NostrProfile>>(new Map())
+  const [profileTarget, setProfileTarget] = useState<{ hex: string; npub: string } | null>(null)
+
+  /** Fetch any pubkeys we do not have a profile for yet. */
+  const loadAuthorProfiles = (rows: StorageAuthorStat[]) => {
+    const missing = rows
+      .filter(r => r.npub && !authorProfiles.has(r.pubkey))
+      .map(r => r.pubkey)
+    if (missing.length === 0) return
+    fetchProfiles(missing)
+      .then(fetched => {
+        setAuthorProfiles(prev => {
+          const next = new Map(prev)
+          for (const [hex, profile] of fetched) next.set(hex, profile)
+          return next
+        })
+      })
+      // Profiles are decoration; a relay that will not answer must not break
+      // the storage screen.
+      .catch(() => undefined)
+  }
+
+  const toggleKind = (kind: number) => {
+    if (expandedKind === kind) {
+      setExpandedKind(null)
+      return
+    }
+    setExpandedKind(kind)
+    setKindAuthorsError(null)
+    if (kindAuthors[kind]) return
+
+    setKindAuthorsLoading(kind)
+    adminApi.getStorageKindAuthors(kind)
+      .then(data => {
+        setKindAuthors(prev => ({ ...prev, [kind]: data }))
+        loadAuthorProfiles(data.authors)
+      })
+      .catch(e => setKindAuthorsError(e.message))
+      .finally(() => setKindAuthorsLoading(null))
+  }
+
+  /**
+   * Block or unblock from any attribution table.
+   *
+   * Patches the row in place rather than refetching: the storage sample is
+   * cached for minutes, so a reload would show the old state and make the
+   * button look broken.
+   */
+  const [pruneAim, setPruneAim] = useState<PruneAim | null>(null)
+  /** Rows ticked for a bulk action, by hex. */
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set())
+
+  const toggleSelect = (pubkey: string) =>
+    setSelectedRows(prev => {
+      const next = new Set(prev)
+      if (next.has(pubkey)) next.delete(pubkey)
+      else next.add(pubkey)
+      return next
+    })
+
+  const toggleSelectAll = (rows: StorageAuthorStat[]) =>
+    setSelectedRows(prev => {
+      const all = rows.every(r => prev.has(r.pubkey))
+      const next = new Set(prev)
+      for (const r of rows) {
+        if (all) next.delete(r.pubkey)
+        else next.add(r.pubkey)
+      }
+      return next
+    })
+
+  /**
+   * Open the prune dialog. From a kind drilldown only that kind is offered;
+   * from the relay-wide table, every kind in the sample is, so an operator can
+   * clear a spammer's whole footprint in one pass.
+   */
+  const kindsFor = (kind?: number) => {
+    const kinds = kind !== undefined
+      ? [kind]
+      : (stats?.kinds ?? []).map(k => k.kind).filter(k => !NEVER_PRUNE_KINDS.includes(k))
+    return kinds.length > 0 ? kinds : [1]
+  }
+
+  const openPrune = (row: StorageAuthorStat, kind?: number) =>
+    setPruneAim({ rows: [row], kinds: kindsFor(kind) })
+
+  /** Clear every ticked row in one action. */
+  const openBulkPrune = (rows: StorageAuthorStat[], kind?: number) => {
+    const chosen = rows.filter(r => selectedRows.has(r.pubkey))
+    if (chosen.length === 0) return
+    setPruneAim({ rows: chosen, kinds: kindsFor(kind) })
+  }
+
+  const openAuthorProfile = (row: StorageAuthorStat) => {
+    if (!row.npub) return
+    setProfileTarget({ hex: row.pubkey, npub: row.npub })
+  }
+
+  const toggleBlacklist = async (row: StorageAuthorStat) => {
+    if (!row.npub) return
+    setBlacklistBusy(row.pubkey)
+    try {
+      if (row.blacklisted) {
+        await adminApi.removeFromBlacklist(row.pubkey)
+      } else {
+        await adminApi.addToBlacklist(row.pubkey)
+      }
+      const nowBlocked = !row.blacklisted
+      const patch = (rows: StorageAuthorStat[]) =>
+        rows.map(r => (r.pubkey === row.pubkey ? { ...r, blacklisted: nowBlocked } : r))
+
+      setStats(prev => (prev ? { ...prev, top_authors: patch(prev.top_authors) } : prev))
+      setKindAuthors(prev => {
+        const next: Record<number, StorageKindAuthors> = {}
+        for (const [kind, entry] of Object.entries(prev)) {
+          next[Number(kind)] = { ...entry, authors: patch(entry.authors) }
+        }
+        return next
+      })
+      setToast(nowBlocked ? 'Pubkey blocked.' : 'Pubkey unblocked.')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBlacklistBusy(null)
+    }
+  }
 
   const loadHistory = () => {
     adminApi.getStorageHistory()
@@ -253,6 +1007,11 @@ export const StorageManager = () => {
   }
 
   useEffect(() => { loadSettings(); loadStats(); loadHistory() }, [])
+
+  // Relay-wide table: fetch faces whenever the snapshot changes.
+  useEffect(() => {
+    if (stats?.top_authors?.length) loadAuthorProfiles(stats.top_authors)
+  }, [stats?.top_authors])
 
   useEffect(() => {
     if (!counting) return
@@ -349,11 +1108,64 @@ export const StorageManager = () => {
       setTimeout(() => setToast(null), 6000)
       loadStats(true)
     } catch (e) {
+      // Rethrown so the save bar can name this section in its failure list.
       setError(e instanceof Error ? e.message : 'Failed to save storage settings')
+      throw e
     } finally {
       setSaving(false)
     }
   }
+
+  // Compare the draft against what is configured on the server. The draft is
+  // deliberately blank on a relay that never enabled pruning, so "blank and
+  // disarmed" has to read as clean rather than as a pending change.
+  const savedPolicyDays: Record<number, string> = {}
+  for (const [kind, secs] of Object.entries(settings?.policies_secs ?? {})) {
+    savedPolicyDays[Number(kind)] = String(Math.round(Number(secs) / 86400))
+  }
+  const savedArmed = settings?.configured_pruning_enabled ?? false
+  const policiesChanged =
+    JSON.stringify(Object.fromEntries(activePolicies)) !==
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(savedPolicyDays)
+          .map(([k, v]) => [Number(k), Number(v)] as const)
+          .filter(([, days]) => Number.isInteger(days) && days >= 1),
+      ),
+    )
+  const intervalChanged =
+    savedArmed && armed && intervalMinutes !== String(settings?.prune_interval_minutes ?? '')
+  const storageDirty = armed !== savedArmed || policiesChanged || intervalChanged
+
+  useDirtySection(
+    {
+      id: 'storage',
+      label: 'Storage',
+      dirty: storageDirty,
+      // Keeps this section's own gates: an unconfirmed destructive change is
+      // an unsaved change that cannot be committed, not a clean one.
+      blocked: !storageDirty
+        ? null
+        : !formValid
+          ? 'set an interval of at least 1 minute and at least one retention window'
+          : !confirmed
+            ? 'type DELETE to confirm arming automatic deletion'
+            : null,
+      consequence:
+        storageDirty && armed
+          ? `Arming deletion permanently removes events older than the window, across ${activePolicies.length} kind${activePolicies.length === 1 ? '' : 's'}. There is no undo and no backup.`
+          : null,
+    },
+    {
+      save,
+      discard: () => {
+        setArmed(savedArmed)
+        setIntervalMinutes(savedArmed ? String(settings?.prune_interval_minutes ?? '') : '')
+        setPolicyDays(savedArmed ? savedPolicyDays : {})
+        setConfirmText('')
+      },
+    },
+  )
 
   return (
     <div>
@@ -362,7 +1174,7 @@ export const StorageManager = () => {
       </p>
 
       {toast && (
-        <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
+        <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', color: 'var(--color-accent)', borderColor: 'rgba(var(--color-accent-rgb), 0.2)' }}>
           {toast}
         </div>
       )}
@@ -407,8 +1219,11 @@ export const StorageManager = () => {
             </div>
 
             <div class="admin-storage-stats mt-4">
-              <div class="admin-stat-card">
-                <span>Database size</span>
+              <div
+                class="admin-stat-card"
+                title="The size of the LMDB file on disk. Deleting events frees pages for reuse inside this file but does not shrink it — only a compaction does."
+              >
+                <span>File on disk</span>
                 <strong>{formatBytes(settings.db_size_bytes)}</strong>
               </div>
               <div class="admin-stat-card">
@@ -419,8 +1234,21 @@ export const StorageManager = () => {
                 <span>Newest event</span>
                 <strong>{stats?.newest_event_unix ? relativeAge(stats.newest_event_unix) : '—'}</strong>
               </div>
-              <div class="admin-stat-card">
-                <span>Events deleted</span>
+              {/* Two different deleters. Showing only the pruner's total under
+                  a bare "Events deleted" meant an operator deleting by hand
+                  watched a number that could not move. */}
+              <div
+                class="admin-stat-card"
+                title="Events you deleted from this console since the relay last started. Resets on restart."
+              >
+                <span>Deleted by you</span>
+                <strong>{formatNumber(settings.admin_deleted_total ?? 0)}</strong>
+              </div>
+              <div
+                class="admin-stat-card"
+                title="Events removed by the automatic retention sweep since the relay last started. Resets on restart."
+              >
+                <span>Deleted by auto-prune</span>
                 <strong>{formatNumber(settings.total_pruned)}</strong>
               </div>
             </div>
@@ -428,6 +1256,13 @@ export const StorageManager = () => {
             <div class="admin-storage-chart-block">
               <div class="admin-storage-chart-head">
                 <h4>Disk used over time</h4>
+                <p style={{ color: '#fcd34d' }}>
+                  Deleting events will not make this line go down. LMDB reuses
+                  freed pages inside the file and never returns them to the
+                  filesystem, so the file only ever grows. Pruning stops it
+                  growing further; shrinking it needs a compaction, which is the
+                  card below.
+                </p>
                 <p>
                   The file on disk, sampled hourly. Includes space freed by
                   deletion but not yet returned to the filesystem — LMDB reuses
@@ -438,6 +1273,8 @@ export const StorageManager = () => {
               </div>
               <StorageChart samples={history} />
             </div>
+
+            <CompactionCard />
 
             {statsError && (
               <div class="mt-4 p-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
@@ -465,28 +1302,99 @@ export const StorageManager = () => {
                         ? (k.count / stats.sampled_events) * 100
                         : 0
                       const protectedKind = NEVER_PRUNE_KINDS.includes(k.kind)
+                      const open = expandedKind === k.kind
+                      const breakdown = kindAuthors[k.kind]
                       return (
-                        <tr key={k.kind} style={{ borderTop: '1px solid var(--color-border)' }}>
-                          <td class="p-2 font-mono">{k.kind}</td>
-                          <td class="p-2">
-                            {kindLabel(k.kind)}
-                            {protectedKind && (
-                              <span class="admin-status-badge ml-2" title="Never pruned">
-                                protected
-                              </span>
-                            )}
-                          </td>
-                          <td class="p-2 text-right font-mono">{formatNumber(k.count)}</td>
-                          <td
-                            class="p-2 text-right font-mono"
-                            title={`${formatBytes(k.avg_bytes)} average per event across the sample. Content and tags only — index overhead is not counted, so these do not sum to the file on disk.`}
+                        <>
+                          <tr
+                            key={k.kind}
+                            class="admin-kind-row"
+                            style={{ borderTop: '1px solid var(--color-border)' }}
+                            onClick={() => toggleKind(k.kind)}
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={open}
+                            title="Show which pubkeys this kind belongs to"
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                toggleKind(k.kind)
+                              }
+                            }}
                           >
-                            {stats.sample_is_complete ? '' : '≈'}{formatBytes(k.sampled_bytes)}
-                          </td>
-                          <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
-                            {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
-                          </td>
-                        </tr>
+                            <td class="p-2 font-mono">
+                              <span class={`admin-disclosure ${open ? 'is-open' : ''}`} aria-hidden="true">
+                                ▸
+                              </span>
+                              {k.kind}
+                            </td>
+                            <td class="p-2">
+                              {kindLabel(k.kind)}
+                              {protectedKind && (
+                                <span class="admin-status-badge ml-2" title="Never pruned">
+                                  protected
+                                </span>
+                              )}
+                            </td>
+                            <td class="p-2 text-right font-mono">{formatNumber(k.count)}</td>
+                            <td
+                              class="p-2 text-right font-mono"
+                              title={`${formatBytes(k.avg_bytes)} average per event across the sample. Content and tags only — index overhead is not counted, so these do not sum to the file on disk.`}
+                            >
+                              {stats.sample_is_complete ? '' : '≈'}{formatBytes(k.sampled_bytes)}
+                            </td>
+                            <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                              {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
+                            </td>
+                          </tr>
+                          {open && (
+                            <tr key={`${k.kind}-authors`}>
+                              <td colSpan={5} class="admin-kind-drilldown">
+                                {kindAuthorsLoading === k.kind && (
+                                  <div class="lc-skeleton h-24 w-full" />
+                                )}
+                                {kindAuthorsError && kindAuthorsLoading !== k.kind && (
+                                  <p class="text-sm" style={{ color: '#fca5a5' }}>
+                                    {kindAuthorsError}
+                                  </p>
+                                )}
+                                {breakdown && (
+                                  breakdown.authors.length > 0 ? (
+                                    <>
+                                      <p class="text-xs mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+                                        {ATTRIBUTION_HINT[breakdown.attributed_by]}
+                                        {' '}Top {breakdown.authors.length} of kind {k.kind} in the sample.
+                                      </p>
+                                      <BulkBar
+                                        rows={breakdown.authors}
+                                        selected={selectedRows}
+                                        onClear={() => setSelectedRows(new Set())}
+                                        onDelete={() => openBulkPrune(breakdown.authors, k.kind)}
+                                      />
+                                      <AuthorTable
+                                        rows={breakdown.authors}
+                                        totalBytes={breakdown.kind_sampled_bytes}
+                                        approximate={!stats.sample_is_complete}
+                                        busyPubkey={blacklistBusy}
+                                        profiles={authorProfiles}
+                                        onOpenProfile={openAuthorProfile}
+                                        onToggleBlacklist={toggleBlacklist}
+                                        onPrune={row => openPrune(row, k.kind)}
+                                        selected={selectedRows}
+                                        onToggleSelect={toggleSelect}
+                                        onToggleSelectAll={() => toggleSelectAll(breakdown.authors)}
+                                      />
+                                    </>
+                                  ) : (
+                                    <p class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                                      No attributable pubkeys for this kind in the sample.
+                                    </p>
+                                  )
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </>
                       )
                     })}
                   </tbody>
@@ -689,21 +1597,62 @@ export const StorageManager = () => {
               </div>
             )}
 
+            {/* Committing moved to the shared save bar, which keeps this
+                section's DELETE gate and reports it as a blocker. */}
             <div class="admin-settings-actions mt-4">
               <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
                 Last run: {formatUnix(settings.last_run_unix)} · Runs: {settings.runs}
+                {saving && ' · Saving…'}
               </div>
-              <button
-                type="button"
-                onClick={save}
-                disabled={saving || !confirmed || !formValid}
-                class="lc-pill-primary text-sm"
-                style={{ borderRadius: '8px', padding: '9px 18px' }}
-              >
-                {saving ? 'Saving...' : 'Save storage settings'}
-              </button>
             </div>
           </section>
+
+          {/* The kinds table says what is filling the disk. This says whose it
+              is — the only way to aim the blacklist at whoever is responsible. */}
+          {stats && stats.top_authors.length > 0 && (
+            <section class="admin-settings-card">
+              <div class="admin-settings-card-header">
+                <div>
+                  <h3>Events by pubkey</h3>
+                  <p>
+                    Who this relay is storing data for, heaviest first. Rows are
+                    labelled Sender or Recipient because gift wraps can only be
+                    attributed to the person receiving them.
+                  </p>
+                </div>
+              </div>
+
+              <div class="mt-4">
+                <BulkBar
+                  rows={stats.top_authors}
+                  selected={selectedRows}
+                  onClear={() => setSelectedRows(new Set())}
+                  onDelete={() => openBulkPrune(stats.top_authors)}
+                />
+                <AuthorTable
+                  rows={stats.top_authors}
+                  totalBytes={stats.kinds.reduce((sum, k) => sum + k.sampled_bytes, 0)}
+                  approximate={!stats.sample_is_complete}
+                  busyPubkey={blacklistBusy}
+                  profiles={authorProfiles}
+                  onOpenProfile={openAuthorProfile}
+                  onToggleBlacklist={toggleBlacklist}
+                  onPrune={row => openPrune(row)}
+                  selected={selectedRows}
+                  onToggleSelect={toggleSelect}
+                  onToggleSelectAll={() => toggleSelectAll(stats.top_authors)}
+                />
+              </div>
+
+              <p class="text-xs mt-3" style={{ color: 'var(--color-text-secondary)' }}>
+                {stats.sample_is_complete
+                  ? 'Covers every stored event.'
+                  : `Based on the ${formatNumber(stats.sampled_events)} most recent events (back to ${formatUnix(stats.oldest_sampled_unix)}), not the whole database. Shares are of the sample.`}
+                {' '}Blocking a pubkey stops it connecting; it does not delete
+                anything already stored.
+              </p>
+            </section>
+          )}
 
           {/* Gift wraps are signed by one-time keys, so the p tag is the only
               per-user handle on what is usually the bulk of a relay's storage. */}
@@ -810,6 +1759,39 @@ export const StorageManager = () => {
             </div>
           </section>
         </div>
+      )}
+
+      {pruneAim && (
+        <PruneDialog
+          aim={pruneAim}
+          onClose={() => setPruneAim(null)}
+          onDone={deleted => {
+            setPruneAim(null)
+            setSelectedRows(new Set())
+            setToast(`Deleted ${formatNumber(deleted)} event${deleted === 1 ? '' : 's'}.`)
+            // Everything on screen now describes events that no longer exist.
+            // Drop the per-kind drilldown cache too -- it is keyed by kind and
+            // would otherwise keep serving deleted rows until a page reload --
+            // and force a rescan rather than waiting for the cache to expire.
+            setKindAuthors({})
+            const reopen = expandedKind
+            setExpandedKind(null)
+            loadStats(true)
+            if (reopen !== null) {
+              // Re-open the row the operator was looking at, against fresh data.
+              setTimeout(() => toggleKind(reopen), 0)
+            }
+          }}
+        />
+      )}
+
+      {profileTarget && (
+        <ProfileCard
+          hex={profileTarget.hex}
+          npub={profileTarget.npub}
+          profile={authorProfiles.get(profileTarget.hex)}
+          onClose={() => setProfileTarget(null)}
+        />
       )}
     </div>
   )

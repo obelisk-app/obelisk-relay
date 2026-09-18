@@ -133,6 +133,90 @@ pub struct RelaySettings {
     /// Nostr WebSocket behavior.
     #[serde(default)]
     pub obelisk_index: ObeliskIndexSettings,
+    /// Web-of-Trust admission. Disabled by default, so an existing deployment
+    /// keeps exactly the access rules it has today.
+    #[serde(default)]
+    pub wot: WotSettings,
+}
+
+/// Admission by follow-graph distance, answered by a `nostr-wot-oracle`.
+///
+/// When enabled this becomes a fourth whitelist tier — see
+/// [`crate::whitelist::Whitelist::contains`]. It can only widen access: the
+/// blacklist still overrides it, and manual entries are still consulted first.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WotSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Build the follow graph on this relay instead of querying an oracle.
+    ///
+    /// Default. The oracle is a second service to run and keep alive, and when
+    /// it is down the tier admits nobody; a locally built graph has neither
+    /// problem. Set false to use `oracle_url` instead.
+    #[serde(default = "default_wot_local")]
+    pub local: bool,
+    /// Oracle tried first when `local` is false. Assumes the compose sidecar.
+    #[serde(default = "default_wot_oracle_url")]
+    pub oracle_url: String,
+    /// A second oracle to try when `oracle_url` errors. Empty (the default)
+    /// disables it.
+    ///
+    /// Deliberately not defaulted to the public host the JS SDK names: that
+    /// host serves a web page and 404s the API, which would refuse every key.
+    /// Point this at a second oracle you control if you want redundancy.
+    #[serde(default = "default_wot_fallback_oracle_url")]
+    pub fallback_oracle_url: String,
+    /// Keys further than this from every root are refused. 2 is the useful
+    /// setting: 1 is "only people a root follows" (which follow sync already
+    /// does), and beyond 3 is noise.
+    #[serde(default = "default_wot_max_hops")]
+    pub max_hops: u8,
+    /// Graph roots as hex pubkeys. Empty means "use the reference accounts",
+    /// which are already the accounts whose follows this relay trusts.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(with = "humantime_serde", default = "default_wot_timeout")]
+    pub timeout: Duration,
+    /// How long an admission is trusted.
+    #[serde(with = "humantime_serde", default = "default_wot_cache_ttl")]
+    pub cache_ttl: Duration,
+    /// How long a refusal is trusted. Short so a newly-followed key gets in
+    /// without waiting out the positive TTL.
+    #[serde(with = "humantime_serde", default = "default_wot_negative_cache_ttl")]
+    pub negative_cache_ttl: Duration,
+}
+
+impl Default for WotSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local: default_wot_local(),
+            oracle_url: default_wot_oracle_url(),
+            fallback_oracle_url: default_wot_fallback_oracle_url(),
+            max_hops: default_wot_max_hops(),
+            roots: Vec::new(),
+            timeout: default_wot_timeout(),
+            cache_ttl: default_wot_cache_ttl(),
+            negative_cache_ttl: default_wot_negative_cache_ttl(),
+        }
+    }
+}
+
+impl WotSettings {
+    /// Parse the configured roots. Invalid hex is dropped with a warning rather
+    /// than failing startup — a typo in one root should not take the relay down.
+    pub fn parsed_roots(&self) -> Vec<PublicKey> {
+        self.roots
+            .iter()
+            .filter_map(|hex| match PublicKey::from_hex(hex) {
+                Ok(pk) => Some(pk),
+                Err(e) => {
+                    tracing::warn!("Ignoring invalid WoT root {hex}: {e}");
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -202,6 +286,34 @@ fn default_max_subscriptions() -> usize {
 
 fn default_obelisk_index_enabled() -> bool {
     true
+}
+
+fn default_wot_local() -> bool {
+    true
+}
+
+fn default_wot_oracle_url() -> String {
+    "http://wot-oracle:8080".to_string()
+}
+
+fn default_wot_fallback_oracle_url() -> String {
+    String::new()
+}
+
+fn default_wot_max_hops() -> u8 {
+    2
+}
+
+fn default_wot_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_wot_cache_ttl() -> Duration {
+    Duration::from_secs(6 * 60 * 60)
+}
+
+fn default_wot_negative_cache_ttl() -> Duration {
+    Duration::from_secs(10 * 60)
 }
 
 fn default_enable_indexed_search() -> bool {
@@ -447,6 +559,7 @@ pub struct Settings {
     pub enable_indexed_search: bool,
     pub advertise_indexed_search: Option<bool>,
     pub obelisk_index: ObeliskIndexSettings,
+    pub wot: WotSettings,
 }
 
 impl Settings {

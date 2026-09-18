@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod app_state;
 pub mod blacklist;
+pub mod compaction;
 pub mod config;
 pub mod create_client;
 pub mod error;
@@ -27,9 +28,14 @@ pub mod search_capability_middleware;
 pub mod server;
 pub mod storage_history;
 pub mod unindexed_query;
+pub mod update;
 pub mod utils;
 pub mod validation_middleware;
+pub mod version;
 pub mod whitelist;
+pub mod wot;
+pub mod wot_admission_middleware;
+pub mod wot_graph;
 
 #[cfg(test)]
 pub mod test_utils;

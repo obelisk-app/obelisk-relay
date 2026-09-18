@@ -113,7 +113,30 @@ export const restoreNip46SignerWithoutConnectReplay = async (): Promise<NostrSig
 }
 
 export const clearStoredSigners = async (signer?: NostrSigner | null) => {
-  await signer?.close?.()
+  // Closing a signer that is already closed throws; that must not stop us
+  // clearing the persisted session, which is the whole point of this call.
+  try {
+    await signer?.close?.()
+  } catch {
+    // Already gone.
+  }
   await clearPersistedNip46()
   await clearPersistedNsec()
+}
+
+/**
+ * Is this the error nostr-tools throws when a BunkerSigner's relay
+ * subscription has gone away?
+ *
+ * A restored NIP-46 session points at a bunker connection that may no longer
+ * exist -- the remote signer was closed, or the relay carrying the session
+ * restarted. Every call then fails with "this signer is not open anymore,
+ * create a new one", which is accurate but useless as a dead end: the stored
+ * session keeps being restored on each load, so the same error returns until
+ * someone knows to clear it by hand. Detecting it lets us drop the session and
+ * fall back to the login widget, which is what "create a new one" means.
+ */
+export const isDeadSignerError = (e: unknown): boolean => {
+  const message = e instanceof Error ? e.message : String(e ?? '')
+  return /not open anymore|signer is closed|no longer open/i.test(message)
 }

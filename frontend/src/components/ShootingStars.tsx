@@ -26,6 +26,15 @@ export const ShootingStars = ({ contained = false, count = 5 }: ShootingStarsPro
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    // Canvas takes colour strings, not CSS -- `var()` means nothing to
+    // fillStyle -- so resolve the theme accent once here. Read rather than
+    // hardcoded, otherwise the trails stay green on a differently-tinted relay
+    // while the rest of the page recolours.
+    const accentRgb =
+      getComputedStyle(document.documentElement)
+        .getPropertyValue('--color-accent-rgb')
+        .trim() || '180, 249, 83'
+
     let animId: number
     const stars: Star[] = []
     const STAR_COUNT = count
@@ -108,8 +117,8 @@ export const ShootingStars = ({ contained = false, count = 5 }: ShootingStarsPro
         const tailY = s.y - sinA * s.len
 
         const grad = ctx!.createLinearGradient(tailX, tailY, s.x, s.y)
-        grad.addColorStop(0, `rgba(180, 249, 83, 0)`)
-        grad.addColorStop(1, `rgba(180, 249, 83, ${s.opacity})`)
+        grad.addColorStop(0, `rgba(${accentRgb}, 0)`)
+        grad.addColorStop(1, `rgba(${accentRgb}, ${s.opacity})`)
 
         ctx!.beginPath()
         ctx!.moveTo(tailX, tailY)
@@ -120,7 +129,7 @@ export const ShootingStars = ({ contained = false, count = 5 }: ShootingStarsPro
 
         ctx!.beginPath()
         ctx!.arc(s.x, s.y, 1.5, 0, Math.PI * 2)
-        ctx!.fillStyle = `rgba(180, 249, 83, ${s.opacity})`
+        ctx!.fillStyle = `rgba(${accentRgb}, ${s.opacity})`
         ctx!.fill()
       }
 

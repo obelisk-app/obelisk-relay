@@ -48,7 +48,7 @@ export const LandingPage = (_props: { path?: string }) => {
 
       {/* Glow backdrop */}
       <div class="fixed top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full pointer-events-none z-0"
-        style={{ background: 'radial-gradient(circle, rgba(180,249,83,0.06) 0%, transparent 70%)' }} />
+        style={{ background: 'radial-gradient(circle, rgba(var(--color-accent-rgb), 0.06) 0%, transparent 70%)' }} />
 
       {/* Hero */}
       <div class="flex-1 flex flex-col items-center justify-center px-4 py-16 relative z-10">
@@ -56,10 +56,10 @@ export const LandingPage = (_props: { path?: string }) => {
           {/* Status Badge */}
           <div class="mb-8 animate-fade-in-up">
             <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium"
-              style={{ background: 'rgba(180,249,83,0.08)', border: '1px solid rgba(180,249,83,0.2)' }}>
+              style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', border: '1px solid rgba(var(--color-accent-rgb), 0.2)' }}>
               <span class={`w-2 h-2 rounded-full ${online === true ? 'bg-lc-green' : online === false ? 'bg-red-400' : 'bg-yellow-400'}`}
-                style={online === true ? { boxShadow: '0 0 8px rgba(180,249,83,0.6)' } : {}} />
-              <span style={{ color: online === true ? '#b4f953' : 'var(--color-text-secondary)' }}>
+                style={online === true ? { boxShadow: '0 0 8px rgba(var(--color-accent-rgb), 0.6)' } : {}} />
+              <span style={{ color: online === true ? 'var(--color-accent)' : 'var(--color-text-secondary)' }}>
                 {online === true ? 'Online' : online === false ? 'Offline' : 'Checking...'}
               </span>
             </div>
@@ -68,7 +68,7 @@ export const LandingPage = (_props: { path?: string }) => {
           {/* Title */}
           <h1 class="text-5xl md:text-6xl font-extrabold mb-4 lc-glow-text animate-fade-in-up"
             style={{ animationDelay: '0.1s' }}>
-            <span style={{ color: '#b4f953' }}>Obelisk</span> Relay
+            <span style={{ color: 'var(--color-accent)' }}>Obelisk</span> Relay
           </h1>
           <p class="text-lg md:text-xl mb-10 animate-fade-in-up" style={{ color: 'var(--color-text-secondary)', animationDelay: '0.2s' }}>
             {info?.description || 'NIP-29 groups relay for Obelisk. Auth-required, whitelisted access.'}
@@ -77,11 +77,11 @@ export const LandingPage = (_props: { path?: string }) => {
           {/* Stats Cards */}
           <div class="grid grid-cols-2 gap-4 mb-10 max-w-md mx-auto animate-fade-in-up" style={{ animationDelay: '0.3s' }}>
             <div class="lc-card p-5 text-center">
-              <div class="text-3xl font-bold" style={{ color: '#b4f953' }}>{info?.group_count ?? '—'}</div>
+              <div class="text-3xl font-bold" style={{ color: 'var(--color-accent)' }}>{info?.group_count ?? '—'}</div>
               <div class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>Groups</div>
             </div>
             <div class="lc-card p-5 text-center">
-              <div class="text-3xl font-bold" style={{ color: '#b4f953' }}>{info?.supported_nips?.length ?? '—'}</div>
+              <div class="text-3xl font-bold" style={{ color: 'var(--color-accent)' }}>{info?.supported_nips?.length ?? '—'}</div>
               <div class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>Supported NIPs</div>
             </div>
           </div>
@@ -106,7 +106,7 @@ export const LandingPage = (_props: { path?: string }) => {
               <div class="flex flex-wrap gap-2 justify-center">
                 {info.supported_nips.map(nip => (
                   <span key={nip} class="px-3 py-1 rounded-full text-xs font-mono font-medium"
-                    style={{ background: 'rgba(180,249,83,0.08)', border: '1px solid rgba(180,249,83,0.15)', color: '#b4f953' }}>
+                    style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', border: '1px solid rgba(var(--color-accent-rgb), 0.15)', color: 'var(--color-accent)' }}>
                     NIP-{nip}
                   </span>
                 ))}
@@ -134,7 +134,7 @@ export const LandingPage = (_props: { path?: string }) => {
         {[...Array(4)].map((_, i) => (
           <div key={i} class="absolute w-1 h-1 rounded-full"
             style={{
-              background: '#b4f953',
+              background: 'var(--color-accent)',
               opacity: 0.2,
               left: `${20 + i * 20}%`,
               top: `${30 + i * 15}%`,
@@ -146,7 +146,7 @@ export const LandingPage = (_props: { path?: string }) => {
 
       {/* Footer */}
       <footer class="py-5 text-center text-sm relative z-10" style={{ color: 'var(--color-text-secondary)', borderTop: '1px solid var(--color-border)' }}>
-        Powered by <span style={{ color: '#b4f953' }}>Obelisk</span> &middot; NIP-29 Group Relay
+        Powered by <span style={{ color: 'var(--color-accent)' }}>Obelisk</span> &middot; NIP-29 Group Relay
       </footer>
     </div>
   )

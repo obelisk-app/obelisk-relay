@@ -27,6 +27,13 @@ const stroke = {
   'stroke-linejoin': 'round' as const,
 }
 
+/** Chevron — a disclosure affordance. Rotated by CSS when its section opens. */
+export const ChevronIcon = ({ class: className = '' }: IconProps) => (
+  <svg {...base(className)}>
+    <path d="m7.5 5 5 5-5 5" {...stroke} />
+  </svg>
+)
+
 /** Overview — a pulse/health line. */
 export const OverviewIcon = ({ class: className = '' }: IconProps) => (
   <svg {...base(className)}>

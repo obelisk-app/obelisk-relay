@@ -17,6 +17,7 @@ use crate::{
     search_capability_middleware::SearchCapabilityMiddleware,
     unindexed_query::UnindexedQueryMiddleware,
     whitelist::Whitelist,
+    wot_admission_middleware::WotAdmissionMiddleware,
     RelayDatabase,
 };
 use anyhow::Result;
@@ -76,6 +77,29 @@ pub struct ServerState {
     pub supported_nips: Vec<u16>,
     pub obelisk_index: Option<Arc<ObeliskIndex>>,
     pub obelisk_http_limiter: Arc<ObeliskHttpLimiter>,
+    /// What `relay.wot` says on disk, which is not always what is running: the
+    /// tier is built at startup, so a save takes effect on the next restart.
+    /// Kept separately from the live oracle so the settings form can show the
+    /// pending values rather than reverting to the running ones on reload.
+    pub wot_configured: Arc<parking_lot::RwLock<WotConfigured>>,
+    /// True when `relay.wot.roots` was left empty, so the WoT graph roots track
+    /// the reference accounts and must be refreshed whenever those change.
+    /// False when the operator pinned roots explicitly — editing reference
+    /// accounts then has no effect on admission, by their choice.
+    pub wot_roots_follow_reference_accounts: bool,
+}
+
+/// The `relay.wot` block as configured, for the admin form.
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct WotConfigured {
+    pub enabled: bool,
+    /// Computing locally rather than via an oracle.
+    pub local: bool,
+    pub oracle_url: String,
+    pub fallback_oracle_url: String,
+    pub max_hops: u8,
+    /// Hex pubkeys. Empty means "track the reference accounts".
+    pub roots: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -254,6 +278,8 @@ pub async fn run_server(
     // Keep a handle to the database for the background pruner before moving it into RelayConfig.
     let database_for_pruner = Arc::clone(&database);
     let database_for_index = Arc::clone(&database);
+    // The follow graph reads stored contact lists; same reason as above.
+    let database_for_wot = Arc::clone(&database);
     let mut relay_config =
         RelayConfig::new(settings.relay_url.clone(), database, relay_keys.clone())
             .with_subdomains_from_url(&settings.relay_url)
@@ -298,6 +324,67 @@ pub async fn run_server(
         );
         whitelist.set_follow_derived(follow_derived);
     }
+
+    // Web-of-Trust admission tier. Roots default to the reference accounts,
+    // which are already the accounts whose follows this relay trusts.
+    let wot_oracle = if settings.wot.enabled {
+        let configured_roots = settings.wot.parsed_roots();
+        let roots = if configured_roots.is_empty() {
+            reference_accounts.list()
+        } else {
+            configured_roots
+        };
+        let fallback = Some(settings.wot.fallback_oracle_url.trim())
+            .filter(|f| !f.is_empty())
+            .map(str::to_string);
+
+        match crate::wot::WotOracle::new(
+            crate::wot::WotConfig {
+                oracle_url: settings.wot.oracle_url.clone(),
+                fallback_oracle_url: fallback,
+                max_hops: settings.wot.max_hops,
+                local: settings.wot.local,
+                timeout: settings.wot.timeout,
+                cache_ttl: settings.wot.cache_ttl,
+                negative_cache_ttl: settings.wot.negative_cache_ttl,
+            },
+            roots.clone(),
+        ) {
+            Ok(oracle) => {
+                if settings.wot.local {
+                    info!(
+                        "WoT admission: computing locally from this relay's follow graph \
+                         (no oracle)"
+                    );
+                }
+                if roots.is_empty() {
+                    // Enabled but rootless admits nobody, which looks identical
+                    // to a misconfigured oracle. Say so at startup instead.
+                    warn!(
+                        "WoT admission is enabled but has no roots: add reference accounts \
+                         or set relay.wot.roots, otherwise it will admit nobody"
+                    );
+                } else {
+                    info!(
+                        "WoT admission enabled: {} root(s), max {} hop(s), oracle {}",
+                        roots.len(),
+                        settings.wot.max_hops,
+                        oracle.oracle_url()
+                    );
+                }
+                whitelist.set_wot(Some(oracle.clone()));
+                Some(oracle)
+            }
+            Err(e) => {
+                // Fail closed on the feature, not on the relay: without the
+                // tier the other three still work.
+                warn!("WoT admission disabled: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Parse admin pubkeys
     let mut admin_pubkeys: Vec<PublicKey> = settings
@@ -484,6 +571,66 @@ pub async fn run_server(
     group_state_authors.spawn_refresh(groups.clone(), relay_keys.public_key);
     let group_state_filter = GroupStateFilterMiddleware::new(group_state_authors);
 
+    // Resolves a connection's WoT standing after NIP-42 auth and before the
+    // event processor runs, so the synchronous admission check has an answer.
+    // Installed unconditionally; with the tier off it is a pair of lock reads.
+    let wot_admission = WotAdmissionMiddleware::new(whitelist.clone());
+
+    // Build the local follow graph, then keep it fresh. Done off the startup
+    // path because it fetches contact lists: the relay must come up and serve
+    // whether or not the graph is ready, and until it is the tier simply
+    // admits nobody rather than blocking connections.
+    if let Some(oracle) = wot_oracle.clone() {
+        if let Some(graph) = oracle.graph().cloned() {
+            let db_for_graph = database_for_wot.clone();
+            let refs_for_graph = reference_accounts.clone();
+            let configured_roots = settings.wot.parsed_roots();
+            let max_hops = settings.wot.max_hops;
+            let oracle_for_graph = oracle.clone();
+            let token = cancellation_token.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+                loop {
+                    let roots = if configured_roots.is_empty() {
+                        refs_for_graph.list()
+                    } else {
+                        configured_roots.clone()
+                    };
+                    crate::wot_graph::rebuild(
+                        &graph,
+                        &db_for_graph,
+                        &roots,
+                        max_hops,
+                        crate::wot_graph::DEFAULT_MAX_REMOTE_FETCHES,
+                    )
+                    .await;
+                    // Verdicts cached against the previous graph may now be
+                    // wrong in either direction.
+                    oracle_for_graph.clear_cache();
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        _ = token.cancelled() => break,
+                    }
+                }
+            });
+        }
+    }
+
+    // Expired verdicts would otherwise accumulate one entry per pubkey that
+    // ever connected.
+    if let Some(oracle) = wot_oracle.clone() {
+        let token = cancellation_token.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(600));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => oracle.prune_cache(),
+                    _ = token.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // Build the relay service
     let handler_factory = Arc::new(
         RelayBuilder::<(), GroupsRelayProcessor>::new(relay_config)
@@ -495,6 +642,7 @@ pub async fn run_server(
             .relay_info(_relay_info.clone())
             .build_with(|chain| {
                 chain
+                    .with(wot_admission)
                     .with(group_state_filter)
                     .with(UnindexedQueryMiddleware)
                     .with(search_capability)
@@ -527,6 +675,15 @@ pub async fn run_server(
         supported_nips: supported_nips.clone(),
         obelisk_index: obelisk_index.clone(),
         obelisk_http_limiter: Arc::new(ObeliskHttpLimiter::default()),
+        wot_configured: Arc::new(parking_lot::RwLock::new(WotConfigured {
+            enabled: settings.wot.enabled,
+            local: settings.wot.local,
+            oracle_url: settings.wot.oracle_url.clone(),
+            fallback_oracle_url: settings.wot.fallback_oracle_url.clone(),
+            max_hops: settings.wot.max_hops,
+            roots: settings.wot.roots.clone(),
+        })),
+        wot_roots_follow_reference_accounts: settings.wot.parsed_roots().is_empty(),
     });
 
     let cors = CorsLayer::new()

@@ -34,6 +34,42 @@ relay:
     message_requests_per_minute: 120
     reconcile_interval: "5m"
 
+  # Web-of-Trust admission.
+  #
+  # A fourth whitelist tier: a pubkey within `max_hops` of any root in the
+  # follow graph is admitted even though it is on neither the manual nor the
+  # follow-derived list. Distances come from a nostr-wot-oracle
+  # (https://github.com/nostr-wot/nostr-wot-oracle); `compose.yml` runs one as
+  # the `wot-oracle` sidecar.
+  #
+  # This can only widen access. The blacklist still overrides every admission,
+  # and an unreachable oracle admits nobody rather than failing open.
+  wot:
+    enabled: false
+    # Build the follow graph on this relay rather than querying an oracle.
+    # Default, and the recommended setting: the oracle is a second service to
+    # run and keep alive, and while it is down the tier admits nobody. Local
+    # mode reads contact lists this relay already stores and fetches the rest
+    # from public relays, rebuilding hourly.
+    local: true
+    # Only used when local is false. The compose sidecar, by default.
+    oracle_url: "http://wot-oracle:8080"
+    # A second oracle to try when the primary errors; empty disables it.
+    # Do NOT point this at https://wot-oracle.mappingbitcoin.com: that host
+    # serves the project's website and 404s the API, so it would refuse every
+    # key. Use a second oracle you control.
+    fallback_oracle_url: ""
+    # 1 hop is what follow sync already gives you; past 3 is noise.
+    max_hops: 2
+    # Hex pubkeys. Empty means "use the reference accounts", which are already
+    # the accounts whose follows this relay trusts.
+    roots: []
+    timeout: "5s"
+    # Admissions are held long because membership is stable; refusals lapse
+    # quickly so a newly-followed key gets in without waiting out the TTL.
+    cache_ttl: "6h"
+    negative_cache_ttl: "10m"
+
   # WebSocket settings
   websocket:
     # Maximum time a connection can stay open (optional)

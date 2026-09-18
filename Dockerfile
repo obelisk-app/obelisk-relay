@@ -13,6 +13,10 @@ WORKDIR /usr/src/app
 # Copy the project for building
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
+# Stamps the binary with the commit it was built from. Cargo picks this up by
+# name, so omitting it does not fail the copy -- it just silently builds an
+# unstamped relay.
+COPY build.rs ./
 COPY src ./src
 COPY benches ./benches
 
@@ -37,6 +41,17 @@ ENV RUSTFLAGS="--cfg tokio_unstable --cfg tokio_taskdump"
 # why CI could not build this image at all.
 ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+# Stamp the build so the admin console can say what it is running. The .git
+# directory is not in the build context, so build.rs cannot work this out for
+# itself here -- pass it in:
+#   docker compose build --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+#                        --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Left empty, build.rs falls back to git and then to "unknown".
+ARG GIT_SHA=
+ARG BUILD_TIME=
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
 
 RUN cargo build --release --bins
 
@@ -87,6 +102,10 @@ WORKDIR /app
 COPY --from=rust-builder /usr/src/app/target/release/groups_relay ./groups_relay
 COPY --from=rust-builder /usr/src/app/target/release/delete_event ./delete_event
 COPY --from=rust-builder /usr/src/app/target/release/add_original_relay ./add_original_relay
+# The admin console shells out to this to measure free-list slack: LMDB forbids
+# opening the same environment twice in one process, so the running relay cannot
+# measure the database it is serving from.
+COPY --from=rust-builder /usr/src/app/target/release/lmdb_stat ./lmdb_stat
 # console_dump requires console-dump feature, skipped for stability testing
 # COPY --from=rust-builder /usr/src/app/target/release/console_dump ./console_dump
 # Copy cargo-installed binaries

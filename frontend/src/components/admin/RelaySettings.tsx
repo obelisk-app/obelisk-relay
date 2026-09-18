@@ -6,8 +6,14 @@ import {
   type ConfigResetResult,
   type ObeliskIndexSettings,
   type RelayIdentity,
+  type UpdateStatus,
 } from '../../services/AdminApiClient'
 import { confirmMatches } from './confirmPhrase'
+import { AdminEmptyState } from './AdminEmptyState'
+import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
+import { ProfileCard, CopyNpubButton } from './ProfileCard'
+import { SettingsIcon } from './icons'
+import { useDirtySection } from './settingsDirty'
 
 type SettingsSection = 'whitelist' | 'storage' | 'groups'
 
@@ -30,6 +36,301 @@ const formatBytes = (bytes: number) => {
 const formatUnix = (unix: number) => {
   if (!unix) return 'Unknown'
   return new Date(unix * 1000).toLocaleString()
+}
+
+/**
+ * Where the update runbook lives.
+ *
+ * The console is a browser page and the relay serves only its own bundle, so a
+ * bare `docs/updating.md` in an error string pointed at nothing an operator
+ * could open. The repo is public, so link it there.
+ */
+const DOC_UPDATING_URL =
+  'https://github.com/obelisk-app/obelisk-relay/blob/main/docs/updating.md'
+
+/**
+ * The date out of a `v2026.09.18-something` tag, as a sortable string.
+ *
+ * Release tags here are dated, which is the only ordering available — the
+ * registry returns tags lexically, and `latest`, `main` and bare SHAs carry no
+ * order at all. Returns null for those rather than guessing: an unknown
+ * ordering must not be presented as a known one.
+ */
+const releaseDate = (tag: string): string | null => {
+  const m = /^v(\d{4})\.(\d{2})\.(\d{2})/.exec(tag)
+  return m ? `${m[1]}${m[2]}${m[3]}` : null
+}
+
+const relativeAge = (unix: number) => {
+  if (!unix) return 'never'
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
+/**
+ * Which version is running, and moving to another published one.
+ *
+ * The relay cannot update itself: compose does not re-resolve the image tag on a
+ * restart, and the container has no Docker socket — on purpose, since that is
+ * root on the host handed to a process serving the open internet. So this queues
+ * a request that a host-side agent carries out. If that agent is not installed,
+ * the card says so and the button stays disabled: a request nothing reads is
+ * worse than a refusal, because it looks like it worked.
+ */
+const UpdateCard = () => {
+  const [status, setStatus] = useState<UpdateStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [tag, setTag] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [waiting, setWaiting] = useState(false)
+
+  const load = async (refresh = false) => {
+    setLoading(true)
+    try {
+      const fresh = await adminApi.getUpdateStatus(refresh)
+      setStatus(fresh)
+      // Preselect the newest published version, which is what an operator
+      // opening this card almost always wants.
+      setTag(current => current || fresh.available_tags[0] || '')
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read update status')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  /**
+   * Watch for the relay to come back on the new version.
+   *
+   * Failures here are the expected middle of an update — the container is being
+   * recreated — so they are not surfaced. Only running out of patience is.
+   */
+  const waitForUpdate = async (expected: string) => {
+    const deadline = Date.now() + 5 * 60 * 1000
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 4000))
+      try {
+        const fresh = await adminApi.getUpdateStatus(false)
+        setStatus(fresh)
+        // Done when the tag has changed over, or when the agent has reported
+        // back — a rollback is an outcome too, not a reason to keep waiting.
+        const settled = fresh.running.image_tag === expected
+          || (fresh.last_result !== null && fresh.pending === null && fresh.last_result.requested_tag === expected)
+        if (settled) {
+          setWaiting(false)
+          return
+        }
+      } catch {
+        // Relay is down mid-recreate. Keep waiting.
+      }
+    }
+    setWaiting(false)
+    setError('The relay did not report back within five minutes. Check the container logs.')
+  }
+
+  const applyUpdate = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await adminApi.updateRelay(tag, confirm)
+      setConfirm('')
+      setWaiting(true)
+      void waitForUpdate(result.requested_tag)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not queue the update')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const running = status?.running
+  const newest = status?.available_tags[0]
+  const unpublished = Boolean(status && running?.image_tag && !status.running_is_published)
+  const upToDate = Boolean(running?.image_tag && newest && running.image_tag === newest)
+  const ready = confirmMatches(confirm, 'UPDATE') && tag.length > 0
+  const last = status?.last_result
+  // Warn before a downgrade rather than after. Only dated tags can be ordered;
+  // anything else compares as unknown and gets no claim either way.
+  const selectedIsOlder = Boolean(
+    running?.image_tag && tag && releaseDate(tag) && releaseDate(running.image_tag)
+      && releaseDate(tag)! < releaseDate(running.image_tag)!
+  )
+
+  return (
+    <section class="admin-settings-card">
+      <div class="admin-settings-card-header">
+        <div>
+          <h3>Relay Version</h3>
+          <p>What this relay is running, and moving it to another published build.</p>
+        </div>
+        {running?.image_tag && (
+          <span class={`admin-status-badge ${upToDate ? 'admin-status-badge-ok' : 'admin-status-badge-warn'}`}>
+            {/* An unpublished build is not "out of date" — it is newer than
+                anything the registry has. Saying otherwise invites an operator
+                to "update" their way backwards. */}
+            {unpublished ? 'Unpublished build' : upToDate ? 'Up to date' : 'Update available'}
+          </span>
+        )}
+      </div>
+
+      {loading && !status && <div class="lc-skeleton h-24 w-full" />}
+
+      {running && (
+        <div class="admin-storage-stats">
+          {/* Not "latest" when unset: the container genuinely cannot discover
+              its own tag, so an absent one is unknown rather than assumed. */}
+          <div
+            class="admin-stat-card"
+            title={running.image_tag ? 'The image tag this container was started under.' : 'Add RELAY_IMAGE_TAG to the service environment in compose.yml.'}
+          >
+            <span>Running version</span>
+            <strong style={{ fontSize: '16px', wordBreak: 'break-all' }}>
+              {running.image_tag ?? 'Unknown'}
+            </strong>
+          </div>
+          <div class="admin-stat-card" title={`Built ${running.build_time}`}>
+            <span>Built from</span>
+            <strong style={{ fontSize: '16px', wordBreak: 'break-all' }}>{running.git_sha}</strong>
+          </div>
+          <div class="admin-stat-card">
+            <span>Newest published</span>
+            <strong style={{ fontSize: '16px', wordBreak: 'break-all' }}>{newest ?? '—'}</strong>
+          </div>
+        </div>
+      )}
+
+      {status?.tags_error && (
+        <p class="text-sm mt-2" style={{ color: '#fcd34d' }}>
+          The published version list may be out of date: {status.tags_error}
+        </p>
+      )}
+
+      {waiting ? (
+        <div class="mt-3 p-3 rounded-lg text-sm bg-amber-500/10 text-amber-300 border border-amber-500/20">
+          Updating. The relay is being recreated and will be unreachable for a
+          moment — this page is waiting and will report the result.
+        </div>
+      ) : status?.pending ? (
+        <div class="mt-3 p-3 rounded-lg text-sm bg-amber-500/10 text-amber-300 border border-amber-500/20">
+          An update to {status.pending.requested_tag} is queued and waiting for
+          the host agent.
+        </div>
+      ) : (
+        <div class="admin-danger-card">
+          <div>
+            <h4>Update to another version</h4>
+            {status?.blocked_reason
+              ? <>
+                  <p>{status.blocked_reason}</p>
+                  {/* An operator told "install the agent" needs the command,
+                      not a filename they have to go and locate. */}
+                  {!status.agent_live && (
+                    <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
+                      <a
+                        href={DOC_UPDATING_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="underline"
+                      >
+                        How to install the update agent
+                      </a>
+                    </p>
+                  )}
+                </>
+              : unpublished
+                ? <p>
+                    This relay runs <strong>{running?.image_tag}</strong>, which is not in
+                    the registry — a build made on the host. Nothing published is newer
+                    than it, so updating would <strong>replace it with an older
+                    version</strong> and lose whatever that build carries. Push it to the
+                    registry instead, unless going back is what you want.
+                  </p>
+                : <p>Pulls the selected image and recreates the container. If it does not come up healthy, the previous version is restored automatically.</p>}
+            {selectedIsOlder && !status?.blocked_reason && (
+              <p style={{ color: '#fcd34d' }}>
+                {tag} is older than {running?.image_tag}. This is a downgrade.
+              </p>
+            )}
+          </div>
+          <div class="admin-danger-controls">
+            <select
+              value={tag}
+              onChange={e => setTag((e.target as HTMLSelectElement).value)}
+              disabled={!status?.can_update || busy}
+              aria-label="Version to update to"
+            >
+              {(status?.available_tags ?? []).map(t => {
+                const rd = releaseDate(t)
+                const cur = running?.image_tag ? releaseDate(running.image_tag) : null
+                const older = Boolean(rd && cur && rd < cur)
+                return (
+                  <option key={t} value={t}>
+                    {t}
+                    {t === running?.image_tag ? ' (running)' : older ? ' (older)' : ''}
+                  </option>
+                )
+              })}
+            </select>
+            <input
+              type="text"
+              value={confirm}
+              onInput={e => setConfirm((e.target as HTMLInputElement).value)}
+              placeholder="Type UPDATE"
+              aria-label="Confirm update by typing UPDATE"
+              disabled={!status?.can_update || busy}
+            />
+            <button
+              type="button"
+              onClick={applyUpdate}
+              disabled={!status?.can_update || !ready || busy}
+              class="admin-danger-button"
+            >
+              {busy ? 'Queueing...' : 'Update relay'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {last && (
+        <p class="text-sm mt-2" style={{ color: 'var(--color-text-secondary)' }}>
+          Last update {relativeAge(last.finished_at)}:{' '}
+          {last.status === 'ok'
+            ? `moved to ${last.requested_tag} from ${last.previous_tag ?? 'an unrecorded version'}.`
+            : `${last.status} — ${last.detail ?? 'no detail recorded'}`}
+        </p>
+      )}
+
+      <p class="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
+        {status?.agent_live
+          ? `Update agent last seen ${relativeAge(status.agent_last_seen ?? 0)}.`
+          : 'No update agent is running on this host.'}
+        {' '}
+        <button
+          type="button"
+          onClick={() => load(true)}
+          disabled={loading || waiting}
+          class="underline"
+          style={{ color: 'var(--color-text-secondary)' }}
+        >
+          {loading ? 'Checking...' : 'Check for updates'}
+        </button>
+      </p>
+
+      {error && (
+        <div class="mt-3 p-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
+          {error}
+        </div>
+      )}
+    </section>
+  )
 }
 
 export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps) => {
@@ -55,6 +356,12 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  // Last-saved copies, so the save bar can tell an edit from a reload.
+  const [obeliskBaseline, setObeliskBaseline] = useState<ObeliskIndexSettings | null>(null)
+  // Faces for the admin list. An npub identifies a key but not a person, and
+  // "who has the keys to this relay" is exactly the question worth answering.
+  const [adminProfiles, setAdminProfiles] = useState<Map<string, NostrProfile>>(new Map())
+  const [profileTarget, setProfileTarget] = useState<{ hex: string; npub: string } | null>(null)
 
   const showToast = (message: string) => {
     setToast(message)
@@ -79,8 +386,15 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
         relay_icon: identityData.relay_icon ?? '',
       })
       setAdmins(adminData)
+      if (adminData.length > 0) {
+        fetchProfiles(adminData.map(a => a.hex))
+          .then(setAdminProfiles)
+          // Decoration; a slow profile relay must not blank the settings page.
+          .catch(() => undefined)
+      }
       setBackups(backupData)
       setObeliskIndex(obeliskIndexData)
+      setObeliskBaseline(obeliskIndexData)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load relay settings')
     } finally {
@@ -100,7 +414,9 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       setIdentity(response)
       showToast('Relay identity saved. Restart the relay to apply it.')
     } catch (e) {
+      // Rethrown so the save bar can name this section in its failure list.
       setError(e instanceof Error ? e.message : 'Failed to save relay identity')
+      throw e
     } finally {
       setBusy(null)
     }
@@ -140,13 +456,59 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
         reconcile_interval_minutes: obeliskIndex.reconcile_interval_minutes,
       })
       setObeliskIndex(response)
+      setObeliskBaseline(response)
       showToast('Obelisk bootstrap settings saved. Restart relay to apply them.')
     } catch (e) {
+      // Rethrown so the save bar can name this section in its failure list.
       setError(e instanceof Error ? e.message : 'Failed to save Obelisk bootstrap settings')
+      throw e
     } finally {
       setBusy(null)
     }
   }
+
+  // `identity` holds what the server last returned; `identityForm` is the draft.
+  const identityDirty = Boolean(
+    identity &&
+    (identityForm.relay_name !== identity.relay_name ||
+      identityForm.relay_description !== identity.relay_description ||
+      identityForm.relay_url !== identity.relay_url ||
+      identityForm.relay_icon !== (identity.relay_icon ?? '')),
+  )
+
+  useDirtySection(
+    {
+      id: 'identity',
+      label: 'Relay identity',
+      dirty: identityDirty,
+      blocked: identityDirty && iconError ? iconError : null,
+    },
+    {
+      save: saveIdentity,
+      discard: () => {
+        if (!identity) return
+        setIdentityForm({
+          relay_name: identity.relay_name,
+          relay_description: identity.relay_description,
+          relay_url: identity.relay_url,
+          relay_icon: identity.relay_icon ?? '',
+        })
+        setIconError(null)
+      },
+    },
+  )
+
+  const obeliskDirty = Boolean(
+    obeliskIndex && obeliskBaseline && JSON.stringify(obeliskIndex) !== JSON.stringify(obeliskBaseline),
+  )
+
+  useDirtySection(
+    { id: 'obelisk-index', label: 'Bootstrap index', dirty: obeliskDirty },
+    {
+      save: saveObeliskIndex,
+      discard: () => setObeliskIndex(obeliskBaseline),
+    },
+  )
 
   const addAdmin = async () => {
     if (!newAdminPubkey.trim()) return
@@ -249,7 +611,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       </div>
 
       {toast && (
-        <div class="p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
+        <div class="p-3 rounded-lg text-sm border" style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', color: 'var(--color-accent)', borderColor: 'rgba(var(--color-accent-rgb), 0.2)' }}>
           {toast}
         </div>
       )}
@@ -406,19 +768,12 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               </div>
             </div>
 
+            {/* Committing is the shared save bar's job. */}
             <div class="admin-settings-actions">
               <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
                 Identity changes affect NIP-11 metadata and auth URL validation after restart.
+                {busy === 'identity' && ' Saving…'}
               </div>
-              <button
-                type="button"
-                onClick={saveIdentity}
-                disabled={busy === 'identity'}
-                class="lc-pill-primary text-sm"
-                style={{ borderRadius: '8px', padding: '9px 18px' }}
-              >
-                {busy === 'identity' ? 'Saving...' : 'Save identity'}
-              </button>
             </div>
 
             <div class="admin-danger-card">
@@ -535,16 +890,8 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               <div class="admin-settings-actions">
                 <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
                   Changes apply after relay restart because the index and HTTP quotas are initialized at startup.
+                  {busy === 'obelisk-index' && ' Saving…'}
                 </div>
-                <button
-                  type="button"
-                  onClick={saveObeliskIndex}
-                  disabled={busy === 'obelisk-index'}
-                  class="lc-pill-primary text-sm"
-                  style={{ borderRadius: '8px', padding: '9px 18px' }}
-                >
-                  {busy === 'obelisk-index' ? 'Saving...' : 'Save bootstrap settings'}
-                </button>
               </div>
             </section>
           )}
@@ -578,12 +925,48 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
             </div>
 
             <div class="admin-list mt-4">
-              {admins.map(admin => (
+              {admins.map(admin => {
+                const profile = adminProfiles.get(admin.hex)
+                return (
                 <div class="admin-list-row" key={admin.hex}>
-                  <div>
-                    <strong>{shortKey(admin.npub || admin.hex)}</strong>
-                    <p>{admin.current_session ? 'Current session' : admin.hex}</p>
-                  </div>
+                  {/* Clickable identity, as everywhere else an npub appears. */}
+                  <button
+                    type="button"
+                    class="admin-author-identity"
+                    onClick={() => setProfileTarget({ hex: admin.hex, npub: admin.npub })}
+                    title="Show profile"
+                  >
+                    {profile?.picture ? (
+                      <img
+                        src={profile.picture}
+                        alt=""
+                        class="w-7 h-7 rounded-full object-cover flex-shrink-0"
+                        style={{ border: '1px solid var(--color-border)' }}
+                        onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                      />
+                    ) : (
+                      <span
+                        class="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold"
+                        style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)' }}
+                      >
+                        {(profile?.name || admin.npub.slice(5, 7) || '??').slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
+                    <span class="min-w-0 text-left">
+                      <span class="block text-sm truncate">
+                        {profile ? getDisplayName(profile, admin.npub) : shortKey(admin.npub || admin.hex)}
+                      </span>
+                      <span class="block text-[11px] font-mono" style={{ color: 'var(--color-text-secondary)' }}>
+                        {shortKey(admin.npub || admin.hex)}
+                      </span>
+                    </span>
+                  </button>
+                  <CopyNpubButton npub={admin.npub} />
+                  {/* The person who hosts the relay, distinct from the admins
+                      they granted access to. */}
+                  {admin.owner && <span class="admin-status-badge">Owner</span>}
+                  {admin.current_session && <span class="admin-status-badge">This session</span>}
+                  <span class="flex-1" />
                   {confirmRemoveAdmin === admin.hex ? (
                     <div class="admin-row-actions">
                       <button type="button" onClick={() => removeAdmin(admin.hex)} class="admin-text-danger">Confirm</button>
@@ -593,14 +976,16 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
                     <button
                       type="button"
                       onClick={() => setConfirmRemoveAdmin(admin.hex)}
-                      disabled={admin.current_session}
+                      disabled={admin.current_session || admin.owner}
                       class="admin-text-danger"
+                      title={admin.owner ? 'The relay owner cannot be removed' : undefined}
                     >
                       Remove
                     </button>
                   )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           </section>
 
@@ -621,14 +1006,13 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               /* An empty state should say when the section will have something
                  in it, not just assert that it does not. "None found" reads as
                  a failure; this reads as "nothing has needed one yet". */
-              <div class="admin-empty-state mt-4">
-                <p>Nothing here yet — and that is the expected state.</p>
-                <p>
+              <div class="mt-4">
+                <AdminEmptyState icon={SettingsIcon} headline="Nothing here yet — and that is the expected state">
                   The relay snapshots this config automatically just before it
                   overwrites it, which happens when you reset settings or restore
                   a previous version. One will appear here the first time that
                   runs, and you can download or roll back to it from here.
-                </p>
+                </AdminEmptyState>
               </div>
             ) : (
               <div class="admin-list mt-4">
@@ -671,6 +1055,8 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               </div>
             )}
           </section>
+
+          <UpdateCard />
 
           <section class="admin-settings-card">
             <div class="admin-settings-card-header">
@@ -770,6 +1156,15 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
           </div>
         </div>
       </section>
+
+      {profileTarget && (
+        <ProfileCard
+          hex={profileTarget.hex}
+          npub={profileTarget.npub}
+          profile={adminProfiles.get(profileTarget.hex)}
+          onClose={() => setProfileTarget(null)}
+        />
+      )}
     </div>
   )
 }

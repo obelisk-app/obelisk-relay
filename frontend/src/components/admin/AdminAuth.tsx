@@ -10,6 +10,7 @@ import { adminApi } from "../../services/AdminApiClient"
 import { Nip46SignerDeepLink } from "./Nip46SignerDeepLink"
 import {
   clearStoredSigners,
+  isDeadSignerError,
   restoreNip46SignerWithoutConnectReplay,
   signAdminAuthEvent,
   withTimeout,
@@ -28,17 +29,51 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
   const attemptedPubkeyRef = useRef<string | null>(null)
   const widgetAuthInProgressRef = useRef(false)
   const restoredSignerRef = useRef<NostrSigner | null>(null)
+  /**
+   * The operator asked to switch identity, and has not picked a new one yet.
+   *
+   * Logging out is not enough on its own. A NIP-07 extension is always present
+   * in `window.nostr`, so the SDK re-derives a signer for it immediately — and
+   * the auto-authenticate effect below would sign straight back in with the key
+   * we were just asked to abandon. "Use another signer" appeared to need two
+   * presses because the first one was silently undone.
+   *
+   * While this is set, nothing authenticates without an explicit choice.
+   */
+  const [awaitingChoice, setAwaitingChoice] = useState(false)
 
   const authenticateWithSigner = async (activeSigner: NostrSigner) => {
     setError(null)
     setLoading(true)
 
     try {
+      // Challenge first, then sign immediately. Logging in needs exactly one
+      // signature, so the less time spent holding a remote signer open between
+      // acquiring it and using it, the fewer ways it can die mid-flight.
       const { challenge } = await adminApi.getChallenge()
-      const signedEvent = await withTimeout(
-        signAdminAuthEvent(activeSigner, challenge),
-        "Signer did not respond. Use another signer or reconnect your Nostr app.",
-      )
+
+      let signedEvent
+      try {
+        signedEvent = await withTimeout(
+          signAdminAuthEvent(activeSigner, challenge),
+          "Signer did not respond. Use another signer or reconnect your Nostr app.",
+        )
+      } catch (signError) {
+        // A NIP-46 connection that has been closed cannot be revived, but the
+        // stored session can build a fresh one paired with the same client
+        // identity. Rebuild and retry once rather than dead-ending the operator
+        // on "create a new one" when we can create it for them.
+        if (!isDeadSignerError(signError)) throw signError
+
+        const rebuilt = await restoreNip46SignerWithoutConnectReplay()
+        if (!rebuilt) throw signError
+
+        restoredSignerRef.current = rebuilt
+        signedEvent = await withTimeout(
+          signAdminAuthEvent(rebuilt, challenge),
+          "Signer did not respond. Use another signer or reconnect your Nostr app.",
+        )
+      }
 
       await adminApi.authenticate(signedEvent)
       onAuthenticated()
@@ -52,7 +87,7 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
   }
 
   useEffect(() => {
-    if (!signer || widgetAuthInProgressRef.current) return
+    if (!signer || widgetAuthInProgressRef.current || awaitingChoice) return
 
     let cancelled = false
     void (async () => {
@@ -68,9 +103,26 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
           return
         }
         attemptedPubkeyRef.current = pubkey
-        await authenticateWithSigner(signer).catch(() => undefined)
+        // Not `.catch(() => undefined)`: swallowing here meant a dead NIP-46
+        // session never reached the handler below, so the raw "this signer is
+        // not open anymore" surfaced and the stale session was kept -- failing
+        // identically on every reload.
+        try {
+          await authenticateWithSigner(signer)
+        } catch (authError) {
+          if (cancelled) return
+          if (isDeadSignerError(authError)) {
+            await discardDeadSigner(signer)
+          }
+          // Other failures already showed their message via
+          // authenticateWithSigner; the widget stays available.
+        }
       } catch (e) {
         if (cancelled) return
+        if (isDeadSignerError(e)) {
+          await discardDeadSigner(signer)
+          return
+        }
         const message = e instanceof Error ? e.message : "Signer is unavailable"
         setError(message)
         setLoading(false)
@@ -80,54 +132,96 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
     return () => {
       cancelled = true
     }
-  }, [signer])
+  }, [signer, awaitingChoice])
 
   useEffect(() => {
-    if (signer || restoredSignerRef.current) return
+    if (signer || restoredSignerRef.current || awaitingChoice) return
 
     let cancelled = false
     void (async () => {
+      let restored: NostrSigner | null = null
       try {
-        const restored = await restoreNip46SignerWithoutConnectReplay()
+        restored = await restoreNip46SignerWithoutConnectReplay()
         if (cancelled || !restored) return
         restoredSignerRef.current = restored
-        await authenticateWithSigner(restored).catch(() => undefined)
-      } catch {
-        // The regular login widget remains available.
+        await authenticateWithSigner(restored)
+      } catch (e) {
+        if (cancelled) return
+        // A restored session pointing at a bunker that no longer exists would
+        // otherwise be retried on every load, failing identically each time.
+        if (isDeadSignerError(e)) {
+          await discardDeadSigner(restored)
+          return
+        }
+        // Anything else: the regular login widget remains available.
       }
     })()
 
     return () => {
       cancelled = true
     }
-  }, [signer])
+  }, [signer, awaitingChoice])
 
   const handleWidgetLogin = async ({ signer: sdkSigner }: { signer: NostrSigner }) => {
     widgetAuthInProgressRef.current = true
+    // An explicit pick from the widget is the choice we were waiting for.
+    setAwaitingChoice(false)
     try {
       attemptedPubkeyRef.current = await withTimeout(
         sdkSigner.getPublicKey(),
         "Signer did not respond. Use another signer or reconnect your Nostr app.",
       )
       await authenticateWithSigner(sdkSigner)
+    } catch (e) {
+      // The restore paths handled this; the widget path did not, so picking a
+      // bunker that then died left the raw library error on screen with the
+      // dead session still stored.
+      if (isDeadSignerError(e)) {
+        await discardDeadSigner(sdkSigner)
+        return
+      }
+      throw e
     } finally {
       widgetAuthInProgressRef.current = false
     }
   }
 
   const switchIdentity = async () => {
-    attemptedPubkeyRef.current = null
+    // Set first, so the auto-authenticate effect is already suppressed by the
+    // time logging out causes the SDK to re-derive an extension signer.
+    setAwaitingChoice(true)
     setError(null)
+    setLoading(false)
+    attemptedPubkeyRef.current = null
     await clearStoredSigners(restoredSignerRef.current ?? signer)
     restoredSignerRef.current = null
-    void logout()
+    // Awaited: leaving this dangling let the component settle mid-logout.
+    await logout()
+  }
+
+  /**
+   * A stored NIP-46 session whose bunker connection is gone can never succeed,
+   * and it is restored again on every load -- so surfacing the raw error just
+   * dead-ends the operator on a screen that says "create a new one" while
+   * holding the dead one. Drop it and show the login widget instead.
+   */
+  const discardDeadSigner = async (deadSigner: NostrSigner | null) => {
+    await clearStoredSigners(deadSigner)
+    restoredSignerRef.current = null
+    attemptedPubkeyRef.current = null
+    setError("Your saved signer connection expired. Sign in again.")
+    setLoading(false)
+    // A dead signer is not a choice either -- wait for a deliberate one rather
+    // than letting an extension signer be picked up automatically.
+    setAwaitingChoice(true)
+    await logout()
   }
 
   return (
     <div class="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--color-bg-primary)" }}>
       <Nip46SignerDeepLink />
       <div class="max-w-md w-full lc-card lc-glow p-8">
-        <h1 class="text-2xl font-bold mb-2 text-center lc-glow-text" style={{ color: "#b4f953" }}>Admin Panel</h1>
+        <h1 class="text-2xl font-bold mb-2 text-center lc-glow-text" style={{ color: "var(--color-accent)" }}>Admin Panel</h1>
         <p class="text-sm text-center mb-6" style={{ color: "var(--color-text-secondary)" }}>
           Sign in with your Nostr identity to manage the relay.
         </p>
@@ -138,7 +232,7 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
           </div>
         )}
 
-        {!signer ? (
+        {!signer || awaitingChoice ? (
           <div class="obelisk-login">
           <LoginWidget
             title="Sign in as relay admin"
@@ -161,7 +255,7 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
           <div class="space-y-3">
             {!error && (
               <div class="flex items-center justify-center gap-2 py-3 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                <span class="lc-spinner" style={{ width: "16px", height: "16px", borderTopColor: "#b4f953" }} />
+                <span class="lc-spinner" style={{ width: "16px", height: "16px", borderTopColor: "var(--color-accent)" }} />
                 {loading ? "Authenticating..." : "Preparing signer..."}
               </div>
             )}

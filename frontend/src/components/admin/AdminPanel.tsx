@@ -9,6 +9,8 @@ import { ReferenceAccountsManager } from './ReferenceAccountsManager'
 import { RelaySettings } from './RelaySettings'
 import { StorageManager } from './StorageManager'
 import { SearchIcon } from './SearchIcon'
+import { AdminSaveBar } from './AdminSaveBar'
+import { SettingsDirtyProvider } from './settingsDirty'
 import {
   AccessIcon,
   GroupsIcon,
@@ -58,15 +60,15 @@ const tabs: NavItem[] = [
   { id: 'dashboard', label: 'Overview', description: 'Relay health', icon: OverviewIcon,
     blurb: 'Live health, what is configured, and anything that needs attention.' },
   { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks', icon: AccessIcon,
-    blurb: 'Choose who can use the relay, then manage allowed and blocked pubkeys.' },
+    blurb: 'Every rule that decides who can connect, and who each one lets in.' },
   { id: 'reference-accounts', label: 'References', description: 'Follow sync sources', icon: ReferencesIcon,
-    blurb: 'Accounts whose follows are auto-whitelisted on this relay.' },
+    blurb: 'The accounts that seed follow sync and root the Web-of-Trust graph.' },
   { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon,
     blurb: 'Browse relay groups, metadata, members, and stored events.' },
   { id: 'storage', label: 'Storage', description: 'Database and pruning', icon: StorageIcon,
     blurb: 'What this relay has stored, and whether anything is being deleted.' },
   { id: 'settings', label: 'Settings', description: 'Reset and recovery', icon: SettingsIcon,
-    blurb: 'Operational controls for identity, admins, backups, restart, and recovery.' },
+    blurb: 'Operational controls for identity, admins, backups, version, restart, and recovery.' },
 ]
 
 const searchTargets: SearchTarget[] = [
@@ -79,8 +81,8 @@ const searchTargets: SearchTarget[] = [
   {
     id: 'whitelist',
     title: 'Access',
-    description: 'Open relay, whitelist enforcement, rate limits, allowed pubkeys, blocked pubkeys',
-    keywords: ['allowlist', 'whitelist', 'blacklist', 'pubkey', 'blocked', 'access', 'open relay', 'rate limits'],
+    description: 'Open relay, whitelist enforcement, web of trust, hop limits, rate limits, allowed and blocked pubkeys',
+    keywords: ['allowlist', 'whitelist', 'blacklist', 'pubkey', 'blocked', 'access', 'open relay', 'rate limits', 'web of trust', 'wot', 'hops', 'graph'],
   },
   {
     id: 'reference-accounts',
@@ -97,14 +99,14 @@ const searchTargets: SearchTarget[] = [
   {
     id: 'storage',
     title: 'Storage',
-    description: 'Database size, LMDB path, pruning, retention, prune event kinds',
-    keywords: ['storage', 'database', 'lmdb', 'pruning', 'retention', 'event_retention', 'prune kinds', 'disk'],
+    description: 'Database size, LMDB path, pruning, retention, prune event kinds, reclaim disk space',
+    keywords: ['storage', 'database', 'lmdb', 'pruning', 'retention', 'event_retention', 'prune kinds', 'disk', 'compact', 'compaction', 'shrink', 'reclaim', 'vacuum', 'free space'],
   },
   {
     id: 'settings',
     title: 'Settings',
-    description: 'Reset access configuration, reopen setup wizard, keep owner pubkey and events',
-    keywords: ['reset', 'configuration', 'setup', 'wizard', 'owner', 'npub', 'event data', 'group data', 'backup', 'whitelist required', 'open relay', 'rate limits'],
+    description: 'Relay version and updates, reset access configuration, reopen setup wizard, keep owner pubkey and events',
+    keywords: ['reset', 'configuration', 'setup', 'wizard', 'owner', 'npub', 'event data', 'group data', 'backup', 'whitelist required', 'open relay', 'rate limits', 'version', 'update', 'upgrade', 'image', 'tag', 'release'],
   },
 ]
 
@@ -227,7 +229,14 @@ export const AdminPanel = (_props: { path?: string }) => {
   }
 
   return (
-    <div class="admin-shell min-h-screen flex flex-col md:flex-row" style={{ background: 'var(--color-bg-primary)' }}>
+    <SettingsDirtyProvider>
+    {/* h-screen + overflow-hidden, not min-h-screen: `main` below carries
+        `overflow-y-auto`, and an overflow container only becomes a scrollport
+        if something bounds its height. Stretched to content inside a
+        min-h-screen flex row it never scrolled -- the document did -- so the
+        sticky header and save bar had no scrollport to stick against and rode
+        the page up out of view. */}
+    <div class="admin-shell h-screen overflow-hidden flex flex-col md:flex-row" style={{ background: 'var(--color-bg-primary)' }}>
       {/* Sidebar is pinned to the viewport so its footer actions stay reachable.
           Without md:h-screen the aside stretches to the full page height on
           content-heavy tabs, and md:flex-1 on the nav pushes Open Chat / Sign
@@ -249,7 +258,7 @@ export const AdminPanel = (_props: { path?: string }) => {
                 />
               : <RelayIcon class="w-7 h-7 flex-shrink-0" />}
             <span class="min-w-0">
-              <span class="block text-lg font-bold truncate" style={{ color: '#b4f953' }}>
+              <span class="block text-lg font-bold truncate" style={{ color: 'var(--color-accent)' }}>
                 {relayInfo?.name || 'Obelisk Relay'}
               </span>
               <span class="block text-xs" style={{ color: 'var(--color-text-secondary)' }}>Admin console</span>
@@ -271,16 +280,16 @@ export const AdminPanel = (_props: { path?: string }) => {
                 style={{
                   minWidth: '150px',
                   borderRadius: '8px',
-                  background: selected ? 'rgba(180,249,83,0.09)' : 'transparent',
-                  border: selected ? '1px solid rgba(180,249,83,0.26)' : '1px solid transparent',
-                  color: selected ? '#b4f953' : 'var(--color-text-primary)',
+                  background: selected ? 'rgba(var(--color-accent-rgb), 0.09)' : 'transparent',
+                  border: selected ? '1px solid rgba(var(--color-accent-rgb), 0.26)' : '1px solid transparent',
+                  color: selected ? 'var(--color-accent)' : 'var(--color-text-primary)',
                 }}
               >
                 <span class="flex items-center gap-2.5">
                   <tab.icon class="w-[18px] h-[18px] flex-shrink-0 opacity-80" />
                   <span class="min-w-0">
                     <span class="block text-sm font-semibold">{tab.label}</span>
-                    <span class="block text-xs mt-0.5" style={{ color: selected ? 'rgba(180,249,83,0.78)' : 'var(--color-text-secondary)' }}>
+                    <span class="block text-xs mt-0.5" style={{ color: selected ? 'rgba(var(--color-accent-rgb), 0.78)' : 'var(--color-text-secondary)' }}>
                       {tab.description}
                     </span>
                   </span>
@@ -291,8 +300,13 @@ export const AdminPanel = (_props: { path?: string }) => {
         </nav>
 
         <div class="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 gap-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+          {/* Open the client against THIS relay, not a fixed one. The admin
+              panel is served by the relay itself, so the host serving this page
+              is the relay's own public hostname -- which keeps the link correct
+              across public.obelisk.ar, lacrypta, and any other deployment
+              without per-host configuration. */}
           <a
-            href="https://dex.obelisk.ar"
+            href={`https://obelisk.ar/app?relay=${encodeURIComponent(window.location.host)}`}
             target="_blank"
             rel="noopener noreferrer"
             class="admin-sidebar-action"
@@ -309,8 +323,16 @@ export const AdminPanel = (_props: { path?: string }) => {
         </div>
       </aside>
 
-      <main class="flex-1 overflow-auto">
-        <div class="admin-header-bar px-5 md:px-8" style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(255,255,255,0.015)' }}>
+      {/* A three-row column: header, scrolling content, save bar.
+          The header and the save bar are siblings of the scroll region rather
+          than sticky elements inside it. They were sticky, which silently did
+          nothing -- `main` stretched to its content so it never scrolled, and
+          an element can only stick against a scrollport that actually scrolls.
+          The header rode the page up, and the save bar sat below the fold where
+          rate-limit changes could not be committed at all. Out here they cannot
+          scroll away no matter what the content does. */}
+      <main class="flex-1 min-h-0 flex flex-col">
+        <div class="admin-header-bar flex-shrink-0 px-5 md:px-8" style={{ borderBottom: '1px solid var(--color-border)' }}>
           <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 w-full">
             <div class="min-w-0">
               <h1 class="text-2xl font-bold">{active.label}</h1>
@@ -358,6 +380,10 @@ export const AdminPanel = (_props: { path?: string }) => {
           </div>
         </div>
 
+        {/* The only thing that scrolls. min-h-0 lets it shrink below its
+            content height, which is what allows overflow-y-auto to scroll
+            rather than stretch the column. */}
+        <div class="flex-1 min-h-0 overflow-y-auto">
         <div class="p-5 md:p-8 max-w-7xl">
           {activeTab === 'dashboard' && <Dashboard />}
           {activeTab === 'whitelist' && <WhitelistManager />}
@@ -383,7 +409,13 @@ export const AdminPanel = (_props: { path?: string }) => {
             />
           )}
         </div>
+        </div>
+
+        {/* Renders nothing until a section reports pending changes. Outside the
+            scroll region, so it is reachable from anywhere on the page. */}
+        <AdminSaveBar />
       </main>
     </div>
+    </SettingsDirtyProvider>
   )
 }

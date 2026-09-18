@@ -73,6 +73,109 @@ pub struct RecipientCount {
     pub count: usize,
 }
 
+/// Which end of an event a byte total was charged to.
+///
+/// Kind 1059 is signed by a throwaway key per wrap, so its author says nothing
+/// about who is responsible for the traffic — the `p` tag recipient does. Every
+/// other kind is charged to its author. The two are not interchangeable and the
+/// distinction has to reach the screen, or an operator reading a single "pubkey"
+/// column would conclude the recipient of a spam flood was sending it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attribution {
+    /// `event.pubkey` — the key that signed it.
+    Author,
+    /// The `p` tag: who the event is addressed to.
+    Recipient,
+}
+
+impl Attribution {
+    /// Stable identifier for the JSON API and the UI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Attribution::Author => "author",
+            Attribution::Recipient => "recipient",
+        }
+    }
+
+    /// How a given kind is attributed.
+    pub fn for_kind(kind: u16) -> Self {
+        if kind == GIFT_WRAP_KIND {
+            Attribution::Recipient
+        } else {
+            Attribution::Author
+        }
+    }
+}
+
+/// NIP-59 gift wrap. Authored by a one-time key, so attributed by recipient.
+pub const GIFT_WRAP_KIND: u16 = 1059;
+
+/// How many events one pubkey accounts for in the sample, and their weight.
+#[derive(Debug, Clone)]
+pub struct StorageAuthorCount {
+    pub pubkey: String,
+    pub count: usize,
+    pub sampled_bytes: u64,
+    pub attributed_by: Attribution,
+}
+
+/// The pubkeys behind one kind, heaviest first.
+#[derive(Debug, Clone)]
+pub struct StorageKindAuthors {
+    pub kind: u16,
+    /// How every row in this list was attributed — uniform per kind.
+    pub attributed_by: Attribution,
+    pub authors: Vec<StorageAuthorCount>,
+}
+
+/// Rows kept per kind for the drilldown. Past this the tail is noise an
+/// operator will not read, and the cached snapshot stops being cheap to hold.
+const MAX_AUTHORS_PER_KIND: usize = 25;
+
+/// Rows kept for the relay-wide "events by pubkey" table.
+const MAX_TOP_AUTHORS: usize = 50;
+
+/// Tally of one pubkey's events within a sampling pass.
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    count: usize,
+    bytes: u64,
+}
+
+impl Tally {
+    fn add(&mut self, bytes: u64) {
+        self.count += 1;
+        self.bytes += bytes;
+    }
+}
+
+/// Collapse a pubkey→tally map into the heaviest `limit` rows.
+///
+/// Ordered by bytes, not count: the screen exists to explain disk usage, and
+/// one 200 KB event matters more than a thousand reactions.
+fn top_authors_by_bytes(
+    tallies: std::collections::HashMap<String, Tally>,
+    attributed_by: Attribution,
+    limit: usize,
+) -> Vec<StorageAuthorCount> {
+    let mut rows: Vec<StorageAuthorCount> = tallies
+        .into_iter()
+        .map(|(pubkey, tally)| StorageAuthorCount {
+            pubkey,
+            count: tally.count,
+            sampled_bytes: tally.bytes,
+            attributed_by,
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.sampled_bytes
+            .cmp(&a.sampled_bytes)
+            .then_with(|| b.count.cmp(&a.count))
+    });
+    rows.truncate(limit);
+    rows
+}
+
 /// What the relay currently has on disk, and what pruning would remove.
 ///
 /// The kind breakdown is a newest-first sample; only `prune_preview` is an
@@ -100,6 +203,12 @@ pub struct StorageStats {
     /// configured window. Exact because it is the number that decides whether
     /// arming a destructive setting is safe.
     pub prune_preview: usize,
+    /// Heaviest pubkeys across every kind — who this relay is storing data for.
+    /// Mixed attribution: see [`StorageAuthorCount::attributed_by`].
+    pub top_authors: Vec<StorageAuthorCount>,
+    /// Per-kind pubkey breakdown, for drilling into a single row of the kinds
+    /// table. Same pass, so asking costs nothing extra.
+    pub kind_authors: Vec<StorageKindAuthors>,
 }
 
 /// Kinds worth counting for the storage screen: NIP-29 group traffic and state,
@@ -1062,6 +1171,11 @@ impl Groups {
         // one-time keys, so the `p` tag is the only way to attribute that traffic
         // to anyone -- and on this relay it is the bulk of stored data.
         let mut recipients: HashMap<String, usize> = HashMap::new();
+        // Who the stored data belongs to, relay-wide and per kind. The kinds
+        // table says *what* is filling the disk; without these an operator can
+        // see the symptom but cannot aim the blacklist at anyone.
+        let mut authors: HashMap<String, Tally> = HashMap::new();
+        let mut authors_by_kind: HashMap<u16, HashMap<String, Tally>> = HashMap::new();
         let mut sampled = 0usize;
         let mut newest_event_unix = 0u64;
         let mut oldest_sampled_unix = 0u64;
@@ -1089,17 +1203,33 @@ impl Groups {
                 } else {
                     oldest_sampled_unix.min(ts)
                 };
-                *tally.entry(event.kind.as_u16()).or_insert(0) += 1;
-                *bytes.entry(event.kind.as_u16()).or_insert(0) += estimated_event_bytes(&event);
-                if event.kind.as_u16() == 1059 {
-                    if let Some(p) = event
+                let kind = event.kind.as_u16();
+                let event_bytes = estimated_event_bytes(&event);
+                *tally.entry(kind).or_insert(0) += 1;
+                *bytes.entry(kind).or_insert(0) += event_bytes;
+
+                // Charge the event to whoever it is actually attributable to:
+                // the `p` tag for gift wraps, the signer for everything else.
+                let responsible = match Attribution::for_kind(kind) {
+                    Attribution::Recipient => event
                         .tags
                         .iter()
                         .find(|tag| tag.kind() == TagKind::p())
                         .and_then(|tag| tag.content())
-                    {
-                        *recipients.entry(p.to_string()).or_insert(0) += 1;
+                        .map(str::to_string),
+                    Attribution::Author => Some(event.pubkey.to_hex()),
+                };
+                if let Some(pubkey) = responsible {
+                    if kind == GIFT_WRAP_KIND {
+                        *recipients.entry(pubkey.clone()).or_insert(0) += 1;
                     }
+                    authors.entry(pubkey.clone()).or_default().add(event_bytes);
+                    authors_by_kind
+                        .entry(kind)
+                        .or_default()
+                        .entry(pubkey)
+                        .or_default()
+                        .add(event_bytes);
                 }
                 sampled += 1;
             }
@@ -1158,6 +1288,52 @@ impl Groups {
         top_recipients.sort_by(|a, b| b.count.cmp(&a.count));
         top_recipients.truncate(10);
 
+        // Relay-wide attribution. Mixed by construction: gift-wrap rows name a
+        // recipient, everything else names a signer.
+        let mut top_authors: Vec<StorageAuthorCount> = authors
+            .into_iter()
+            .map(|(pubkey, tally)| StorageAuthorCount {
+                pubkey,
+                count: tally.count,
+                sampled_bytes: tally.bytes,
+                // A pubkey can appear under both rules across different kinds.
+                // Label the row by whichever produced most of its bytes, and
+                // let the per-kind drilldown disambiguate.
+                attributed_by: Attribution::Author,
+            })
+            .collect();
+        // Recompute the label from the per-kind data rather than guessing:
+        // a pubkey whose bytes are mostly gift wraps is a recipient.
+        for row in &mut top_authors {
+            let wrap_bytes = authors_by_kind
+                .get(&GIFT_WRAP_KIND)
+                .and_then(|m| m.get(&row.pubkey))
+                .map(|t| t.bytes)
+                .unwrap_or(0);
+            if wrap_bytes * 2 > row.sampled_bytes {
+                row.attributed_by = Attribution::Recipient;
+            }
+        }
+        top_authors.sort_by(|a, b| {
+            b.sampled_bytes
+                .cmp(&a.sampled_bytes)
+                .then_with(|| b.count.cmp(&a.count))
+        });
+        top_authors.truncate(MAX_TOP_AUTHORS);
+
+        let mut kind_authors: Vec<StorageKindAuthors> = authors_by_kind
+            .into_iter()
+            .map(|(kind, tallies)| {
+                let attributed_by = Attribution::for_kind(kind);
+                StorageKindAuthors {
+                    kind,
+                    attributed_by,
+                    authors: top_authors_by_bytes(tallies, attributed_by, MAX_AUTHORS_PER_KIND),
+                }
+            })
+            .collect();
+        kind_authors.sort_by_key(|k| k.kind);
+
         Ok(StorageStats {
             top_recipients,
             sampled_events: sampled,
@@ -1168,6 +1344,8 @@ impl Groups {
             scope_count: scopes.len(),
             sample_truncated,
             prune_preview,
+            top_authors,
+            kind_authors,
         })
     }
 
@@ -1260,6 +1438,95 @@ impl Groups {
             deleted_total, pubkey_hex, kinds
         );
         Ok(deleted_total)
+    }
+
+    /// Which end of an event a targeted prune matches on.
+    ///
+    /// Gift wraps are signed by a throwaway key per message, so "delete this
+    /// person's gift wraps" can only mean the `p` tag. Every other kind means
+    /// the author. Getting this wrong deletes a bystander's data.
+    ///
+    /// Count and delete run off the *same* filter, so the number an operator
+    /// confirms is the number that is removed.
+    pub async fn admin_prune_events(
+        &self,
+        pubkey_hex: &str,
+        by: Attribution,
+        kinds: &[u16],
+        since: Option<u64>,
+        until: Option<u64>,
+        dry_run: bool,
+    ) -> Result<u64, Error> {
+        let pubkey =
+            PublicKey::from_hex(pubkey_hex).map_err(|_| Error::notice("Invalid pubkey"))?;
+
+        // Kinds are required, not optional. "Everything addressed to this
+        // person" would sweep group management events that merely mention them,
+        // and "everything they authored" within a date range is still broad
+        // enough that it should be stated rather than defaulted.
+        let target_kinds: Vec<Kind> = kinds
+            .iter()
+            .filter(|k| !crate::pruner::NEVER_PRUNE_KINDS.contains(k))
+            .map(|k| Kind::from(*k))
+            .collect();
+
+        if target_kinds.is_empty() {
+            return Ok(0);
+        }
+
+        let scopes = self
+            .db
+            .list_scopes()
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+
+        let mut total = 0u64;
+        for scope in &scopes {
+            let mut filter = Filter::new().kinds(target_kinds.iter().copied());
+            filter = match by {
+                Attribution::Author => filter.author(pubkey),
+                Attribution::Recipient => {
+                    filter.custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey.to_hex())
+                }
+            };
+            if let Some(since) = since {
+                filter = filter.since(Timestamp::from_secs(since));
+            }
+            if let Some(until) = until {
+                filter = filter.until(Timestamp::from_secs(until));
+            }
+
+            let count = self
+                .db
+                .count(vec![filter.clone()], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))? as u64;
+
+            if count == 0 {
+                continue;
+            }
+            total = total.saturating_add(count);
+
+            if !dry_run {
+                self.db
+                    .delete(filter, scope)
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()))?;
+            }
+        }
+
+        if dry_run {
+            debug!(
+                "Prune preview for '{}' ({:?}, kinds {:?}): {} event(s) would be deleted",
+                pubkey_hex, by, kinds, total
+            );
+        } else {
+            info!(
+                "Admin pruned {} events for '{}' ({:?}, kinds {:?}, since {:?}, until {:?})",
+                total, pubkey_hex, by, kinds, since, until
+            );
+        }
+        Ok(total)
     }
 
     /// Admin-only: delete events authored by a pubkey across all scopes.
@@ -3008,5 +3275,346 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 1, "group creation event still present");
+    }
+
+    /// The whole point of the attribution tables: a gift wrap must be charged
+    /// to its `p` tag recipient, never to the one-time key that signed it.
+    /// Getting this backwards would name the victim of a flood as its source.
+    #[tokio::test]
+    async fn gift_wraps_are_attributed_to_the_recipient_not_the_throwaway_signer() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+
+        let recipient = Keys::generate().public_key();
+        let mut wrap_signers = Vec::new();
+
+        // Three wraps, each signed by a different ephemeral key, all addressed
+        // to the same recipient — exactly the shape of real 1059 traffic.
+        for _ in 0..3 {
+            let throwaway = Keys::generate();
+            wrap_signers.push(throwaway.public_key().to_hex());
+            let wrap = create_test_event(
+                &throwaway,
+                Kind::from(GIFT_WRAP_KIND),
+                vec![Tag::public_key(recipient)],
+            )
+            .await;
+            groups.db.save_event(&wrap, &scope).await.unwrap();
+        }
+
+        let stats = groups.admin_storage_stats(1000, &[], 0).await.unwrap();
+
+        let wrap_row = stats
+            .kind_authors
+            .iter()
+            .find(|k| k.kind == GIFT_WRAP_KIND)
+            .expect("gift wraps appear in the per-kind breakdown");
+
+        assert_eq!(wrap_row.attributed_by, Attribution::Recipient);
+        assert_eq!(
+            wrap_row.authors.len(),
+            1,
+            "three wraps to one recipient are one row, not three"
+        );
+        assert_eq!(wrap_row.authors[0].pubkey, recipient.to_hex());
+        assert_eq!(wrap_row.authors[0].count, 3);
+        assert!(wrap_row.authors[0].sampled_bytes > 0);
+
+        for signer in &wrap_signers {
+            assert!(
+                !wrap_row.authors.iter().any(|a| &a.pubkey == signer),
+                "the throwaway signer {signer} must not be charged for the wrap"
+            );
+        }
+    }
+
+    /// Everything that is not a gift wrap is charged to whoever signed it.
+    #[tokio::test]
+    async fn ordinary_kinds_are_attributed_to_their_author() {
+        let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
+
+        let chat = create_test_event(
+            &admin_keys,
+            Kind::from(9u16),
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        groups.db.save_event(&chat, &scope).await.unwrap();
+
+        let stats = groups.admin_storage_stats(1000, &[], 0).await.unwrap();
+
+        let chat_row = stats
+            .kind_authors
+            .iter()
+            .find(|k| k.kind == 9)
+            .expect("kind 9 appears in the breakdown");
+
+        assert_eq!(chat_row.attributed_by, Attribution::Author);
+        assert!(chat_row
+            .authors
+            .iter()
+            .any(|a| a.pubkey == admin_keys.public_key().to_hex()));
+
+        // And the relay-wide table agrees with the per-kind one.
+        assert!(stats
+            .top_authors
+            .iter()
+            .any(|a| a.pubkey == admin_keys.public_key().to_hex()
+                && a.attributed_by == Attribution::Author));
+    }
+
+    /// The relay-wide table mixes both rules, so each row has to carry the one
+    /// that produced most of its bytes rather than a blanket label.
+    #[tokio::test]
+    async fn the_relay_wide_table_labels_each_row_with_its_own_rule() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+
+        let wrap_recipient = Keys::generate().public_key();
+        let wrap = create_test_event(
+            &Keys::generate(),
+            Kind::from(GIFT_WRAP_KIND),
+            vec![Tag::public_key(wrap_recipient)],
+        )
+        .await;
+        groups.db.save_event(&wrap, &scope).await.unwrap();
+
+        let poster = Keys::generate();
+        let note = create_test_event(&poster, Kind::from(1u16), vec![]).await;
+        groups.db.save_event(&note, &scope).await.unwrap();
+
+        let stats = groups.admin_storage_stats(1000, &[], 0).await.unwrap();
+
+        let wrap_row = stats
+            .top_authors
+            .iter()
+            .find(|a| a.pubkey == wrap_recipient.to_hex())
+            .expect("recipient is listed");
+        assert_eq!(wrap_row.attributed_by, Attribution::Recipient);
+
+        let poster_row = stats
+            .top_authors
+            .iter()
+            .find(|a| a.pubkey == poster.public_key().to_hex())
+            .expect("poster is listed");
+        assert_eq!(poster_row.attributed_by, Attribution::Author);
+    }
+
+    /// A preview that disagreed with the delete would make the confirmation
+    /// meaningless, so both run off the same filter. This pins that.
+    #[tokio::test]
+    async fn prune_preview_matches_what_is_deleted() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+        let author = Keys::generate();
+
+        // Distinct content: identical events hash to the same id and the
+        // database would store one.
+        for i in 0..4 {
+            let note = EventBuilder::new(Kind::from(1u16), format!("note {i}"))
+                .sign_with_keys(&author)
+                .unwrap();
+            groups.db.save_event(&note, &scope).await.unwrap();
+        }
+
+        let hex = author.public_key().to_hex();
+        let preview = groups
+            .admin_prune_events(&hex, Attribution::Author, &[1], None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(preview, 4);
+
+        // The preview must not have removed anything.
+        let still_there = groups
+            .admin_prune_events(&hex, Attribution::Author, &[1], None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(still_there, 4, "a dry run must not delete");
+
+        let deleted = groups
+            .admin_prune_events(&hex, Attribution::Author, &[1], None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(deleted, preview);
+
+        let after = groups
+            .admin_prune_events(&hex, Attribution::Author, &[1], None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(after, 0);
+    }
+
+    /// Protected NIP-29 kinds survive a targeted prune, as they do every other
+    /// deletion path -- otherwise pruning a group creator orphans the group.
+    #[tokio::test]
+    async fn prune_never_touches_protected_kinds() {
+        let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
+
+        let creation = create_test_event(
+            &admin_keys,
+            KIND_GROUP_CREATE_9007,
+            vec![Tag::custom(TagKind::h(), [&group_id])],
+        )
+        .await;
+        groups.db.save_event(&creation, &scope).await.unwrap();
+
+        let deleted = groups
+            .admin_prune_events(
+                &admin_keys.public_key().to_hex(),
+                Attribution::Author,
+                &[9007],
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 0, "9007 is protected and must be refused");
+        let remaining = groups
+            .db
+            .count(
+                vec![Filter::new()
+                    .author(admin_keys.public_key())
+                    .kind(KIND_GROUP_CREATE_9007)],
+                &scope,
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    /// A window must bound the delete, not be quietly ignored.
+    #[tokio::test]
+    async fn prune_respects_the_date_window() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+        let author = Keys::generate();
+        let now = Timestamp::now().as_secs();
+
+        // One old note, one recent.
+        for age in [10_000u64, 10u64] {
+            let event = EventBuilder::new(Kind::from(1u16), format!("age {age}"))
+                .custom_created_at(Timestamp::from_secs(now - age))
+                .sign_with_keys(&author)
+                .unwrap();
+            groups.db.save_event(&event, &scope).await.unwrap();
+        }
+
+        let hex = author.public_key().to_hex();
+
+        // Only what is older than an hour.
+        let old_only = groups
+            .admin_prune_events(
+                &hex,
+                Attribution::Author,
+                &[1],
+                None,
+                Some(now - 3600),
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_only, 1, "the recent note is outside the window");
+
+        groups
+            .admin_prune_events(
+                &hex,
+                Attribution::Author,
+                &[1],
+                None,
+                Some(now - 3600),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let left = groups
+            .admin_prune_events(&hex, Attribution::Author, &[1], None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(left, 1, "the recent note survives");
+    }
+
+    /// Gift wraps must be prunable by recipient; matching on author would hit
+    /// the throwaway key and delete nothing.
+    #[tokio::test]
+    async fn prune_matches_gift_wraps_by_recipient() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+        let recipient = Keys::generate().public_key();
+
+        // Each wrap is signed by a different throwaway key, so these are
+        // distinct events even with identical content -- which is the point.
+        for i in 0..3 {
+            let wrap = EventBuilder::new(Kind::from(GIFT_WRAP_KIND), format!("wrap {i}"))
+                .tag(Tag::public_key(recipient))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            groups.db.save_event(&wrap, &scope).await.unwrap();
+        }
+
+        let hex = recipient.to_hex();
+        assert_eq!(
+            groups
+                .admin_prune_events(
+                    &hex,
+                    Attribution::Author,
+                    &[GIFT_WRAP_KIND],
+                    None,
+                    None,
+                    true
+                )
+                .await
+                .unwrap(),
+            0,
+            "the recipient authored none of them"
+        );
+        assert_eq!(
+            groups
+                .admin_prune_events(
+                    &hex,
+                    Attribution::Recipient,
+                    &[GIFT_WRAP_KIND],
+                    None,
+                    None,
+                    false
+                )
+                .await
+                .unwrap(),
+            3,
+        );
+    }
+
+    /// Rows are ordered by bytes, because the screen exists to explain disk
+    /// usage — a few large events outrank many tiny ones.
+    #[tokio::test]
+    async fn authors_are_ranked_by_bytes_not_event_count() {
+        let (groups, _admin_keys, _, _, _group_id, scope) = setup_test_groups().await;
+
+        let chatty = Keys::generate();
+        for _ in 0..5 {
+            let small = create_test_event(&chatty, Kind::from(1u16), vec![]).await;
+            groups.db.save_event(&small, &scope).await.unwrap();
+        }
+
+        let heavy = Keys::generate();
+        let big = EventBuilder::new(Kind::from(1u16), "x".repeat(50_000))
+            .sign_with_keys(&heavy)
+            .unwrap();
+        groups.db.save_event(&big, &scope).await.unwrap();
+
+        let stats = groups.admin_storage_stats(1000, &[], 0).await.unwrap();
+
+        let heavy_pos = stats
+            .top_authors
+            .iter()
+            .position(|a| a.pubkey == heavy.public_key().to_hex())
+            .expect("heavy author listed");
+        let chatty_pos = stats
+            .top_authors
+            .iter()
+            .position(|a| a.pubkey == chatty.public_key().to_hex())
+            .expect("chatty author listed");
+
+        assert!(
+            heavy_pos < chatty_pos,
+            "one 50 KB note should outrank five short ones"
+        );
     }
 }

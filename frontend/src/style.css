@@ -11,6 +11,14 @@
   --color-text-secondary: #a3a3a3;
   --color-accent: #b4f953;
   --color-accent-hover: #c5ff6e;
+  /*
+   * The accent as bare channels, so translucent uses can read the theme:
+   * `rgba(var(--color-accent-rgb), 0.1)`. A var holding "#b4f953" cannot be
+   * used inside rgba(), which is why ~100 accent tints across the console were
+   * hardcoded instead -- and why they stayed green on the purple deployment
+   * while everything driven by --color-accent recoloured correctly.
+   */
+  --color-accent-rgb: 180, 249, 83;
   --color-border: #262626;
   --color-lc-olive: #2d3a1a;
   --color-lc-olive-dark: #1e2812;
@@ -408,15 +416,54 @@ body {
  * keeps them aligned no matter what goes inside — which matters because the
  * sidebar header now also carries a 32px relay icon.
  */
+/*
+ * The page header. It is a flex row of <main>, above the scroll region rather
+ * than inside it, so it cannot scroll away -- see the comment in AdminPanel.tsx
+ * for why `position: sticky` silently failed here.
+ *
+ * The background stays opaque and defined in CSS rather than inline: the
+ * search-results dropdown escapes the header, and a translucent bar would let
+ * page content show through behind it.
+ */
 .admin-header-bar {
   display: flex;
   align-items: center;
   min-height: var(--admin-header-height, 112px);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0.015)),
+    var(--color-bg-primary);
 }
 
 @media (max-width: 767px) {
   .admin-header-bar {
     min-height: var(--admin-header-height-sm, 84px);
+  }
+}
+
+/*
+ * A detail panel beside a long list.
+ *
+ * Only pinned at the two-column breakpoint (xl, 1280px) -- narrower than that
+ * the grid collapses and the panel sits below the whole table, where sticking
+ * it to the top of the viewport would cover the list it belongs to. That
+ * narrow case is handled by scrolling the panel into view on selection; see
+ * `selectGroup` in GroupsOverview.tsx.
+ *
+ * The offset is derived from the header variable rather than a second
+ * hardcoded number, so the panel cannot end up underneath the sticky header
+ * when that height changes.
+ */
+@media (min-width: 1280px) {
+  .admin-detail-panel {
+    position: sticky;
+    /* Offsets are from the top of the scroll region, which starts below the
+       header -- the header is a sibling of that region, not part of it. */
+    top: 12px;
+    /* Its own scrollbar: a group with a banner plus several metadata tags is
+     * taller than some viewports, and pinning a panel that cannot scroll just
+     * moves the problem. */
+    max-height: calc(100vh - var(--admin-header-height, 112px) - 32px);
+    overflow-y: auto;
   }
 }
 
@@ -560,11 +607,79 @@ body {
   cursor: not-allowed;
 }
 
-/* Checkboxes and radios take the accent rather than the box treatment. */
+/*
+ * Checkboxes and radios, drawn rather than delegated to the browser.
+ *
+ * `accent-color` only tints the OS widget: it keeps the platform's shape,
+ * size and focus ring, so the same relay looked different on every machine and
+ * nothing matched the panel's dark surfaces and 8px radii. These are the real
+ * control -- `appearance: none` plus our own box -- so a destructive toggle
+ * like "Delete old events automatically" reads as part of the console.
+ *
+ * The tick is a background image, not a pseudo-element: pseudo-elements on
+ * replaced elements like <input> are not guaranteed to render.
+ *
+ * Styled on the element selector rather than an opt-in class so every existing
+ * checkbox is covered and a new one cannot be added un-styled -- the same
+ * reasoning as the baseline input rule above.
+ */
 :where(.admin-shell) :where(input[type="checkbox"], input[type="radio"]) {
-  accent-color: var(--color-accent);
-  width: auto;
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
   min-height: 0;
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background-color: var(--color-bg-tertiary);
+  background-position: center;
+  background-repeat: no-repeat;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+:where(.admin-shell) :where(input[type="radio"]) {
+  border-radius: 50%;
+}
+
+:where(.admin-shell)
+  :where(input[type="checkbox"], input[type="radio"]):not(:disabled):hover {
+  border-color: rgba(180, 249, 83, 0.42);
+}
+
+:where(.admin-shell) :where(input[type="checkbox"]):checked {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent);
+  /* Tick stroked in the page colour so it reads against the accent fill. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%230a0a0a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3 3 6-6'/%3E%3C/svg%3E");
+  background-size: 13px 13px;
+}
+
+:where(.admin-shell) :where(input[type="radio"]):checked {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent);
+  background-image: radial-gradient(
+    circle,
+    var(--color-bg-primary) 0 34%,
+    transparent 38%
+  );
+}
+
+/* Keyboard focus has to be visible on both states, so ring outside the box
+ * rather than recolouring it. */
+:where(.admin-shell)
+  :where(input[type="checkbox"], input[type="radio"]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* A disabled checkbox is still a statement about configuration, so keep the
+ * checked/unchecked distinction legible while removing the affordance. */
+:where(.admin-shell)
+  :where(input[type="checkbox"], input[type="radio"]):disabled {
+  cursor: not-allowed;
 }
 
 /*
@@ -759,8 +874,7 @@ body {
 }
 
 .admin-toggle-row input {
-  margin-top: 3px;
-  accent-color: var(--color-accent);
+  margin-top: 2px;
 }
 
 .admin-toggle-row strong,
@@ -1553,24 +1667,893 @@ body {
  * gives the operator nothing to do with the information. These explain when the
  * section will fill up, so an empty panel is an answer rather than a dead end.
  */
+/*
+ * Empty states. See AdminEmptyState.tsx for why these are a component rather
+ * than two paragraphs in a dashed box.
+ *
+ * Two tones, because "nobody is blocked (normal)" and "anyone can connect
+ * (probably not what you want)" are not the same message and must not look
+ * identical.
+ */
 .admin-empty-state {
-  padding: 14px 16px;
+  display: flex;
+  gap: 12px;
+  padding: 16px 18px;
   border: 1px dashed var(--color-border);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.015);
 }
 
-.admin-empty-state p {
+.admin-empty-state-caution {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.06);
+}
+
+.admin-empty-state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-secondary);
+}
+
+.admin-empty-state-caution .admin-empty-state-icon {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fcd34d;
+}
+
+.admin-empty-state-body {
+  min-width: 0;
+}
+
+.admin-empty-state-headline {
   margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--color-text-primary);
+}
+
+.admin-empty-state-caution .admin-empty-state-headline {
+  color: #fcd34d;
+}
+
+.admin-empty-state-copy {
+  margin: 5px 0 0;
+  max-width: 72ch;
   font-size: 13px;
   line-height: 19px;
   color: var(--color-text-secondary);
 }
 
-.admin-empty-state p:first-child {
-  margin-bottom: 6px;
+.admin-empty-state-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* The count belongs with the message it qualifies, as a figure -- not as a
+ * stray line of prose somewhere else on the page. */
+.admin-empty-state-stat {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-empty-state-action {
+  padding: 7px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
   color: var(--color-text-primary);
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.admin-empty-state-action:hover {
+  border-color: rgba(180, 249, 83, 0.42);
+  background: #202020;
+}
+
+.admin-empty-state-action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- Unsaved-changes bar ----------
+ *
+ * The last flex row of <main>, below the scroll region -- not inside it. As a
+ * sticky child it rendered at the bottom of a very long page and was simply
+ * unreachable, which meant the rate-limit fields on Access had no working save
+ * control at all once the per-section button was removed.
+ */
+.admin-save-bar {
+  flex-shrink: 0;
+  z-index: 25;
+  padding: 12px 20px 16px;
+  border-top: 1px solid rgba(180, 249, 83, 0.25);
+  background:
+    linear-gradient(rgba(180, 249, 83, 0.05), rgba(180, 249, 83, 0.05)),
+    var(--color-bg-secondary);
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.admin-save-bar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 80rem;
+}
+
+.admin-save-bar-message {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.admin-save-bar-message strong {
+  color: var(--color-text-primary);
+  font-size: 14px;
+}
+
+.admin-save-bar-sections {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+/* Only rendered while the change is pending, so it is always currently true. */
+.admin-save-bar-consequence {
+  color: #fcd34d;
+  font-size: 12px;
+}
+
+.admin-save-bar-blocked,
+.admin-save-bar-error {
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.admin-save-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-save-bar-discard,
+.admin-save-bar-save {
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.admin-save-bar-discard {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.admin-save-bar-discard:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  border-color: var(--color-text-secondary);
+}
+
+.admin-save-bar-save {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: #0a0a0a;
+}
+
+.admin-save-bar-save:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.admin-save-bar-discard:disabled,
+.admin-save-bar-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.admin-save-bar-discard:focus-visible,
+.admin-save-bar-save:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* The clickable identity in the attribution tables. A bare npub says which
+ * key but never who, so this pairs the avatar and display name with it and
+ * opens the full profile on click. */
+.admin-author-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 280px;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.admin-author-identity:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.admin-author-identity:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.admin-author-identity:disabled {
+  cursor: default;
+}
+
+/* ---------- Publishing budget ladder ----------
+ *
+ * States the rule rather than leaving it to be inferred: the base slider is
+ * what a fully trusted key may publish, and every other tier gets a share of
+ * it. Bars because the relationship between the rungs is the point, and a
+ * column of numbers hides it.
+ */
+.admin-budget-ladder {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.admin-budget-ladder-head {
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.admin-budget-ladder-head small {
+  display: block;
+  margin-top: 4px;
+  max-width: 72ch;
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.admin-budget-rung {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.admin-budget-rung-label {
+  flex: 0 0 210px;
+  color: var(--color-text-primary);
+}
+
+.admin-budget-rung-bar {
+  flex: 1;
+  height: 6px;
+  min-width: 60px;
+  border-radius: 999px;
+  background: var(--color-bg-tertiary);
+  overflow: hidden;
+}
+
+.admin-budget-rung-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-accent);
+}
+
+.admin-budget-rung-value {
+  flex: 0 0 84px;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-secondary);
+}
+
+/* The open-relay option carries real risk, so it must not look like a
+ * neutral peer of the safe one. */
+.admin-mode-option-danger.admin-mode-option-active {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.admin-mode-option-danger.admin-mode-option-active .admin-mode-title {
+  color: #fca5a5;
+}
+
+/* ---------- Admitted accounts ----------
+ *
+ * Hundreds of entries, shown only so an operator can sanity-check that the
+ * graph admits the right crowd. As full-width rows that was several screens of
+ * page pushing every other control below the fold, so: dense chips in a bounded
+ * box that scrolls on its own and never grows the page.
+ */
+.admin-admitted-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 6px;
+  max-height: 264px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+}
+
+.admin-admitted-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-admitted-chip:hover {
+  border-color: var(--color-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.admin-admitted-chip:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.admin-admitted-avatar {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--color-border);
+}
+
+.admin-admitted-avatar-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--color-accent-rgb), 0.12);
+  color: var(--color-accent);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.admin-admitted-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Just the number: the unit is in the heading above, and repeating "hops" on
+ * every chip is most of the width of the chip. */
+.admin-admitted-hops {
+  flex-shrink: 0;
+  min-width: 16px;
+  text-align: center;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ---------- Bulk selection bar ----------
+ *
+ * Only rendered once rows are ticked, so the tables look unchanged until a
+ * selection exists. Sits directly above the table it acts on, because a bar
+ * that could act on either of two tables on the same screen would be ambiguous.
+ */
+.admin-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 9px 14px;
+  border: 1px solid rgba(var(--color-accent-rgb), 0.35);
+  border-radius: 8px;
+  background: rgba(var(--color-accent-rgb), 0.08);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.admin-bulk-bar strong {
+  color: var(--color-text-primary);
+}
+
+.admin-bulk-clear,
+.admin-bulk-delete {
+  flex-shrink: 0;
+  padding: 6px 13px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-bulk-clear {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.admin-bulk-clear:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-text-secondary);
+}
+
+.admin-bulk-delete {
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.admin-bulk-delete:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fecaca;
+}
+
+.admin-bulk-clear:focus-visible,
+.admin-bulk-delete:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- Prune dialog ----------
+ *
+ * Deleting is irreversible and the relay holds no other copy, so the flow is
+ * preview-then-confirm: the count shown is the count removed, and the
+ * destructive button stays disabled until it has been seen and typed against.
+ */
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.admin-modal {
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-secondary);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.admin-modal-title {
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.admin-modal-copy {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--color-text-secondary);
+}
+
+.admin-modal-copy code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-bg-tertiary);
+  font-size: 12px;
+  color: var(--color-text-primary);
+}
+
+.admin-modal-field {
+  margin-bottom: 14px;
+}
+
+.admin-modal-field > span {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.admin-modal-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--color-text-secondary);
+}
+
+.admin-modal-error {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: #fca5a5;
+}
+
+.admin-modal-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  font-size: 13px;
+  color: #fca5a5;
+}
+
+.admin-modal-preview strong {
+  color: #fecaca;
+}
+
+.admin-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.admin-modal-danger {
+  padding: 9px 18px;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-modal-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fecaca;
+}
+
+.admin-modal-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Kinds as toggles rather than a multi-select: the operator needs to see every
+ * option and what it means, not scroll a native list box. */
+.admin-kind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.admin-kind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-tertiary);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.admin-kind-chip.is-on {
+  border-color: rgba(var(--color-accent-rgb), 0.45);
+  color: var(--color-text-primary);
+}
+
+/* ---------- Rate-limit sliders ----------
+ *
+ * A bare number field gave no sense of scale: "6000" reads the same as "600",
+ * and a one-digit typo changes the relay tenfold. Stepping through a named
+ * ladder shows where a value sits between strict and effectively-off.
+ */
+.admin-rate-sliders {
+  display: grid;
+  gap: 18px;
+}
+
+/* The master control gets a surface of its own so it reads as governing the
+ * three below it rather than being a fourth peer. */
+.admin-rate-master {
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+}
+
+.admin-rate-master-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.admin-rate-master-actions .admin-rate-slider-hint {
+  margin: 0;
+}
+
+.admin-rate-reset {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-rate-reset:hover:not(:disabled) {
+  border-color: rgba(var(--color-accent-rgb), 0.42);
+  color: var(--color-text-primary);
+}
+
+.admin-rate-reset:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.admin-rate-master .admin-rate-ticks {
+  font-family: inherit;
+  font-size: 9px;
+}
+
+.admin-rate-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-rate-slider-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.admin-rate-slider-value {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.admin-rate-slider-value strong {
+  font-size: 15px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-primary);
+}
+
+.admin-rate-slider-value em {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(var(--color-accent-rgb), 0.12);
+  color: var(--color-accent);
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.admin-rate-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 12px 0 6px;
+  border-radius: 999px;
+  background: var(--color-border);
+  outline: none;
+  cursor: pointer;
+}
+
+.admin-rate-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-bg-primary);
+  border-radius: 50%;
+  background: var(--color-accent);
+  cursor: pointer;
+}
+
+.admin-rate-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-bg-primary);
+  border-radius: 50%;
+  background: var(--color-accent);
+  cursor: pointer;
+}
+
+.admin-rate-range:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 4px;
+}
+
+.admin-rate-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-secondary);
+  opacity: 0.7;
+}
+
+.admin-rate-slider-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--color-text-secondary);
+}
+
+/* ---------- Disclosure section card ----------
+ *
+ * Collapsed sections that still read as part of the console. The blacklist
+ * used to be a bare ▶ glyph with a bold word next to it and its description
+ * stranded below -- the only group of settings on the screen that was not a
+ * card with a title, a description and a status on the right.
+ */
+.admin-disclosure-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.admin-disclosure-trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 16px 18px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.admin-disclosure-trigger:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.admin-disclosure-trigger:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.admin-disclosure-chevron {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-secondary);
+  transition: transform 0.2s ease;
+}
+
+.admin-disclosure-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.admin-disclosure-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-disclosure-heading strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.admin-disclosure-heading small {
+  display: block;
+  margin-top: 3px;
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--color-text-secondary);
+}
+
+/* "None" is the healthy state here, so it stays quiet; a non-zero count is
+ * the thing worth noticing. */
+.admin-disclosure-count {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.admin-disclosure-count.is-active {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+}
+
+.admin-disclosure-body {
+  padding: 0 18px 18px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 16px;
+}
+
+/* ---------- Kind drilldown ----------
+ *
+ * A kinds row is a button: clicking it reveals which pubkeys that kind belongs
+ * to. Without the hover and the caret there is nothing to suggest the row does
+ * anything, and the breakdown stays undiscovered.
+ */
+.admin-kind-row {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.admin-kind-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.admin-kind-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.admin-disclosure {
+  display: inline-block;
+  width: 14px;
+  margin-right: 4px;
+  color: var(--color-text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.admin-disclosure.is-open {
+  transform: rotate(90deg);
+}
+
+.admin-kind-drilldown {
+  padding: 12px 12px 16px 26px;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid var(--color-border);
 }
 
 /* ---------- Disk usage over time ---------- */

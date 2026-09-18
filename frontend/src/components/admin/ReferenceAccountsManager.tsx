@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi } from '../../services/AdminApiClient'
 import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
 import { ProfileCard, CopyNpubButton } from './ProfileCard'
+import { resolvePubkeyInput } from '../../services/nip05'
 
 interface RefAccount {
   hex: string
@@ -56,7 +57,8 @@ export const ReferenceAccountsManager = () => {
     if (!newPubkey.trim()) return
     setError(null)
     try {
-      const entry = await adminApi.addReferenceAccount(newPubkey.trim())
+      // Accepts npub, hex, or a NIP-05 address, same as the Access field.
+      const entry = await adminApi.addReferenceAccount(await resolvePubkeyInput(newPubkey))
       setAccounts(prev => [...prev.filter(e => e.hex !== entry.hex), entry])
       setNewPubkey('')
       showToast('Reference account added — syncing follows...')
@@ -141,6 +143,22 @@ export const ReferenceAccountsManager = () => {
         </button>
       </div>
 
+      {/* These accounts do two jobs, and the second is easy to miss: they are
+          the follow-sync sources AND the roots of the Web-of-Trust graph.
+          Saying so here is what connects this screen to Access, where the
+          admission rules themselves live. */}
+      <div class="admin-empty-state mb-5">
+        <div class="admin-empty-state-body">
+          <p class="admin-empty-state-headline">These accounts are the roots of access</p>
+          <p class="admin-empty-state-copy">
+            Their follows are auto-whitelisted by follow sync, and they are the
+            starting points of the Web-of-Trust graph. Adding one here widens
+            both. The rules that use them — enforcement mode, hop limit, rate
+            limits — live on the Access screen.
+          </p>
+        </div>
+      </div>
+
       {toast && (
         <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
           {toast}
@@ -172,7 +190,7 @@ export const ReferenceAccountsManager = () => {
           type="text"
           value={newPubkey}
           onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
-          placeholder="npub1... or hex pubkey"
+          placeholder="npub1..., hex, or name@domain.com"
           class="flex-1 px-4 py-2 rounded-lg text-sm"
           style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
           onKeyDown={(e) => e.key === 'Enter' && handleAdd()}

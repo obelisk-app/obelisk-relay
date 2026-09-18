@@ -4,6 +4,9 @@ import { SearchIcon } from './SearchIcon'
 import { GroupChatView } from './GroupChatView'
 import { useRowSelection } from './useRowSelection'
 import { confirmMatches } from './confirmPhrase'
+import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
+import { ProfileCard, CopyNpubButton } from './ProfileCard'
+import { nip19 } from 'nostr-tools'
 
 interface Props {
   group: GroupInfo
@@ -55,6 +58,19 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [members, setMembers] = useState<MemberInfo[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
   const [membersError, setMembersError] = useState<string | null>(null)
+  // Who these members actually are. A column of hex answers "which key" and
+  // never "who", which is the question an operator moderating a group has.
+  const [memberProfiles, setMemberProfiles] = useState<Map<string, NostrProfile>>(new Map())
+  const [profileTarget, setProfileTarget] = useState<{ hex: string; npub: string } | null>(null)
+
+  /** Hex -> npub, tolerating anything that is not a valid key. */
+  const toNpub = (hex: string) => {
+    try {
+      return nip19.npubEncode(hex)
+    } catch {
+      return ''
+    }
+  }
   const [removingMember, setRemovingMember] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   // Bulk member moderation. Same selection mechanics as the events tab.
@@ -73,11 +89,30 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   }
 
   // Load events on mount or when author filter changes
+  /** Merge in profiles for pubkeys we have not seen yet. */
+  const ensureProfiles = (pubkeys: string[]) => {
+    const missing = [...new Set(pubkeys)].filter(pk => !memberProfiles.has(pk))
+    if (missing.length === 0) return
+    fetchProfiles(missing)
+      .then(fetched => {
+        setMemberProfiles(prev => {
+          const next = new Map(prev)
+          for (const [hex, profile] of fetched) next.set(hex, profile)
+          return next
+        })
+      })
+      .catch(() => undefined)
+  }
+
   const loadEvents = (author?: string | null) => {
     setEventsLoading(true)
     setEventsError(null)
     adminApi.getGroupEvents(group.id, 500, author ?? undefined)
-      .then(data => setEvents(data))
+      .then(data => {
+        setEvents(data)
+        // Event authors need not be current members, so resolve them too.
+        ensureProfiles(data.map(e => e.pubkey))
+      })
       .catch(e => setEventsError(e.message))
       .finally(() => setEventsLoading(false))
   }
@@ -89,7 +124,16 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
     if (tab !== 'members' || members.length > 0) return
     setMembersLoading(true)
     adminApi.getGroupMembers(group.id)
-      .then(data => { setMembers(data); setMembersError(null) })
+      .then(data => {
+        setMembers(data)
+        setMembersError(null)
+        if (data.length > 0) {
+          fetchProfiles(data.map(m => m.pubkey))
+            .then(setMemberProfiles)
+            // Decoration; the member list must still render without them.
+            .catch(() => undefined)
+        }
+      })
       .catch(e => setMembersError(e.message))
       .finally(() => setMembersLoading(false))
   }, [tab])
@@ -223,8 +267,8 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   }
 
   const tabStyle = (id: Tab) => ({
-    borderBottom: tab === id ? '2px solid #b4f953' : '2px solid transparent',
-    color: tab === id ? '#b4f953' : 'var(--color-text-secondary)',
+    borderBottom: tab === id ? '2px solid var(--color-accent)' : '2px solid transparent',
+    color: tab === id ? 'var(--color-accent)' : 'var(--color-text-secondary)',
     background: 'transparent',
     padding: '8px 16px',
     fontSize: '14px',
@@ -261,7 +305,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                 </span>
               )}
               {group.broadcast && (
-                <span class="px-2 py-0.5 rounded-full text-xs" style={{ background: 'rgba(180,249,83,0.10)', color: '#b4f953', border: '1px solid rgba(180,249,83,0.25)' }}>
+                <span class="px-2 py-0.5 rounded-full text-xs" style={{ background: 'rgba(var(--color-accent-rgb), 0.10)', color: 'var(--color-accent)', border: '1px solid rgba(var(--color-accent-rgb), 0.25)' }}>
                   Broadcast
                 </span>
               )}
@@ -274,8 +318,8 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
           <div class="mb-4 p-3 text-xs grid md:grid-cols-2 gap-3" style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)', borderRadius: '8px', color: 'var(--color-text-secondary)' }}>
             {group.about && <div class="md:col-span-2">{group.about}</div>}
             {group.parent && <div><span>Parent: </span><span class="font-mono break-all">{group.parent}</span></div>}
-            {group.picture && <div><span>Picture: </span><a href={group.picture} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: '#b4f953' }}>{group.picture}</a></div>}
-            {group.banner && <div><span>Banner: </span><a href={group.banner} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: '#b4f953' }}>{group.banner}</a></div>}
+            {group.picture && <div><span>Picture: </span><a href={group.picture} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: 'var(--color-accent)' }}>{group.picture}</a></div>}
+            {group.banner && <div><span>Banner: </span><a href={group.banner} target="_blank" rel="noopener noreferrer" class="font-mono break-all hover:underline" style={{ color: 'var(--color-accent)' }}>{group.banner}</a></div>}
             {group.metadata_tags.length > 0 && <div>Extra tags: {group.metadata_tags.length}</div>}
           </div>
         )}
@@ -283,9 +327,9 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
         {/* Toast */}
         {toast && (
           <div class="mb-3 px-3 py-2 rounded text-sm" style={{
-            background: toast.type === 'ok' ? 'rgba(180,249,83,0.08)' : 'rgba(239,68,68,0.1)',
-            color: toast.type === 'ok' ? '#b4f953' : '#f87171',
-            border: `1px solid ${toast.type === 'ok' ? 'rgba(180,249,83,0.2)' : 'rgba(239,68,68,0.3)'}`,
+            background: toast.type === 'ok' ? 'rgba(var(--color-accent-rgb), 0.08)' : 'rgba(239,68,68,0.1)',
+            color: toast.type === 'ok' ? 'var(--color-accent)' : '#f87171',
+            border: `1px solid ${toast.type === 'ok' ? 'rgba(var(--color-accent-rgb), 0.2)' : 'rgba(239,68,68,0.3)'}`,
           }}>
             {toast.msg}
           </div>
@@ -327,7 +371,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
 
             {/* Author filter banner */}
             {authorFilter && (
-              <div class="mb-3 px-3 py-2 rounded-lg flex items-center justify-between gap-3" style={{ background: 'rgba(180,249,83,0.06)', border: '1px solid rgba(180,249,83,0.15)', flexShrink: 0 }}>
+              <div class="mb-3 px-3 py-2 rounded-lg flex items-center justify-between gap-3" style={{ background: 'rgba(var(--color-accent-rgb), 0.06)', border: '1px solid rgba(var(--color-accent-rgb), 0.15)', flexShrink: 0 }}>
                 <div class="text-sm">
                   <span style={{ color: 'var(--color-text-secondary)' }}>Filtering by: </span>
                   <span class="font-mono text-xs">{authorFilter}</span>
@@ -386,6 +430,11 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                   selected={selected}
                   onToggle={toggleSelect}
                   onFilterAuthor={pk => { setAuthorFilter(pk); setConfirmWipe(false) }}
+                  profiles={memberProfiles}
+                  onOpenProfile={pk => {
+                    const npub = toNpub(pk)
+                    if (npub) setProfileTarget({ hex: pk, npub })
+                  }}
                   activeAuthor={authorFilter}
                 />
               )}
@@ -396,7 +445,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
             {selected.size > 0 && (
               <div
                 class="mt-2 px-3 py-2 rounded-lg flex items-center gap-3 flex-wrap"
-                style={{ background: 'rgba(180,249,83,0.07)', border: '1px solid rgba(180,249,83,0.2)', flexShrink: 0 }}
+                style={{ background: 'rgba(var(--color-accent-rgb), 0.07)', border: '1px solid rgba(var(--color-accent-rgb), 0.2)', flexShrink: 0 }}
               >
                 <span class="text-sm font-semibold">{selected.size} selected</span>
                 <button type="button" onClick={selectAllVisible} class="text-xs underline" style={{ color: 'var(--color-text-secondary)' }}>
@@ -491,7 +540,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                         key={m.pubkey}
                         style={{
                           borderTop: '1px solid var(--color-border)',
-                          background: memberSel.selected.has(m.pubkey) ? 'rgba(180,249,83,0.07)' : undefined,
+                          background: memberSel.selected.has(m.pubkey) ? 'rgba(var(--color-accent-rgb), 0.07)' : undefined,
                         }}
                         class="hover:bg-white/[0.02] transition-colors"
                       >
@@ -503,22 +552,62 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                             onClick={e => memberSel.toggle(m.pubkey, i, (e as MouseEvent).shiftKey)}
                           />
                         </td>
-                        <td class="px-3 py-2 font-mono text-xs" title={m.pubkey} style={{ color: 'var(--color-text-secondary)' }}>
-                          <button
-                            onClick={() => { setTab('events'); setAuthorFilter(m.pubkey) }}
-                            title="View events by this member"
-                            style={{ color: 'var(--color-text-secondary)', textDecoration: 'underline dotted', cursor: 'pointer', background: 'none', border: 'none', padding: 0, fontFamily: 'monospace', fontSize: '12px' }}
-                          >
-                            {short(m.pubkey, 12)}
-                          </button>
-                          <span style={{ marginLeft: '4px', color: 'var(--color-text-secondary)', opacity: 0.5 }}>{m.pubkey.slice(-8)}</span>
+                        <td class="px-3 py-2" title={m.pubkey}>
+                          <div class="flex items-center gap-2">
+                            {(() => {
+                              const profile = memberProfiles.get(m.pubkey)
+                              const npub = toNpub(m.pubkey)
+                              return (
+                                <>
+                                  {/* Avatar opens the profile; the name below
+                                      still filters events, which is the other
+                                      thing you want from a member row. */}
+                                  <button
+                                    type="button"
+                                    class="admin-author-identity"
+                                    onClick={() => npub && setProfileTarget({ hex: m.pubkey, npub })}
+                                    disabled={!npub}
+                                    title="Show profile"
+                                  >
+                                    {profile?.picture ? (
+                                      <img
+                                        src={profile.picture}
+                                        alt=""
+                                        class="w-6 h-6 rounded-full object-cover flex-shrink-0"
+                                        style={{ border: '1px solid var(--color-border)' }}
+                                        onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                                      />
+                                    ) : (
+                                      <span
+                                        class="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-[9px] font-bold"
+                                        style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)' }}
+                                      >
+                                        {(profile?.name || m.pubkey.slice(0, 2)).slice(0, 2).toUpperCase()}
+                                      </span>
+                                    )}
+                                    <span class="text-xs truncate">
+                                      {profile ? getDisplayName(profile, npub || m.pubkey) : short(m.pubkey, 10)}
+                                    </span>
+                                  </button>
+                                  {npub && <CopyNpubButton npub={npub} />}
+                                  <button
+                                    onClick={() => { setTab('events'); setAuthorFilter(m.pubkey) }}
+                                    title="View events by this member"
+                                    style={{ color: 'var(--color-text-secondary)', textDecoration: 'underline dotted', cursor: 'pointer', background: 'none', border: 'none', padding: 0, fontSize: '11px' }}
+                                  >
+                                    events
+                                  </button>
+                                </>
+                              )
+                            })()}
+                          </div>
                         </td>
                         <td class="px-3 py-2">
                           <div class="flex gap-1 flex-wrap">
                             {m.roles.map(r => (
                               <span key={r} class="px-1.5 py-0.5 rounded text-xs" style={{
-                                background: r === 'Admin' ? 'rgba(180,249,83,0.1)' : 'var(--color-bg-tertiary)',
-                                color: r === 'Admin' ? '#b4f953' : 'var(--color-text-secondary)',
+                                background: r === 'Admin' ? 'rgba(var(--color-accent-rgb), 0.1)' : 'var(--color-bg-tertiary)',
+                                color: r === 'Admin' ? 'var(--color-accent)' : 'var(--color-text-secondary)',
                               }}>
                                 {r}
                               </span>
@@ -558,7 +647,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
             {memberSel.selected.size > 0 && (
               <div
                 class="mt-2 px-3 py-2 rounded-lg flex flex-col gap-2"
-                style={{ background: 'rgba(180,249,83,0.07)', border: '1px solid rgba(180,249,83,0.2)', flexShrink: 0 }}
+                style={{ background: 'rgba(var(--color-accent-rgb), 0.07)', border: '1px solid rgba(var(--color-accent-rgb), 0.2)', flexShrink: 0 }}
               >
                 <div class="flex items-center gap-3 flex-wrap">
                   <span class="text-sm font-semibold">{memberSel.selected.size} selected</span>
@@ -646,6 +735,15 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
           </div>
         )}
       </div>
+
+      {profileTarget && (
+        <ProfileCard
+          hex={profileTarget.hex}
+          npub={profileTarget.npub}
+          profile={memberProfiles.get(profileTarget.hex)}
+          onClose={() => setProfileTarget(null)}
+        />
+      )}
     </div>
   )
 }

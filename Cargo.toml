@@ -54,6 +54,23 @@ parking_lot = "0.12"
 heavykeeper = "0.6"
 governor = "0.10.1"
 nonzero_ext = "0.3"
+# WoT oracle queries (src/wot.rs). rustls rather than native-tls so the image
+# keeps the single TLS stack it already links for outbound relay connections.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# LMDB, opened directly for compaction (src/compaction.rs). nostr-lmdb keeps its
+# Env private and exposes no copy/compact API, so reclaiming free-list slack means
+# opening the environment ourselves. Version and features match what nostr-lmdb
+# and relay_builder already depend on, so this unifies rather than linking a
+# second copy of lmdb-master-sys.
+heed = { version = "0.20", default-features = false, features = ["read-txn-no-tls"] }
+# The same LMDB heed links, reached directly to walk the free list. heed's own
+# `non_free_pages_size` cannot be used here: it assumes every key in the unnamed
+# database is a sub-database name, and nostr-lmdb stores the default scope's
+# events there, so it panics decoding a 32-byte event id as UTF-8. `default = []`
+# for this crate, so depending on it adds no features to what heed asked for.
+lmdb-master-sys = "0.2"
+# statvfs, for the free-disk precheck before a compaction copy.
+libc = "0.2"
 
 [features]
 console = ["dep:console-subscriber"]

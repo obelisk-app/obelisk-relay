@@ -5,6 +5,23 @@ Updated 2026-09-15. Everything under "Open" is not done; everything under
 
 ---
 
+## Known issues
+
+Traps that have already bitten this relay — what the symptom looks like and what
+to check first — are in [`docs/known-issues.md`](docs/known-issues.md). The one
+worth reading before changing access control:
+
+> **Turning on access control can lock you out of the admin console.** The
+> console signs in over NIP-46 through *this* relay, so any new gate in front of
+> `handle_event` / `verify_filters` must exempt kind 24133 or the setting that
+> would lift the restriction ends up behind it.
+
+Still open there: the double graph rebuild on startup, an oracle URL logged in
+local mode, `422`-before-`401` on malformed admin POSTs, and the hash-matched
+theme override.
+
+---
+
 ## Open
 
 ### A. Free disk on the deployment host — **blocks the build**
@@ -65,6 +82,19 @@ silently misses any scope holding no loaded group.
 already walks 20k events, so accumulate size per kind and report average × exact
 count, labelled an estimate. Count tags, not just `content.len()` — a kind-9000
 event is nearly all tags and would otherwise read as zero.
+
+**Publish the deployed tag.** `v2026.09.18-compaction-update` was built on this
+host and both relays run it, but it is **not in GHCR**. The console offers
+published tags only, so until it is pushed the update card cannot offer the
+version that is actually running, and an update from the UI would move a relay
+*backwards* to the newest published tag. Push it:
+
+```
+docker push ghcr.io/obelisk-app/obelisk-relay:v2026.09.18-compaction-update
+```
+
+The update agents are installed for both relays (`obelisk-relay-update-public`
+and `-lacrypta`); see [`docs/updating.md`](docs/updating.md).
 
 ### E. README and Reddit posts
 
@@ -135,10 +165,29 @@ screen; it happened on public.obelisk.ar on 2026-09-15 and was caught by hand.
 
 Pruner enabled with `{1059: "30d"}`; first pass deleted **58,032** gift wraps in
 ~38 s with no OOM. NIP-11 now advertises `retention`. `data.mdb` stays at 5.20 GB
-— LMDB never returns freed pages; the win is a smaller working set. Reclaiming the
-file needs a `scripts/relay-data.sh export` → `import` round trip, which also
-clears the stale `deleted-ids` entries both relays report, and needs ~2× the
-database free.
+— LMDB never returns freed pages; the win is a smaller working set.
+
+Reclaiming the file is now a button on the Storage screen rather than an
+export/import round trip — see "Compaction" below. The export/import path is
+still the only thing that clears the stale `deleted-ids` entries both relays
+report, since a compaction copies live pages verbatim.
+
+### Compaction from the console
+
+**Reclaim disk space** on the Storage screen stages a request, restarts, and
+compacts before the database is opened — the only moment nothing holds it open.
+Refuses unless 1.2× the live data is free, keeps the original until the new file
+is proven openable, and consumes the request before starting so a failure cannot
+boot-loop.
+
+Verified against a copy of production: 605 MB → 238 MB in 3.4 s, all 378,481
+events intact, file mode preserved at 0600, and `nostr-lmdb-integrity` reporting
+exactly the same single pre-existing `deleted-ids` entry before and after.
+
+The measurement could not use heed's `non_free_pages_size`: it decodes every key
+in the unnamed database as a UTF-8 database name, and nostr-lmdb stores the
+default scope's events there, so it panics on the first event id. `src/compaction.rs`
+walks the free list through LMDB directly instead.
 
 Measured after the prune: kind 9 improved 23.5 s → 16.0 s and kind 39000 went from
 a 60 s timeout to returning — but both stayed slow, which is what pointed at the

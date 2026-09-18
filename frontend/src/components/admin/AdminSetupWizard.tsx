@@ -180,13 +180,17 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
   const canOpenAccess = Boolean(ownerPubkey && ownerMatchesSetup(ownerPubkey))
   const canOpenLaunch = Boolean(ownerPubkey && ownerMatchesSetup(ownerPubkey))
 
+  // `admin-shell` is a styling scope, not a layout -- it is what gives the
+  // console its form controls. The wizard renders before the shell exists, so
+  // it opts in here rather than shipping browser-default inputs on the one
+  // screen a new operator sees first.
   return (
-    <div class="min-h-screen lc-grid-bg flex items-center justify-center px-4 py-8" style={{ backgroundColor: 'var(--color-bg-primary)' }}>
+    <div class="admin-shell min-h-screen lc-grid-bg flex items-center justify-center px-4 py-8" style={{ backgroundColor: 'var(--color-bg-primary)' }}>
       <Nip46SignerDeepLink />
       <div class="w-full max-w-5xl overflow-hidden" style={{ background: '#121212', border: '1px solid var(--color-border)', borderRadius: '8px', boxShadow: '0 24px 80px rgba(0,0,0,0.45)' }}>
         <div class="grid md:grid-cols-[280px_1fr]">
           <aside class="p-5 md:p-6" style={{ background: 'rgba(255,255,255,0.025)', borderRight: '1px solid var(--color-border)' }}>
-            <a href="/" class="block text-lg font-bold" style={{ color: '#b4f953' }}>Obelisk Relay</a>
+            <a href="/" class="block text-lg font-bold" style={{ color: 'var(--color-accent)' }}>Obelisk Relay</a>
             <div class="mt-1 text-sm" style={{ color: 'var(--color-text-secondary)' }}>First-run setup</div>
 
             <div class="mt-8 space-y-2">
@@ -201,8 +205,8 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                     class="w-full text-left p-3 transition-colors"
                     style={{
                       borderRadius: '8px',
-                      background: active ? 'rgba(180,249,83,0.10)' : 'transparent',
-                      border: active ? '1px solid rgba(180,249,83,0.30)' : '1px solid transparent',
+                      background: active ? 'rgba(var(--color-accent-rgb), 0.10)' : 'transparent',
+                      border: active ? '1px solid rgba(var(--color-accent-rgb), 0.30)' : '1px solid transparent',
                       opacity: available ? 1 : 0.45,
                     }}
                   >
@@ -211,13 +215,13 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                         width: '26px',
                         height: '26px',
                         borderRadius: '50%',
-                        background: active || index < stepIndex ? '#b4f953' : 'var(--color-bg-tertiary)',
+                        background: active || index < stepIndex ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
                         color: active || index < stepIndex ? '#0a0a0a' : 'var(--color-text-secondary)',
                       }}>
                         {index + 1}
                       </span>
                       <span>
-                        <span class="block text-sm font-semibold" style={{ color: active ? '#b4f953' : 'var(--color-text-primary)' }}>{item.label}</span>
+                        <span class="block text-sm font-semibold" style={{ color: active ? 'var(--color-accent)' : 'var(--color-text-primary)' }}>{item.label}</span>
                         <span class="block text-xs truncate" style={{ color: 'var(--color-text-secondary)', maxWidth: '190px' }}>{item.meta}</span>
                       </span>
                     </div>
@@ -261,7 +265,7 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
             {step === 'owner' && (
               <section>
                 {setupOwnerLabel && (
-                  <div class="mb-5 p-4 text-sm" style={{ background: 'rgba(180,249,83,0.08)', border: '1px solid rgba(180,249,83,0.22)', borderRadius: '8px' }}>
+                  <div class="mb-5 p-4 text-sm" style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', border: '1px solid rgba(var(--color-accent-rgb), 0.22)', borderRadius: '8px' }}>
                     This reset kept the owner pubkey. Only <span class="font-mono">{shortKey(setupOwnerLabel)}</span> can finish setup.
                   </div>
                 )}
@@ -319,18 +323,26 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
             {step === 'access' && (
               <section class="space-y-5">
                 <div class="grid md:grid-cols-2 gap-3">
+                  {/* "Whitelist required" vs "Open relay" described the
+                      mechanism, not the consequence, and gave both the same
+                      neutral styling — so the one that lets the entire internet
+                      write to your disk looked like an equal choice. */}
                   <button
                     onClick={() => setAccessPolicy('owner_only')}
                     class="text-left p-4 transition-colors"
                     style={{
                       borderRadius: '8px',
-                      background: accessPolicy === 'owner_only' ? 'rgba(180,249,83,0.10)' : 'var(--color-bg-secondary)',
-                      border: accessPolicy === 'owner_only' ? '1px solid rgba(180,249,83,0.35)' : '1px solid var(--color-border)',
+                      background: accessPolicy === 'owner_only' ? 'rgba(var(--color-accent-rgb), 0.10)' : 'var(--color-bg-secondary)',
+                      border: accessPolicy === 'owner_only' ? '1px solid rgba(var(--color-accent-rgb), 0.35)' : '1px solid var(--color-border)',
                     }}
                   >
-                    <div class="font-semibold" style={{ color: accessPolicy === 'owner_only' ? '#b4f953' : 'var(--color-text-primary)' }}>Whitelist required</div>
+                    <div class="font-semibold" style={{ color: accessPolicy === 'owner_only' ? 'var(--color-accent)' : 'var(--color-text-primary)' }}>
+                      Restricted · recommended
+                    </div>
                     <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                      Only pubkeys in the whitelist can use the relay. Setup starts with the owner pubkey whitelisted.
+                      Only people you allow can connect: you, anyone you add by
+                      hand, everyone your account follows, and — if you turn it
+                      on later — anyone close to you in the follow graph.
                     </div>
                   </button>
                   <button
@@ -338,16 +350,29 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                     class="text-left p-4 transition-colors"
                     style={{
                       borderRadius: '8px',
-                      background: accessPolicy === 'open' ? 'rgba(180,249,83,0.10)' : 'var(--color-bg-secondary)',
-                      border: accessPolicy === 'open' ? '1px solid rgba(180,249,83,0.35)' : '1px solid var(--color-border)',
+                      background: accessPolicy === 'open' ? 'rgba(239, 68, 68, 0.12)' : 'var(--color-bg-secondary)',
+                      border: accessPolicy === 'open' ? '1px solid rgba(239, 68, 68, 0.45)' : '1px solid var(--color-border)',
                     }}
                   >
-                    <div class="font-semibold" style={{ color: accessPolicy === 'open' ? '#b4f953' : 'var(--color-text-primary)' }}>Open relay</div>
+                    <div class="font-semibold" style={{ color: accessPolicy === 'open' ? '#fca5a5' : 'var(--color-text-primary)' }}>
+                      Open to everyone · dangerous
+                    </div>
                     <div class="mt-2 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                      Any authenticated pubkey can use the relay. Use this only with per-pubkey, per-connection, and global rate limits enforced.
+                      Any pubkey on the internet can publish here. Storage grows
+                      until your disk is full, and spam has nothing to stop it.
+                      Only sensible for a deliberately public relay you are
+                      prepared to babysit.
                     </div>
                   </button>
                 </div>
+
+                {accessPolicy === 'open' && (
+                  <div class="p-4 text-sm" style={{ borderRadius: '8px', background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fca5a5' }}>
+                    Rate limits are your only protection in this mode, and they
+                    slow abuse rather than prevent it. You can switch to
+                    Restricted at any time from the Access screen.
+                  </div>
+                )}
 
                 <label class="flex items-start gap-3 p-4 cursor-pointer" style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}>
                   <input
@@ -357,9 +382,19 @@ export const AdminSetupWizard = ({ status, onCompleted }: AdminSetupWizardProps)
                     class="mt-1"
                   />
                   <span>
-                    <span class="block text-sm font-semibold">Add owner as follow-sync reference</span>
+                    {/* This is the difference between a relay that works when
+                        you first open it and one that admits nobody but you, so
+                        it says what it will actually do. */}
+                    <span class="block text-sm font-semibold">
+                      Whitelist everyone you follow
+                    </span>
                     <span class="block text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
-                      Reference accounts seed follow-derived whitelist entries. Enable this only if the owner account should be used as a follow source.
+                      As soon as setup finishes, this relay reads your contact
+                      list and allows every account in it. Without this, only
+                      your own pubkey can connect until you add people by hand.
+                      Your follows are re-synced whenever you ask, and your
+                      account becomes the starting point for Web-of-Trust
+                      admission if you enable it.
                     </span>
                   </span>
                 </label>

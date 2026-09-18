@@ -65,13 +65,13 @@ export const ProfileCard = ({ profile, hex, npub, onClose }: ProfileCardProps) =
               src={profile.picture}
               alt=""
               class="w-20 h-20 rounded-full object-cover mb-3"
-              style={{ border: '3px solid rgba(180,249,83,0.3)' }}
+              style={{ border: '3px solid rgba(var(--color-accent-rgb), 0.3)' }}
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
             />
           ) : (
             <div
               class="w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold mb-3"
-              style={{ background: 'rgba(180,249,83,0.1)', color: '#b4f953', border: '3px solid rgba(180,249,83,0.3)' }}
+              style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)', border: '3px solid rgba(var(--color-accent-rgb), 0.3)' }}
             >
               {(profile?.name || npub.slice(5, 7) || '??').slice(0, 2).toUpperCase()}
             </div>
@@ -83,7 +83,7 @@ export const ProfileCard = ({ profile, hex, npub, onClose }: ProfileCardProps) =
             <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>@{profile.name}</div>
           )}
           {profile?.nip05 && (
-            <div class="text-xs mt-1" style={{ color: '#b4f953' }}>{profile.nip05}</div>
+            <div class="text-xs mt-1" style={{ color: 'var(--color-accent)' }}>{profile.nip05}</div>
           )}
         </div>
 
@@ -121,7 +121,7 @@ export const ProfileCard = ({ profile, hex, npub, onClose }: ProfileCardProps) =
           target="_blank"
           rel="noopener noreferrer"
           class="block w-full text-center text-sm py-2 rounded-lg transition-colors"
-          style={{ background: 'rgba(180,249,83,0.1)', color: '#b4f953', border: '1px solid rgba(180,249,83,0.2)' }}
+          style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)', border: '1px solid rgba(var(--color-accent-rgb), 0.2)' }}
         >
           View on njump.me
         </a>

@@ -85,6 +85,20 @@ export class AdminApiClient {
     return this.request('/api/admin/whitelist')
   }
 
+  /**
+   * Counts per access tier. The whitelist list itself only contains the two
+   * enumerable tiers, so without this a relay admitting thousands through the
+   * Web of Trust reports only its handful of listed entries.
+   */
+  async getAccessSources(): Promise<AccessSources> {
+    return this.request('/api/admin/whitelist/sources')
+  }
+
+  /** Would this pubkey be admitted, and by which tier. */
+  async checkAccess(pubkey: string): Promise<AccessCheck> {
+    return this.request(`/api/admin/whitelist/check?pubkey=${encodeURIComponent(pubkey)}`)
+  }
+
   async addToWhitelist(pubkey: string): Promise<{ hex: string; npub: string }> {
     return this.request('/api/admin/whitelist', {
       method: 'POST',
@@ -174,6 +188,68 @@ export class AdminApiClient {
     return this.request(`/api/admin/storage/stats${refresh ? '?refresh=true' : ''}`)
   }
 
+  /**
+   * Which pubkeys account for one kind, from the sample already taken.
+   * Never triggers a scan, so a drilldown is instant and agrees with the
+   * kinds table it was opened from.
+   */
+  async getStorageKindAuthors(kind: number): Promise<StorageKindAuthors> {
+    return this.request(`/api/admin/storage/kinds/${kind}/authors`)
+  }
+
+  /**
+   * What a compaction would reclaim, and what earlier ones did.
+   *
+   * Measuring walks the whole free list in a child process, so the server
+   * caches it for a minute; pass refresh after a prune to see the new slack.
+   */
+  async getCompactionStatus(refresh = false): Promise<CompactionStatus> {
+    return this.request(`/api/admin/storage/compaction${refresh ? '?refresh=true' : ''}`)
+  }
+
+  /**
+   * Stage a compaction and restart into it.
+   *
+   * The relay cannot compact the database it is serving from, so this returns
+   * as the process is exiting: expect the next few requests to fail while
+   * Docker brings it back.
+   */
+  async compactDatabase(confirm: string): Promise<CompactResult> {
+    return this.request('/api/admin/storage/compact', {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
+    })
+  }
+
+  /** WoT admission: whether it is on, whether it works, and who it let in. */
+  async getWotStatus(): Promise<WotStatus> {
+    return this.request('/api/admin/wot')
+  }
+
+  /**
+   * Persist WoT settings. Takes effect on the next relay restart — the tier is
+   * constructed at startup, so the response always reports restart_required.
+   */
+  async updateWotSettings(settings: WotSettingsRequest): Promise<{ saved: boolean; restart_required: boolean }> {
+    return this.request('/api/admin/wot', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
+  /**
+   * Delete one pubkey's events, narrowed by kind and an optional date window.
+   *
+   * Call with dry_run first: the count it returns is what the destructive call
+   * removes, because both run off the same filter server-side.
+   */
+  async pruneEvents(req: PruneRequest): Promise<PruneResult> {
+    return this.request('/api/admin/storage/prune', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
   async getObeliskIndexSettings(): Promise<ObeliskIndexSettings> {
     return this.request('/api/admin/obelisk-index-settings')
   }
@@ -217,6 +293,34 @@ export class AdminApiClient {
     return this.request('/api/admin/restart', {
       method: 'POST',
       body: JSON.stringify({ confirm }),
+    })
+  }
+
+  /** What this build is: crate version, commit, build time, image tag. */
+  async getVersion(): Promise<VersionInfo> {
+    return this.request('/api/admin/version')
+  }
+
+  /**
+   * Running version, what is published, and whether the host agent that would
+   * carry out an update is alive.
+   */
+  async getUpdateStatus(refresh = false): Promise<UpdateStatus> {
+    return this.request(`/api/admin/update${refresh ? '?refresh=true' : ''}`)
+  }
+
+  /**
+   * Queue an update to a published tag.
+   *
+   * Returns as soon as the request is written. The relay does not do the work —
+   * a host-side agent pulls the image and recreates the container, so expect the
+   * relay to go away shortly after this resolves, and poll getVersion() to see
+   * what came back.
+   */
+  async updateRelay(tag: string, confirm: string): Promise<UpdateRelayResult> {
+    return this.request('/api/admin/update', {
+      method: 'POST',
+      body: JSON.stringify({ tag, confirm }),
     })
   }
 
@@ -404,10 +508,102 @@ export interface RestartRelayResult {
   restart_in_ms: number
 }
 
+/** One past compaction, as recorded at the startup that ran it. */
+export interface CompactionEntry {
+  at: number
+  /** `ok`, `refused` (nothing was touched) or `failed` (the original was restored). */
+  status: string
+  before_bytes: number
+  after_bytes: number
+  duration_ms: number
+  requested_by: string | null
+  detail: string | null
+}
+
+export interface CompactionStatus {
+  db_file_bytes: number
+  /** Bytes in pages actually in use. Null if the database could not be measured. */
+  live_bytes: number | null
+  /** Free-list slack: what a compaction hands back to the filesystem. */
+  reclaimable_bytes: number | null
+  free_disk_bytes: number | null
+  required_free_bytes: number
+  can_compact: boolean
+  /** Why not, when can_compact is false. Show this rather than inventing one. */
+  blocked_reason: string | null
+  /** A compaction is already staged for the next start. */
+  pending: boolean
+  measured_at: number
+  measure_error: string | null
+  /** Newest last. */
+  history: CompactionEntry[]
+}
+
+export interface VersionInfo {
+  package_version: string
+  /** Short commit, `-dirty` if built from an uncommitted tree, or `unknown`. */
+  git_sha: string
+  build_time: string
+  /** Null when compose did not pass RELAY_IMAGE_TAG — unknown, not "latest". */
+  image_tag: string | null
+}
+
+export interface UpdateRequestInfo {
+  requested_tag: string
+  requested_by: string
+  requested_at: number
+  nonce: string
+}
+
+export interface UpdateResultInfo {
+  /** `ok`, `rolled-back`, `rejected` or `failed`. */
+  status: string
+  requested_tag: string | null
+  previous_tag: string | null
+  finished_at: number
+  nonce: string | null
+  detail: string | null
+  /** Tail of the agent's log, so a failure is readable without SSH. */
+  log: string | null
+}
+
+export interface UpdateStatus {
+  running: VersionInfo
+  image_repository: string
+  /** Published tags, newest first. */
+  available_tags: string[]
+  /** Set when the registry could not be reached — distinct from "none published". */
+  tags_error: string | null
+  tags_fetched_at: number
+  /** Whether the running tag is one the registry publishes. False = local build. */
+  running_is_published: boolean
+  /** Whether the host agent has checked in recently enough to act. */
+  agent_live: boolean
+  agent_last_seen: number | null
+  pending: UpdateRequestInfo | null
+  last_result: UpdateResultInfo | null
+  can_update: boolean
+  blocked_reason: string | null
+}
+
+export interface UpdateRelayResult {
+  message: string
+  requested_tag: string
+  nonce: string
+}
+
+export interface CompactResult {
+  message: string
+  restart_in_ms: number
+  expected_reclaim_bytes: number | null
+}
+
 export interface AdminPubkeyEntry {
   hex: string
   npub: string
   current_session: boolean
+  /** The identity that ran setup — who this relay belongs to. Sorted first. */
+  owner: boolean
 }
 
 export interface BulkDeleteResponse {
@@ -491,6 +687,8 @@ export interface StorageSettings {
   prune_interval_minutes: number
   prune_kinds: number[]
   total_pruned: number
+  /** Events an operator deleted by hand since process start. */
+  admin_deleted_total: number
   runs: number
   last_run_unix: number
   /** Retention seconds per kind currently in force. */
@@ -528,6 +726,11 @@ export interface StorageStats {
   kinds: StorageKindStat[]
   /** Busiest gift-wrap recipients in the sample. */
   top_recipients: RecipientStat[]
+  /**
+   * Heaviest pubkeys across every kind. Mixed attribution — read
+   * `attributed_by` per row rather than assuming these are all senders.
+   */
+  top_authors: StorageAuthorStat[]
   newest_event_unix: number
   oldest_sampled_unix: number
   scope_count: number
@@ -558,6 +761,152 @@ export interface ExactCountEnvelope {
 export interface RecipientStat {
   pubkey: string
   count: number
+}
+
+/**
+ * Whether a row's bytes were charged to the key that signed the events, or to
+ * the key they were addressed to.
+ *
+ * Gift wraps (1059) are signed by a throwaway key per wrap, so only the `p` tag
+ * identifies anyone. Never render these two the same way: a recipient row shows
+ * who is being sent data, not who is sending it.
+ */
+export type Attribution = 'author' | 'recipient'
+
+/** One pubkey's share of the storage sample. */
+export interface StorageAuthorStat {
+  pubkey: string
+  /** Empty when the pubkey is unparseable — p tags are attacker-controlled. */
+  npub: string
+  count: number
+  sampled_bytes: number
+  attributed_by: Attribution
+  /** Live at request time, not as of the sample. */
+  blacklisted: boolean
+}
+
+/** The pubkeys behind a single kind. */
+export interface StorageKindAuthors {
+  kind: number
+  attributed_by: Attribution
+  /** Events of this kind in the sample, for computing each row's share. */
+  kind_count: number
+  kind_sampled_bytes: number
+  authors: StorageAuthorStat[]
+  computed_at: number
+}
+
+/** One pubkey admitted through the Web-of-Trust tier. */
+export interface WotAdmittedEntry {
+  hex: string
+  npub: string
+  hops: number
+}
+
+export interface AccessSources {
+  manual: number
+  follow_derived: number
+  blacklisted: number
+  wot_enabled: boolean
+  /** Accounts the follow graph admits; 0 until it has been built. */
+  wot_admitted: number
+  wot_max_hops: number
+  /** No tier restricts anything — an open relay. */
+  open_relay: boolean
+  /** What each tier may publish per minute, derived from the base budget. */
+  budget_ladder: BudgetRung[]
+}
+
+export interface BudgetRung {
+  tier: string
+  label: string
+  /** Share of the base per-pubkey budget. */
+  percent: number
+  events_per_minute: number
+}
+
+export interface AccessCheck {
+  hex: string
+  npub: string
+  admitted: boolean
+  tier: 'blacklist' | 'manual' | 'follow_sync' | 'web_of_trust' | 'open_relay' | 'none'
+  /** Hops from the nearest root, when the graph could place them. */
+  hops: number | null
+  explanation: string
+}
+
+export interface PruneTarget {
+  pubkey: string
+  /** Must match how the row was attributed — gift wraps only match by p tag. */
+  attributed_by: Attribution
+}
+
+export interface PruneRequest {
+  /** One or more pubkeys cleared in a single action. */
+  targets: PruneTarget[]
+  kinds: number[]
+  /** Unix seconds. Omit for open-ended. */
+  since?: number
+  until?: number
+  /** Count only. Always preview before deleting. */
+  dry_run?: boolean
+  /** Required for the destructive call. */
+  confirm?: string
+}
+
+export interface PruneResult {
+  matched: number
+  deleted: number
+  dry_run: boolean
+  /** Per-pubkey outcome, so a partial failure is visible. */
+  per_target: { pubkey: string; matched: number; error?: string }[]
+}
+
+/** The `relay.wot` block as configured on disk. */
+export interface WotConfigured {
+  enabled: boolean
+  /** Compute from this relay's own follow graph rather than an oracle. */
+  local: boolean
+  oracle_url: string
+  fallback_oracle_url: string
+  max_hops: number
+  /** Hex pubkeys. Empty means "track the reference accounts". */
+  roots: string[]
+}
+
+export type WotSettingsRequest = WotConfigured
+
+export interface WotStatus {
+  enabled: boolean
+  /** Plain-language verdict, e.g. "admitting" or "oracle unreachable". */
+  status: string
+  oracle_url: string
+  /** Result of a live probe; null when the tier is off. */
+  oracle_reachable: boolean | null
+  oracle_error: string | null
+  degraded: boolean
+  /** Running on the locally built follow graph. */
+  local: boolean
+  /** Accounts whose follow list the local graph knows. */
+  graph_accounts: number
+  graph_edges: number
+  /** Deepest hop answerable with confidence; below max_hops when truncated. */
+  graph_complete_to_hop: number
+  /** The contact-list budget ran out, so the outermost hop is a sample. */
+  graph_truncated: boolean
+  /** How many accounts the graph would admit — not just those seen so far. */
+  would_admit_total: number
+  max_hops: number
+  root_count: number
+  /**
+   * Keys resolved and admitted so far — not everyone the graph would admit,
+   * only those who have actually connected.
+   */
+  admitted: WotAdmittedEntry[]
+  /** What is saved on disk, which after an edit is ahead of what is running. */
+  configured: WotConfigured
+  /** Saved settings differ from the running tier; a restart would change it. */
+  restart_required: boolean
 }
 
 export interface StorageStatsEnvelope {

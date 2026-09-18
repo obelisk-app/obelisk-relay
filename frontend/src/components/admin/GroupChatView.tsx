@@ -1,5 +1,6 @@
 import { Fragment } from 'preact'
 import type { EventInfo } from '../../services/AdminApiClient'
+import { getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
 
 /**
  * Chat-shaped rendering of a group's events for moderation.
@@ -67,6 +68,9 @@ interface Props {
   onToggle: (id: string, index: number, shiftKey: boolean) => void
   onFilterAuthor: (pubkey: string) => void
   activeAuthor: string | null
+  /** Author profiles by hex, so messages show people rather than key prefixes. */
+  profiles?: Map<string, NostrProfile>
+  onOpenProfile?: (pubkey: string) => void
 }
 
 export const GroupChatView = ({
@@ -75,6 +79,8 @@ export const GroupChatView = ({
   onToggle,
   onFilterAuthor,
   activeAuthor,
+  profiles,
+  onOpenProfile,
 }: Props) => {
   // Oldest at the top, newest at the bottom — how a conversation reads.
   const ordered = [...events].sort((a, b) => a.created_at - b.created_at)
@@ -100,7 +106,7 @@ export const GroupChatView = ({
         const row = (children: preact.ComponentChildren) => (
           <div
             class="group flex items-start gap-2 px-2 rounded"
-            style={{ background: isSelected ? 'rgba(180,249,83,0.07)' : undefined }}
+            style={{ background: isSelected ? 'rgba(var(--color-accent-rgb), 0.07)' : undefined }}
           >
             <input
               type="checkbox"
@@ -134,6 +140,37 @@ export const GroupChatView = ({
                   <div class={sameAuthorRun ? '' : 'mt-2'}>
                     {!sameAuthorRun && (
                       <div class="flex items-baseline gap-2 flex-wrap">
+                        {/* Name filters the log; the avatar opens the profile.
+                            Two different questions about the same person, so
+                            two affordances rather than one overloaded click. */}
+                        {onOpenProfile && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenProfile(ev.pubkey)}
+                            title="Show profile"
+                            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', lineHeight: 0 }}
+                          >
+                            {profiles?.get(ev.pubkey)?.picture ? (
+                              <img
+                                src={profiles.get(ev.pubkey)!.picture}
+                                alt=""
+                                class="w-5 h-5 rounded-full object-cover"
+                                style={{ border: '1px solid var(--color-border)' }}
+                                onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                              />
+                            ) : (
+                              <span
+                                class="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold"
+                                style={{
+                                  background: `hsl(${authorHue(ev.pubkey)}, 45%, 25%)`,
+                                  color: `hsl(${authorHue(ev.pubkey)}, 65%, 78%)`,
+                                }}
+                              >
+                                {ev.pubkey.slice(0, 2).toUpperCase()}
+                              </span>
+                            )}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => onFilterAuthor(ev.pubkey)}
@@ -148,7 +185,10 @@ export const GroupChatView = ({
                             textDecoration: activeAuthor === ev.pubkey ? 'underline' : undefined,
                           }}
                         >
-                          {short(ev.pubkey, 10)}
+                          {(() => {
+                            const p = profiles?.get(ev.pubkey)
+                            return p ? getDisplayName(p, ev.pubkey) : short(ev.pubkey, 10)
+                          })()}
                         </button>
                         <span class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
                           {timeOf(ev.created_at)}

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'preact/hooks'
+import { useState, useEffect, useRef } from 'preact/hooks'
 import { adminApi, type GroupInfo } from '../../services/AdminApiClient'
 import { GroupEventBrowser } from './GroupEventBrowser'
 import { SearchIcon } from './SearchIcon'
@@ -24,9 +24,9 @@ const badge = (text: string, active = false) => (
     class="px-2 py-0.5 text-xs font-medium"
     style={{
       borderRadius: '999px',
-      background: active ? 'rgba(180,249,83,0.12)' : 'rgba(255,255,255,0.06)',
-      color: active ? '#b4f953' : 'var(--color-text-secondary)',
-      border: active ? '1px solid rgba(180,249,83,0.20)' : '1px solid var(--color-border)',
+      background: active ? 'rgba(var(--color-accent-rgb), 0.12)' : 'rgba(255,255,255,0.06)',
+      color: active ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+      border: active ? '1px solid rgba(var(--color-accent-rgb), 0.20)' : '1px solid var(--color-border)',
     }}
   >
     {text}
@@ -47,7 +47,28 @@ export const GroupsOverview = () => {
   // activity would be better still, but that needs a per-group event count and
   // those cost a full index walk each -- deliberately not done here.
   const [sortBy, setSortBy] = useState<'members' | 'name'>('members')
+  const detailPanel = useRef<HTMLElement | null>(null)
   const [browserGroup, setBrowserGroup] = useState<GroupInfo | null>(null)
+
+  /**
+   * Select a group and make sure its detail panel is actually on screen.
+   *
+   * Below the `xl` breakpoint the grid is a single column, so the panel sits
+   * under the whole table — clicking a row near the bottom of a long list
+   * updated a panel hundreds of pixels further down and looked like nothing
+   * happened. `block: 'nearest'` leaves the wide two-column layout alone, where
+   * the panel is already pinned beside the list.
+   */
+  const selectGroup = (group: GroupInfo) => {
+    setSelectedGroup(group)
+    const panel = detailPanel.current
+    if (!panel) return
+    const box = panel.getBoundingClientRect()
+    const offScreen = box.top >= window.innerHeight || box.bottom <= 0
+    if (offScreen) {
+      panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -125,7 +146,7 @@ export const GroupsOverview = () => {
       </div>
 
       {toast && (
-        <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(180,249,83,0.08)', color: '#b4f953', borderColor: 'rgba(180,249,83,0.2)' }}>
+        <div class="mb-4 p-3 rounded-lg text-sm border" style={{ background: 'rgba(var(--color-accent-rgb), 0.08)', color: 'var(--color-accent)', borderColor: 'rgba(var(--color-accent-rgb), 0.2)' }}>
           {toast}
         </div>
       )}
@@ -138,7 +159,7 @@ export const GroupsOverview = () => {
           ['Broadcast', broadcastGroups],
         ].map(([label, value]) => (
           <div key={label} class="lc-card p-4">
-            <div class="text-2xl font-bold" style={{ color: label === 'Groups' ? '#b4f953' : 'var(--color-text-primary)' }}>{value}</div>
+            <div class="text-2xl font-bold" style={{ color: label === 'Groups' ? 'var(--color-accent)' : 'var(--color-text-primary)' }}>{value}</div>
             <div class="text-xs mt-1" style={{ color: 'var(--color-text-secondary)' }}>{label}</div>
           </div>
         ))}
@@ -193,10 +214,10 @@ export const GroupsOverview = () => {
                     return (
                       <tr
                         key={group.id}
-                        onClick={() => setSelectedGroup(group)}
+                        onClick={() => selectGroup(group)}
                         style={{
                           borderTop: '1px solid var(--color-border)',
-                          background: selected ? 'rgba(180,249,83,0.045)' : 'transparent',
+                          background: selected ? 'rgba(var(--color-accent-rgb), 0.045)' : 'transparent',
                         }}
                         class="hover:bg-white/[0.03] transition-colors cursor-pointer"
                       >
@@ -205,7 +226,7 @@ export const GroupsOverview = () => {
                             {group.picture ? (
                               <img src={group.picture} alt="" class="w-9 h-9 object-cover flex-shrink-0" style={{ borderRadius: '8px', border: '1px solid var(--color-border)' }} />
                             ) : (
-                              <div class="w-9 h-9 flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ borderRadius: '8px', background: 'rgba(180,249,83,0.10)', color: '#b4f953' }}>
+                              <div class="w-9 h-9 flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ borderRadius: '8px', background: 'rgba(var(--color-accent-rgb), 0.10)', color: 'var(--color-accent)' }}>
                                 {(group.name || group.id).slice(0, 2).toUpperCase()}
                               </div>
                             )}
@@ -237,7 +258,7 @@ export const GroupsOverview = () => {
                             <button
                               onClick={(e) => { e.stopPropagation(); setBrowserGroup(group) }}
                               class="text-sm transition-colors opacity-80 hover:opacity-100"
-                              style={{ color: '#b4f953' }}
+                              style={{ color: 'var(--color-accent)' }}
                             >
                               Open
                             </button>
@@ -275,7 +296,7 @@ export const GroupsOverview = () => {
             </div>
           </div>
 
-          <aside class="lc-card p-5 xl:sticky xl:top-6">
+          <aside ref={detailPanel} class="lc-card p-5 admin-detail-panel">
             {selectedGroup ? (
               <div>
                 {selectedGroup.banner && (
@@ -320,7 +341,7 @@ export const GroupsOverview = () => {
                   {selectedGroup.picture && (
                     <div>
                       <div class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Picture</div>
-                      <a href={selectedGroup.picture} target="_blank" rel="noopener noreferrer" class="mt-1 block font-mono break-all hover:underline" style={{ color: '#b4f953' }}>
+                      <a href={selectedGroup.picture} target="_blank" rel="noopener noreferrer" class="mt-1 block font-mono break-all hover:underline" style={{ color: 'var(--color-accent)' }}>
                         {selectedGroup.picture}
                       </a>
                     </div>

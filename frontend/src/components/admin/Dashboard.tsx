@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks'
 import {
   adminApi,
+  type AccessSources,
   type PublicRelayInfo,
   type StorageSettings,
   type StorageStats,
@@ -31,6 +32,56 @@ const formatUptime = (seconds: number): string => {
 }
 
 const formatNumber = (n: number) => n.toLocaleString()
+
+/**
+ * Who can actually connect, in one sentence.
+ *
+ * Every tier that admits has to appear, or the sentence is false. The web of
+ * trust admits by reachability rather than by listing keys, so it contributes a
+ * number that lives nowhere in the allowlist — the reason the old copy claimed
+ * 234 when the real answer was closer to 140,000.
+ *
+ * `wot_admitted` is 0 until the follow graph has been built, which is a
+ * genuinely different state from "trust admits nobody": the tier is armed but
+ * cannot answer yet, so it is called out rather than silently counted as zero.
+ */
+const accessSummary = (access: AccessSources | null, whitelistedCount: number): string => {
+  // Falls back to the old, narrower sentence only until the tiers have loaded.
+  if (!access) {
+    return whitelistedCount > 0
+      ? `${formatNumber(whitelistedCount)} pubkeys on the allowlist.`
+      : 'No allowlist, so any pubkey may connect and store events here.'
+  }
+
+  if (access.open_relay) {
+    return 'Open relay: any pubkey may connect and store events here.'
+  }
+
+  const listed = access.manual + access.follow_derived
+  const parts: string[] = []
+
+  if (listed > 0) {
+    const how = access.follow_derived > 0
+      ? `${formatNumber(access.manual)} added by hand, ${formatNumber(access.follow_derived)} from follow sync`
+      : 'added by hand'
+    parts.push(`${formatNumber(listed)} on the allowlist (${how})`)
+  }
+
+  if (access.wot_enabled) {
+    parts.push(
+      access.wot_admitted > 0
+        ? `about ${formatNumber(access.wot_admitted)} more within ${access.wot_max_hops} hops of the web of trust`
+        : `the web of trust is on, but its follow graph is not built yet, so it is admitting nobody right now`
+    )
+  }
+
+  const who = parts.length > 0 ? parts.join(', plus ') : 'nobody'
+  const blocked = access.blacklisted > 0
+    ? ` ${formatNumber(access.blacklisted)} blocked outright, which overrides every tier.`
+    : ''
+
+  return `${who[0].toUpperCase()}${who.slice(1)} may connect. Everyone else is refused.${blocked}`
+}
 
 const formatBytes = (bytes: number) => {
   if (!bytes) return '0 B'
@@ -75,6 +126,9 @@ export const Dashboard = () => {
   const [relayInfo, setRelayInfo] = useState<PublicRelayInfo | null>(null)
   const [storage, setStorage] = useState<StorageSettings | null>(null)
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null)
+  // Admission is several tiers, not one list. Without this the Access card can
+  // only see the explicit allowlist and reports it as the whole rule.
+  const [access, setAccess] = useState<AccessSources | null>(null)
   const [iconBroken, setIconBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -92,6 +146,7 @@ export const Dashboard = () => {
     adminApi.getRelayInfo().then(setRelayInfo).catch(() => undefined)
     adminApi.getStorageSettings().then(setStorage).catch(() => undefined)
     adminApi.getStorageStats().then(r => setStorageStats(r.stats)).catch(() => undefined)
+    adminApi.getAccessSources().then(setAccess).catch(() => undefined)
     return () => clearInterval(interval)
   }, [])
 
@@ -202,9 +257,11 @@ export const Dashboard = () => {
                   <> · {formatNumber(storage.total_pruned)} events deleted since start</>
                 )}
                 {/* LMDB reuses freed pages internally and never returns them,
-                    so a file that stays large after a big delete is expected
-                    and needs an export/import rebuild, not more pruning. */}
-                . Deleting events frees space inside the file, not on the disk.
+                    so a file that stays large after a big delete is expected.
+                    Reclaiming it is now a button on the Storage screen rather
+                    than an export/import rebuild. */}
+                . Deleting events frees space inside the file; Storage → Reclaim
+                disk space hands it back to the filesystem.
               </p>
             </div>
             <span class="admin-status-badge">
@@ -215,14 +272,19 @@ export const Dashboard = () => {
           <div class="admin-status-item">
             <div>
               <strong>Access</strong>
-              <p>
-                {stats.whitelisted_count > 0
-                  ? `${formatNumber(stats.whitelisted_count)} pubkeys may connect. Everyone else is refused.`
-                  : 'No allowlist, so any pubkey may connect and store events here.'}
-              </p>
+              {/* Admission is a ladder: an explicit allowlist, keys pulled from
+                  follow sync, and the web of trust. Reporting only the first
+                  understated this relay by two orders of magnitude -- 234
+                  listed keys next to ~140,000 admitted by trust -- and read as
+                  "everyone else is refused", which was simply untrue. */}
+              <p>{accessSummary(access, stats.whitelisted_count)}</p>
             </div>
-            <span class={`admin-status-badge ${stats.whitelisted_count > 0 ? 'admin-status-badge-ok' : ''}`}>
-              {stats.whitelisted_count > 0 ? 'Restricted' : 'Open relay'}
+            <span class={`admin-status-badge ${access?.open_relay === false || stats.whitelisted_count > 0 ? 'admin-status-badge-ok' : ''}`}>
+              {access
+                ? access.open_relay
+                  ? 'Open relay'
+                  : access.wot_enabled ? 'Allowlist + trust' : 'Allowlist'
+                : stats.whitelisted_count > 0 ? 'Restricted' : 'Open relay'}
             </span>
           </div>
         </div>
@@ -239,7 +301,7 @@ export const Dashboard = () => {
               <OverviewIcon class="w-4 h-4" />
               <span class="text-xs">Active connections</span>
             </div>
-            <div class="text-3xl font-bold" style={{ color: '#b4f953' }}>
+            <div class="text-3xl font-bold" style={{ color: 'var(--color-accent)' }}>
               {formatNumber(stats.active_connections)}
             </div>
           </div>

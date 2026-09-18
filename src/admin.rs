@@ -26,11 +26,20 @@ const WHITELIST_RUNTIME_FILE: &str = "whitelist_runtime.json";
 const WHITELIST_FOLLOWS_FILE: &str = "whitelist_follows.json";
 const BLACKLIST_FILE: &str = "blacklist.json";
 const SETUP_OWNER_FILE: &str = "setup_owner_pubkey.json";
+
+/// The relay's owner — the identity that ran setup.
+///
+/// Distinct from [`SETUP_OWNER_FILE`], which is a transient marker cleared the
+/// moment setup completes so the wizard cannot be replayed. This one is
+/// permanent: it records who the relay belongs to. Without it every admin looks
+/// alike, and the person who actually hosts the box is indistinguishable from
+/// someone they granted access to.
+const RELAY_OWNER_FILE: &str = "relay_owner_pubkey.json";
 const BACKUP_DIR: &str = "backups";
 const BACKUP_PREFIX: &str = "config-reset-";
 const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
-const BACKUP_FILE_NAMES: [&str; 7] = [
+const BACKUP_FILE_NAMES: [&str; 8] = [
     SETTINGS_LOCAL_FILE,
     REFERENCE_ACCOUNTS_FILE,
     WHITELIST_RUNTIME_FILE,
@@ -38,6 +47,7 @@ const BACKUP_FILE_NAMES: [&str; 7] = [
     ADMIN_RUNTIME_FILE,
     BLACKLIST_FILE,
     SETUP_OWNER_FILE,
+    RELAY_OWNER_FILE,
 ];
 
 #[derive(Clone)]
@@ -177,6 +187,9 @@ struct StorageSettingsResponse {
     prune_interval_minutes: u32,
     prune_kinds: Vec<u16>,
     total_pruned: u64,
+    /// Events an operator deleted by hand since process start. Distinct from
+    /// `total_pruned`, which is the automatic sweep only.
+    admin_deleted_total: u64,
     runs: u64,
     last_run_unix: i64,
     /// Per-kind retention currently in force, seconds. None when pruning is off.
@@ -219,6 +232,35 @@ struct StorageKindStat {
 struct RecipientStat {
     pubkey: String,
     count: usize,
+}
+
+/// One pubkey's share of the sample.
+#[derive(Serialize, Clone)]
+struct StorageAuthorStat {
+    pubkey: String,
+    npub: String,
+    count: usize,
+    sampled_bytes: u64,
+    /// `"author"` or `"recipient"`. Gift wraps are signed by throwaway keys, so
+    /// they are charged to the `p` tag instead; the UI must say which, or the
+    /// recipient of a flood reads as its sender.
+    attributed_by: &'static str,
+    /// Whether this pubkey is currently blocked, so the row can offer the
+    /// right action without a second request.
+    blacklisted: bool,
+}
+
+/// The pubkeys behind a single kind.
+#[derive(Serialize, Clone)]
+struct StorageKindAuthorsResponse {
+    kind: u16,
+    attributed_by: &'static str,
+    /// Events of this kind in the sample, so a row's share is computable.
+    kind_count: usize,
+    kind_sampled_bytes: u64,
+    authors: Vec<StorageAuthorStat>,
+    /// Unix seconds the underlying sample was taken.
+    computed_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +385,15 @@ struct StorageStatsResponse {
     /// Busiest gift-wrap recipients in the sample. Gift wraps have no usable
     /// author, so this is the only per-user view of that traffic.
     top_recipients: Vec<RecipientStat>,
+    /// Heaviest pubkeys across all kinds — who the relay is storing data for.
+    /// The kinds table says what is filling the disk; this says whose it is.
+    top_authors: Vec<StorageAuthorStat>,
+    /// Per-kind pubkey breakdown, kept in the cache but served by
+    /// `/storage/kinds/{kind}/authors` rather than inlined: it is up to 25 rows
+    /// per kind across dozens of kinds, which would dwarf a payload the Storage
+    /// screen polls on a timer.
+    #[serde(skip)]
+    kind_authors: Vec<crate::groups::StorageKindAuthors>,
     newest_event_unix: u64,
     /// Oldest timestamp reached by the sample.
     oldest_sampled_unix: u64,
@@ -400,6 +451,9 @@ struct AdminPubkeyEntry {
     hex: String,
     npub: String,
     current_session: bool,
+    /// The identity that ran setup — the person who hosts this relay. Shown
+    /// separately from the admins they granted access to.
+    owner: bool,
 }
 
 #[derive(Deserialize)]
@@ -586,7 +640,7 @@ struct MemberInfo {
 
 // --- Helper: generate random hex ---
 
-fn random_hex(bytes: usize) -> String {
+pub(crate) fn random_hex(bytes: usize) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let random_bytes: Vec<u8> = (0..bytes).map(|_| rng.gen()).collect();
@@ -1161,6 +1215,7 @@ fn apply_runtime_config_from_files(
     state.reference_accounts.replace_all(read_pubkey_json_file(
         &config_dir.join(REFERENCE_ACCOUNTS_FILE),
     ));
+    refresh_wot_roots(state);
     state
         .whitelist
         .blacklist()
@@ -1320,6 +1375,7 @@ fn storage_settings_response(
         policies_secs: state.pruner_config.as_ref().map(|c| c.policies_as_secs()),
         deleted_by_kind,
         total_pruned,
+        admin_deleted_total: ADMIN_DELETED_TOTAL.load(Ordering::Relaxed),
         runs,
         last_run_unix,
         restart_required,
@@ -1449,6 +1505,21 @@ fn persist_setup_owner_pubkey(
     std::fs::write(config_dir.join(SETUP_OWNER_FILE), json)
 }
 
+/// Record the relay owner. Written once at setup and never cleared by the
+/// config reset, which keeps ownership across a reconfigure.
+fn persist_relay_owner(config_dir: &StdPath, owner: PublicKey) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let json =
+        serde_json::to_string_pretty(&owner.to_hex()).map_err(|e| std::io::Error::other(e))?;
+    std::fs::write(config_dir.join(RELAY_OWNER_FILE), json)
+}
+
+pub fn load_relay_owner(config_dir: &StdPath) -> Option<PublicKey> {
+    let contents = std::fs::read_to_string(config_dir.join(RELAY_OWNER_FILE)).ok()?;
+    let hex: String = serde_json::from_str(&contents).ok()?;
+    PublicKey::from_hex(&hex).ok()
+}
+
 fn load_setup_owner_pubkey(config_dir: &StdPath) -> Option<PublicKey> {
     let path = config_dir.join(SETUP_OWNER_FILE);
     let contents = std::fs::read_to_string(path).ok()?;
@@ -1560,6 +1631,8 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/auth", post(handle_auth))
         .route("/session", get(handle_session_check))
         .route("/whitelist", get(handle_whitelist_list))
+        .route("/whitelist/sources", get(handle_access_sources))
+        .route("/whitelist/check", get(handle_access_check))
         .route("/whitelist", post(handle_whitelist_add))
         .route("/whitelist/{hex}", delete(handle_whitelist_remove))
         .route("/retention", get(handle_retention_status))
@@ -1569,6 +1642,10 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         .route("/storage/stats", get(handle_storage_stats))
         .route("/storage/exact-count", get(handle_exact_kind_count))
         .route("/storage/history", get(handle_storage_history))
+        .route(
+            "/storage/kinds/{kind}/authors",
+            get(handle_storage_kind_authors),
+        )
         .route(
             "/reference-accounts",
             get(handle_reference_accounts_list).post(handle_reference_accounts_add),
@@ -1586,6 +1663,18 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
             get(handle_blacklist_list).post(handle_blacklist_add),
         )
         .route("/blacklist/{hex}", delete(handle_blacklist_remove))
+        .route(
+            "/wot",
+            get(handle_wot_status).post(handle_wot_settings_update),
+        )
+        .route("/storage/prune", post(handle_storage_prune))
+        .route("/storage/compaction", get(handle_compaction_status))
+        .route("/storage/compact", post(handle_compact_database))
+        .route("/version", get(handle_version))
+        .route(
+            "/update",
+            get(handle_update_status).post(handle_update_request),
+        )
         .route("/groups/{id}/events", get(handle_group_events))
         .route("/events/{event_id}", delete(handle_event_delete))
         .route("/events/delete", post(handle_events_bulk_delete))
@@ -1728,6 +1817,43 @@ async fn handle_setup(
         {
             warn!("Failed to persist owner reference account: {}", e);
         }
+
+        refresh_wot_roots(&state);
+
+        // Sync the owner's follows immediately rather than waiting for someone
+        // to find the button. Making them a reference account only declares
+        // where trust starts; until the sync runs, nothing is derived from it
+        // and a freshly set-up relay admits nobody but the owner -- which reads
+        // as the relay being broken on the very first visit.
+        let whitelist = state.whitelist.clone();
+        let reference_accounts = state.reference_accounts.clone();
+        let config_dir = state.config_dir.clone();
+        tokio::spawn(async move {
+            let roots = reference_accounts.list();
+            if roots.is_empty() {
+                return;
+            }
+            info!("Setup complete: syncing the owner's follows");
+            match follow_sync::sync_follows(&roots).await {
+                Ok(follows) => {
+                    let count = follows.len();
+                    whitelist.set_follow_derived(follows.clone());
+                    if let Err(e) =
+                        follow_sync::persist_follow_derived(&follows, StdPath::new(&config_dir))
+                    {
+                        warn!("Failed to persist follow-derived whitelist: {}", e);
+                    }
+                    info!("Setup follow sync complete: {count} pubkeys whitelisted");
+                }
+                Err(e) => warn!("Setup follow sync failed: {}", e),
+            }
+        });
+    }
+
+    // Ownership is recorded before the transient setup marker is cleared, so
+    // the two cannot both be lost.
+    if let Err(e) = persist_relay_owner(StdPath::new(&state.config_dir), event.pubkey) {
+        warn!("Failed to persist relay owner: {}", e);
     }
 
     let token = create_session(&admin_state, event.pubkey);
@@ -1817,6 +1943,7 @@ async fn handle_config_reset(
     })?;
 
     state.reference_accounts.replace_all(Vec::new());
+    refresh_wot_roots(&state);
     state.reference_accounts.persist(config_dir).map_err(|e| {
         warn!("Failed to persist reset reference accounts: {}", e);
         error_response(
@@ -2006,7 +2133,22 @@ async fn handle_admin_pubkeys_list(
     let admin_state = get_admin_state(&state);
     let current_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
 
-    let entries: Vec<AdminPubkeyEntry> = admin_state
+    let config_dir = StdPath::new(&state.config_dir);
+    let mut owner = load_relay_owner(config_dir);
+
+    // Relays set up before ownership was recorded have no owner file. With
+    // exactly one admin there is no ambiguity about who that is, so adopt them
+    // and write it down. With several, leave it unset rather than guess.
+    if owner.is_none() {
+        let admins = admin_state.admin_pubkeys.read().clone();
+        if let [only] = admins.as_slice() {
+            if persist_relay_owner(config_dir, *only).is_ok() {
+                owner = Some(*only);
+            }
+        }
+    }
+
+    let mut entries: Vec<AdminPubkeyEntry> = admin_state
         .admin_pubkeys
         .read()
         .iter()
@@ -2014,8 +2156,12 @@ async fn handle_admin_pubkeys_list(
             hex: pk.to_hex(),
             npub: pk.to_bech32().unwrap_or_default(),
             current_session: *pk == current_pubkey,
+            owner: owner == Some(*pk),
         })
         .collect();
+
+    // Owner first; the rest keep their existing order.
+    entries.sort_by_key(|e| !e.owner);
 
     Ok(Json(entries))
 }
@@ -2048,6 +2194,8 @@ async fn handle_admin_pubkeys_add(
         hex: pk.to_hex(),
         npub: pk.to_bech32().unwrap_or_default(),
         current_session: false,
+        // A newly granted admin is never the owner; ownership is set at setup.
+        owner: false,
     }))
 }
 
@@ -2343,6 +2491,517 @@ async fn handle_storage_history(
     }
 
     Ok(Json(history))
+}
+
+/// What a compaction would reclaim, and what earlier ones did.
+///
+/// The measurement runs in a child process. It has to: heed refuses a second
+/// open of a path already open in this process, and LMDB forbids it outright, so
+/// the relay cannot measure the database it is currently serving from. See
+/// `src/bin/lmdb_stat.rs`.
+#[derive(Serialize, Clone)]
+struct CompactionStatusResponse {
+    /// Size of `data.mdb` on disk.
+    db_file_bytes: u64,
+    /// Bytes in pages actually in use, or `None` if the measurement failed.
+    live_bytes: Option<u64>,
+    /// Free-list slack — what a compaction would hand back to the filesystem.
+    reclaimable_bytes: Option<u64>,
+    /// Free space on the filesystem holding the database.
+    free_disk_bytes: Option<u64>,
+    /// Free space a compaction needs before it will start.
+    required_free_bytes: u64,
+    /// Whether a compaction would be allowed to run right now.
+    can_compact: bool,
+    /// Why not, when `can_compact` is false.
+    blocked_reason: Option<String>,
+    /// Whether a compaction is already staged for the next start.
+    pending: bool,
+    measured_at: i64,
+    /// Why the measurement is missing, if it is.
+    measure_error: Option<String>,
+    /// Most recent runs, newest last.
+    history: Vec<crate::compaction::CompactionEntry>,
+}
+
+/// Measuring reads the whole free list; on a multi-GB database that is seconds,
+/// not milliseconds, and the Storage screen polls.
+const COMPACTION_MEASURE_TTL_SECS: i64 = 60;
+
+static COMPACTION_MEASUREMENT: OnceCell<RwLock<Option<CompactionMeasurement>>> = OnceCell::new();
+
+#[derive(Clone)]
+struct CompactionMeasurement {
+    measurement: Option<crate::compaction::Measurement>,
+    free_disk_bytes: Option<u64>,
+    error: Option<String>,
+    measured_at: i64,
+}
+
+/// Where `lmdb_stat` lives. It sits beside the relay binary in the image
+/// (`/app/lmdb_stat`) and in `target/<profile>/` during development, so resolve
+/// it relative to the running executable and fall back to `PATH`.
+fn lmdb_stat_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("lmdb_stat")))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("lmdb_stat"))
+}
+
+#[derive(Deserialize)]
+struct LmdbStatOutput {
+    file_bytes: u64,
+    live_bytes: Option<u64>,
+    reclaimable_bytes: Option<u64>,
+    measured_at: i64,
+    free_disk_bytes: Option<u64>,
+}
+
+async fn measure_database(db_path: &str) -> CompactionMeasurement {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let failed = |error: String| CompactionMeasurement {
+        measurement: None,
+        // Free space is still worth reporting when the database could not be
+        // read — it is half of why a compaction gets refused.
+        free_disk_bytes: crate::compaction::free_disk_bytes(db_path),
+        error: Some(error),
+        measured_at: now,
+    };
+
+    let run = tokio::process::Command::new(lmdb_stat_path())
+        .arg("--db")
+        .arg(db_path)
+        .output();
+
+    // A free-list walk on a large database is seconds; anything beyond this is
+    // a wedged child, and the admin request must not hang on it.
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(60), run).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return failed(format!("could not run lmdb_stat: {e}")),
+        Err(_) => return failed("measuring the database timed out".to_string()),
+    };
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return failed(if detail.is_empty() {
+            "lmdb_stat failed".to_string()
+        } else {
+            detail
+        });
+    }
+
+    match serde_json::from_slice::<LmdbStatOutput>(&output.stdout) {
+        Ok(parsed) => CompactionMeasurement {
+            measurement: Some(crate::compaction::Measurement {
+                file_bytes: parsed.file_bytes,
+                live_bytes: parsed.live_bytes,
+                reclaimable_bytes: parsed.reclaimable_bytes,
+                measured_at: parsed.measured_at,
+            }),
+            free_disk_bytes: parsed.free_disk_bytes,
+            error: None,
+            measured_at: now,
+        },
+        Err(e) => failed(format!("could not read lmdb_stat output: {e}")),
+    }
+}
+
+/// Measure, reusing a recent result unless `refresh` asks for a fresh one.
+async fn cached_measurement(db_path: &str, refresh: bool) -> CompactionMeasurement {
+    let cell = COMPACTION_MEASUREMENT.get_or_init(|| RwLock::new(None));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    if !refresh {
+        if let Some(cached) = cell.read().as_ref() {
+            if now - cached.measured_at < COMPACTION_MEASURE_TTL_SECS {
+                return cached.clone();
+            }
+        }
+    }
+
+    let fresh = measure_database(db_path).await;
+    *cell.write() = Some(fresh.clone());
+    fresh
+}
+
+/// Turn a measurement into the answer to "may I compact now, and why not".
+fn compaction_status(
+    state: &ServerState,
+    measured: CompactionMeasurement,
+) -> CompactionStatusResponse {
+    let pending = crate::compaction::request_pending(&state.config_dir);
+
+    let (db_file_bytes, live_bytes, reclaimable_bytes, required_free_bytes) =
+        match measured.measurement.as_ref() {
+            Some(m) => (
+                m.file_bytes,
+                m.live_bytes,
+                m.reclaimable_bytes,
+                crate::compaction::required_free_bytes(m),
+            ),
+            None => (
+                crate::storage_history::measure_db_bytes(&state.db_path),
+                None,
+                None,
+                0,
+            ),
+        };
+
+    // Ordered so the operator sees the most actionable reason first.
+    let blocked_reason = if pending {
+        Some("A compaction is already staged for the next restart.".to_string())
+    } else if let Some(error) = measured.error.clone() {
+        Some(format!("The database could not be measured: {error}"))
+    } else if measured
+        .free_disk_bytes
+        .is_some_and(|free| free < required_free_bytes)
+    {
+        Some(format!(
+            "Compaction needs {} free to copy the live data, but only {} is available.",
+            human_bytes(required_free_bytes),
+            human_bytes(measured.free_disk_bytes.unwrap_or(0))
+        ))
+    } else if reclaimable_bytes == Some(0) {
+        Some("There is no free-list slack to reclaim.".to_string())
+    } else {
+        None
+    };
+
+    CompactionStatusResponse {
+        db_file_bytes,
+        live_bytes,
+        reclaimable_bytes,
+        free_disk_bytes: measured.free_disk_bytes,
+        required_free_bytes,
+        can_compact: blocked_reason.is_none(),
+        blocked_reason,
+        pending,
+        measured_at: measured.measured_at,
+        measure_error: measured.error,
+        history: crate::compaction::load_log(&state.config_dir).entries,
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[derive(Deserialize)]
+struct CompactionStatusQuery {
+    /// Skip the cached measurement and walk the free list again.
+    refresh: Option<bool>,
+}
+
+async fn handle_compaction_status(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<CompactionStatusQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let measured = cached_measurement(&state.db_path, params.refresh.unwrap_or(false)).await;
+    Ok(Json(compaction_status(&state, measured)))
+}
+
+#[derive(Deserialize)]
+struct CompactRequest {
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct CompactResponse {
+    message: String,
+    restart_in_ms: u64,
+    /// What the measurement said we should get back, so the UI can show a
+    /// target while the relay is down.
+    expected_reclaim_bytes: Option<u64>,
+}
+
+/// Stage a compaction and restart into it.
+///
+/// The relay cannot compact the database it is serving from: the copy is taken
+/// from a snapshot, so every write landing afterwards would be lost when the
+/// copy replaced the original. So this writes a request file and exits, exactly
+/// like `handle_restart_relay`; `compaction::run_pending` does the work at the
+/// next start, before the database is opened.
+async fn handle_compact_database(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<CompactRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    // Case-insensitive, matching `confirmMatches` in the console. The friction
+    // worth having is typing a specific word, not typing it in a specific case;
+    // rejecting `compact` would read as a broken button.
+    if !req.confirm.trim().eq_ignore_ascii_case("COMPACT") {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type COMPACT to confirm",
+        ));
+    }
+
+    // Measure fresh rather than trusting a cached figure: this is the check that
+    // stands between the operator and a restart into a failed compaction.
+    let measured = cached_measurement(&state.db_path, true).await;
+    let status = compaction_status(&state, measured);
+    if !status.can_compact {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            &status
+                .blocked_reason
+                .unwrap_or_else(|| "Compaction is not possible right now".to_string()),
+        ));
+    }
+
+    crate::compaction::stage_request(&state.config_dir, &admin_pubkey.to_hex()).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not stage the compaction: {e}"),
+        )
+    })?;
+
+    info!(
+        "Admin {} requested a database compaction ({} reclaimable)",
+        admin_pubkey,
+        human_bytes(status.reclaimable_bytes.unwrap_or(0))
+    );
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        std::process::exit(0);
+    });
+
+    Ok(Json(CompactResponse {
+        message: "Compaction staged; the relay is restarting to run it".to_string(),
+        restart_in_ms: 750,
+        expected_reclaim_bytes: status.reclaimable_bytes,
+    }))
+}
+
+/// What this build is. Cheap, and polled through a restart by the update card,
+/// so it does nothing but read three constants and an environment variable.
+async fn handle_version(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(crate::version::current()))
+}
+
+#[derive(Serialize)]
+struct UpdateStatusResponse {
+    running: crate::version::VersionInfo,
+    /// The repository updates come from. Fixed — a request names a tag, never a
+    /// registry.
+    image_repository: &'static str,
+    /// Published tags, newest first.
+    available_tags: Vec<String>,
+    /// Why the tag list is empty or stale. "Registry unreachable" and "nothing
+    /// published" must not look the same.
+    tags_error: Option<String>,
+    tags_fetched_at: i64,
+    /// Whether the tag this relay is running is one the registry publishes.
+    ///
+    /// False means a locally built image, which is the state both relays on this
+    /// host were left in. It matters because the console compares the running
+    /// tag against the newest published one: without this the comparison reads
+    /// "different, therefore out of date" and offers an update that is really a
+    /// downgrade to something older than what is installed.
+    running_is_published: bool,
+    /// Whether the host agent has checked in recently enough to act on a
+    /// request. Without it, a request would sit unread and look like a success.
+    agent_live: bool,
+    agent_last_seen: Option<i64>,
+    /// A request already written and not yet consumed.
+    pending: Option<crate::update::UpdateRequest>,
+    last_result: Option<crate::update::UpdateResult>,
+    /// Whether an update can be requested right now.
+    can_update: bool,
+    blocked_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateStatusQuery {
+    /// Re-ask the registry instead of using the cached tag list.
+    refresh: Option<bool>,
+}
+
+fn update_blocked_reason(
+    agent_live: bool,
+    pending: &Option<crate::update::UpdateRequest>,
+    tags: &crate::update::PublishedTags,
+) -> Option<String> {
+    if let Some(request) = pending {
+        return Some(format!(
+            "An update to {} is already queued and has not been picked up yet.",
+            request.requested_tag
+        ));
+    }
+    if !agent_live {
+        // No file path here. The console runs in a browser, and the relay serves
+        // nothing but frontend/dist, so naming a repo file told an operator to
+        // go and find something they had no way to open. The command is given in
+        // full, and the console renders DOC_UPDATING_URL beside it as a link.
+        return Some(
+            "No update agent is running on the host, so an update cannot be carried out. \
+             Run scripts/install-update-agent.sh on the host to install one."
+                .to_string(),
+        );
+    }
+    if tags.tags.is_empty() {
+        return Some(match &tags.error {
+            Some(error) => format!("The list of published versions could not be fetched: {error}"),
+            None => "No versions are published for this relay's image.".to_string(),
+        });
+    }
+    None
+}
+
+async fn handle_update_status(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<UpdateStatusQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let tags = crate::update::published_tags(params.refresh.unwrap_or(false)).await;
+    let agent = crate::update::agent_heartbeat(&state.config_dir);
+    let agent_live = crate::update::agent_is_live(&state.config_dir);
+    let pending = crate::update::pending_request(&state.config_dir);
+    let blocked_reason = update_blocked_reason(agent_live, &pending, &tags);
+
+    let running = crate::version::current();
+    let running_is_published = running
+        .image_tag
+        .as_ref()
+        .is_some_and(|tag| tags.tags.iter().any(|published| published == tag));
+
+    Ok(Json(UpdateStatusResponse {
+        running,
+        image_repository: crate::update::IMAGE_REPOSITORY,
+        available_tags: tags.tags,
+        tags_error: tags.error,
+        tags_fetched_at: tags.fetched_at,
+        running_is_published,
+        agent_live,
+        agent_last_seen: agent.map(|beat| beat.at),
+        pending,
+        last_result: crate::update::last_result(&state.config_dir),
+        can_update: blocked_reason.is_none(),
+        blocked_reason,
+    }))
+}
+
+#[derive(Deserialize)]
+struct UpdateRelayRequest {
+    tag: String,
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct UpdateRelayResponse {
+    message: String,
+    requested_tag: String,
+    /// Identifies this request in the result the agent writes back, so the
+    /// console can tell its own update from a previous one.
+    nonce: String,
+}
+
+/// Ask the host agent to move this relay to another published image.
+///
+/// This does not restart anything. It writes a request; the agent pulls the
+/// image, re-points compose and recreates the container, and rolls back if the
+/// new container does not come up healthy. The relay is not in a position to do
+/// any of that — see `src/update.rs` for why it does not get a Docker socket.
+async fn handle_update_request(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateRelayRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    if !req.confirm.trim().eq_ignore_ascii_case("UPDATE") {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type UPDATE to confirm",
+        ));
+    }
+
+    let tag = req.tag.trim().to_string();
+    if !crate::update::tag_is_well_formed(&tag) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "That is not a usable image tag",
+        ));
+    }
+
+    // Membership in the published list, not a pattern match: the point is that
+    // the operator cannot send the relay to an image that does not exist and
+    // watch it fail to come back.
+    let tags = crate::update::published_tags(false).await;
+    if !tags.tags.iter().any(|published| published == &tag) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "{tag} is not published for {}",
+                crate::update::IMAGE_REPOSITORY
+            ),
+        ));
+    }
+
+    let pending = crate::update::pending_request(&state.config_dir);
+    let agent_live = crate::update::agent_is_live(&state.config_dir);
+    if let Some(reason) = update_blocked_reason(agent_live, &pending, &tags) {
+        return Err(error_response(StatusCode::CONFLICT, &reason));
+    }
+
+    let nonce = crate::update::stage_request(&state.config_dir, &tag, &admin_pubkey.to_hex())
+        .map_err(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not queue the update: {e}"),
+            )
+        })?;
+
+    info!("Admin {} requested an update to {}", admin_pubkey, tag);
+
+    Ok(Json(UpdateRelayResponse {
+        message: format!("Update to {tag} queued"),
+        requested_tag: tag,
+        nonce,
+    }))
 }
 
 async fn handle_storage_settings_update(
@@ -2737,7 +3396,7 @@ async fn handle_storage_stats(
     if fresh && !params.refresh.unwrap_or(false) {
         return Ok(Json(StorageStatsEnvelope {
             computing: STORAGE_STATS_COMPUTING.load(Ordering::Relaxed),
-            stats: snapshot.map(|s| StorageStatsResponse { cached: true, ..s }),
+            stats: snapshot.map(|s| with_live_blacklist(s, &state)),
         }));
     }
 
@@ -2758,12 +3417,100 @@ async fn handle_storage_stats(
 
     Ok(Json(StorageStatsEnvelope {
         computing: true,
-        stats: snapshot.map(|s| StorageStatsResponse { cached: true, ..s }),
+        stats: snapshot.map(|s| with_live_blacklist(s, &state)),
     }))
 }
 
-/// Walk the database and refresh the cached storage snapshot. Slow by nature —
-/// always called from a background task, never inline in a request.
+/// Present one attribution row for the UI: npub for display, and whether the
+/// key is blocked so the row can show the right action.
+///
+/// The pubkey can be unparseable — for gift wraps it comes from a `p` tag,
+/// which is attacker-controlled. Such a row still counts toward storage, so it
+/// is shown with an empty npub rather than dropped.
+fn author_stat(a: &crate::groups::StorageAuthorCount, state: &ServerState) -> StorageAuthorStat {
+    let parsed = PublicKey::from_hex(&a.pubkey).ok();
+    StorageAuthorStat {
+        pubkey: a.pubkey.clone(),
+        npub: parsed
+            .and_then(|pk| pk.to_bech32().ok())
+            .unwrap_or_default(),
+        count: a.count,
+        sampled_bytes: a.sampled_bytes,
+        attributed_by: a.attributed_by.as_str(),
+        blacklisted: parsed.is_some_and(|pk| state.whitelist.blacklist().contains(&pk)),
+    }
+}
+
+/// Re-check the blacklist flags on a cached snapshot.
+///
+/// The sample is cached for minutes, but blocking someone from one of these
+/// tables must change that row immediately — otherwise the button you just
+/// pressed appears to have done nothing until the next scan.
+fn with_live_blacklist(
+    mut response: StorageStatsResponse,
+    state: &ServerState,
+) -> StorageStatsResponse {
+    for row in &mut response.top_authors {
+        row.blacklisted = PublicKey::from_hex(&row.pubkey)
+            .is_ok_and(|pk| state.whitelist.blacklist().contains(&pk));
+    }
+    response.cached = true;
+    response
+}
+
+/// The pubkeys behind one kind, from the cached sample.
+///
+/// Reads the snapshot only — never triggers a scan. A drilldown is a click on a
+/// row of a table that is already on screen, so it must be instant and must
+/// agree with the numbers next to it.
+async fn handle_storage_kind_authors(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(kind): Path<u16>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let snapshot = STORAGE_STATS_CACHE
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .clone();
+
+    let Some(snapshot) = snapshot else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No storage sample yet — refresh the storage stats first",
+        ));
+    };
+
+    let entry = snapshot.kind_authors.iter().find(|k| k.kind == kind);
+    let kind_stat = snapshot.kinds.iter().find(|k| k.kind == kind);
+
+    // A kind absent from the sample is not an error: it simply has no events in
+    // the window that was examined. Say that with an empty list.
+    let (attributed_by, authors) = match entry {
+        Some(e) => (
+            e.attributed_by.as_str(),
+            e.authors.iter().map(|a| author_stat(a, &state)).collect(),
+        ),
+        None => (
+            crate::groups::Attribution::for_kind(kind).as_str(),
+            Vec::new(),
+        ),
+    };
+
+    Ok(Json(StorageKindAuthorsResponse {
+        kind,
+        attributed_by,
+        kind_count: kind_stat.map(|k| k.count).unwrap_or(0),
+        kind_sampled_bytes: kind_stat.map(|k| k.sampled_bytes).unwrap_or(0),
+        authors,
+        computed_at: snapshot.computed_at,
+    }))
+}
+
 async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
     let config_dir = StdPath::new(&state.config_dir);
     // Preview against what is configured on disk, not against what is running:
@@ -2811,6 +3558,12 @@ async fn refresh_storage_stats(state: &Arc<ServerState>) -> Result<(), String> {
                 count: r.count,
             })
             .collect(),
+        top_authors: stats
+            .top_authors
+            .iter()
+            .map(|a| author_stat(a, state))
+            .collect(),
+        kind_authors: stats.kind_authors.clone(),
         newest_event_unix: stats.newest_event_unix,
         oldest_sampled_unix: stats.oldest_sampled_unix,
         scope_count: stats.scope_count,
@@ -3121,6 +3874,9 @@ struct RetentionStatus {
     /// Events deleted per kind since process start.
     deleted_by_kind: Option<std::collections::BTreeMap<u16, u64>>,
     total_pruned: u64,
+    /// Events an operator deleted by hand since process start. Distinct from
+    /// `total_pruned`, which is the automatic sweep only.
+    admin_deleted_total: u64,
     runs: u64,
     last_run_unix: i64,
 }
@@ -3162,6 +3918,7 @@ async fn handle_retention_status(State(state): State<Arc<ServerState>>) -> impl 
         interval_secs,
         prune_kinds,
         total_pruned,
+        admin_deleted_total: ADMIN_DELETED_TOTAL.load(Ordering::Relaxed),
         runs,
         last_run_unix,
     })
@@ -3230,6 +3987,8 @@ async fn handle_reference_accounts_add(
             warn!("Failed to persist reference accounts: {}", e);
         }
 
+        refresh_wot_roots(&state);
+
         // Auto-sync follows in background
         let whitelist = state.whitelist.clone();
         let reference_accounts = state.reference_accounts.clone();
@@ -3295,6 +4054,10 @@ async fn handle_reference_accounts_remove(
         {
             warn!("Failed to persist reference accounts: {}", e);
         }
+
+        // Dropping a root must revoke the admissions it granted, not leave them
+        // cached for the rest of the TTL.
+        refresh_wot_roots(&state);
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -3358,6 +4121,692 @@ async fn handle_reference_accounts_sync(
 }
 
 // --- Blacklist handlers ---
+
+/// A targeted prune: one pubkey, specific kinds, an optional date window.
+///
+/// Blocking a pubkey stops it connecting but reclaims no disk. This is the
+/// other half — removing what is already stored, scoped narrowly enough that
+/// an operator can aim it at a spam flood without touching anything else.
+#[derive(Deserialize)]
+struct PruneTarget {
+    pubkey: String,
+    /// `"author"` or `"recipient"`. Must match how the row was attributed:
+    /// gift wraps can only be matched by their `p` tag. Per target, because a
+    /// multi-select can mix gift-wrap recipients with ordinary authors and
+    /// applying one rule to both would delete the wrong people's data.
+    attributed_by: String,
+}
+
+#[derive(Deserialize)]
+struct PruneRequest {
+    /// One or more pubkeys to clear in a single action.
+    targets: Vec<PruneTarget>,
+    /// Required. Protected NIP-29 kinds are dropped server-side regardless.
+    kinds: Vec<u16>,
+    /// Unix seconds, inclusive bounds. Omit for open-ended.
+    #[serde(default)]
+    since: Option<u64>,
+    #[serde(default)]
+    until: Option<u64>,
+    /// When true, count only. The UI previews before asking to confirm.
+    #[serde(default)]
+    dry_run: bool,
+    /// Typed confirmation, required for the destructive path.
+    #[serde(default)]
+    confirm: String,
+}
+
+#[derive(Serialize)]
+struct PruneResponse {
+    /// Events matched across every target. Equals `deleted` unless this was a
+    /// dry run.
+    matched: u64,
+    deleted: u64,
+    dry_run: bool,
+    /// Per-pubkey breakdown, so a bulk delete reports what it actually did
+    /// rather than one opaque total.
+    per_target: Vec<PruneTargetResult>,
+}
+
+#[derive(Serialize)]
+struct PruneTargetResult {
+    pubkey: String,
+    matched: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn handle_storage_prune(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<PruneRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let Some(owner) = validate_session(&admin_state, &headers) else {
+        return Err(unauthorized());
+    };
+
+    if req.targets.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Select at least one pubkey",
+        ));
+    }
+    if req.targets.len() > MAX_BULK_PUBKEYS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Too many pubkeys in one request; select up to 200 at a time",
+        ));
+    }
+
+    if req.kinds.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Select at least one kind to delete",
+        ));
+    }
+    if let (Some(since), Some(until)) = (req.since, req.until) {
+        if since > until {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "The start of the window must come before its end",
+            ));
+        }
+    }
+    // The preview is free; only the irreversible path needs the phrase.
+    if !req.dry_run && req.confirm.trim() != "DELETE" {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type DELETE to confirm",
+        ));
+    }
+
+    // Per-target outcomes rather than one pass/fail: a partial failure across a
+    // 50-pubkey sweep is otherwise indistinguishable from total success.
+    let mut per_target = Vec::with_capacity(req.targets.len());
+    let mut matched = 0u64;
+
+    for target in &req.targets {
+        let by = match target.attributed_by.as_str() {
+            "author" => crate::groups::Attribution::Author,
+            "recipient" => crate::groups::Attribution::Recipient,
+            _ => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "attributed_by must be author or recipient",
+                ))
+            }
+        };
+
+        match state
+            .http_state
+            .groups
+            .admin_prune_events(
+                &target.pubkey,
+                by,
+                &req.kinds,
+                req.since,
+                req.until,
+                req.dry_run,
+            )
+            .await
+        {
+            Ok(n) => {
+                matched = matched.saturating_add(n);
+                per_target.push(PruneTargetResult {
+                    pubkey: target.pubkey.clone(),
+                    matched: n,
+                    error: None,
+                });
+            }
+            Err(e) => per_target.push(PruneTargetResult {
+                pubkey: target.pubkey.clone(),
+                matched: 0,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    if !req.dry_run {
+        ADMIN_DELETED_TOTAL.fetch_add(matched, Ordering::Relaxed);
+        info!(
+            "Admin {} pruned {} events across {} pubkey(s)",
+            owner,
+            matched,
+            req.targets.len()
+        );
+        // The cached sample now overstates what is on disk. Flag the rescan as
+        // in progress so the client's poll keeps going until it lands --
+        // without this the next poll reports `computing: false`, the UI stops
+        // polling, and the deleted rows sit there until a manual refresh.
+        if STORAGE_STATS_COMPUTING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let state_for_scan = Arc::clone(&state);
+            tokio::spawn(async move {
+                if let Err(e) = refresh_storage_stats(&state_for_scan).await {
+                    warn!("Storage stats refresh after prune failed: {}", e);
+                }
+                STORAGE_STATS_COMPUTING.store(false, Ordering::Release);
+            });
+        }
+    }
+
+    Ok(Json(PruneResponse {
+        matched,
+        deleted: if req.dry_run { 0 } else { matched },
+        dry_run: req.dry_run,
+        per_target,
+    }))
+}
+
+/// Where access actually comes from, counted per tier.
+///
+/// The whitelist screen lists manual and follow-derived entries, because those
+/// are the only ones that exist as a list. Web-of-Trust admission is computed
+/// per pubkey against a graph, so it never appeared in that count — making a
+/// relay admitting 140,000 accounts report "233 whitelisted" and look as though
+/// the tier was doing nothing.
+#[derive(Serialize)]
+struct AccessSourcesResponse {
+    /// Pubkeys added by hand.
+    manual: usize,
+    /// Pulled from the reference accounts' contact lists by follow sync.
+    follow_derived: usize,
+    /// Blocked outright; overrides every tier above.
+    blacklisted: usize,
+    wot_enabled: bool,
+    /// Accounts the follow graph admits. Zero until it has been built.
+    wot_admitted: usize,
+    wot_max_hops: u8,
+    /// True when no tier restricts anything, i.e. an open relay.
+    open_relay: bool,
+    /// The publishing ladder: what each tier may send per minute, derived from
+    /// the configured per-pubkey budget. Sent so the console can state the rule
+    /// rather than leave an operator to infer it.
+    budget_ladder: Vec<BudgetRung>,
+}
+
+#[derive(Serialize)]
+struct BudgetRung {
+    tier: &'static str,
+    label: String,
+    percent: u32,
+    events_per_minute: u32,
+}
+
+async fn handle_access_sources(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let wot = state.whitelist.wot();
+    let wot_admitted = wot
+        .as_ref()
+        .and_then(|o| o.graph())
+        .map(|g| g.coverage().reachable_total)
+        .unwrap_or(0);
+
+    let base = read_yaml_u32(
+        StdPath::new(&state.config_dir),
+        "pubkey_rate_limit_per_minute",
+        6000,
+    );
+    // One rung per distinct budget. Follow sync and one hop are the same
+    // population, so listing both produced two identical rows.
+    let budget_ladder = [
+        crate::whitelist::AccessTier::Manual,
+        crate::whitelist::AccessTier::FollowSync,
+        crate::whitelist::AccessTier::WebOfTrust(2),
+        crate::whitelist::AccessTier::WebOfTrust(3),
+        crate::whitelist::AccessTier::Open,
+    ]
+    .into_iter()
+    .map(|tier| BudgetRung {
+        tier: tier.as_budget_key(),
+        label: tier.label(),
+        percent: tier.budget_percent(),
+        events_per_minute: (base * tier.budget_percent() / 100).max(1),
+    })
+    .collect();
+
+    Ok(Json(AccessSourcesResponse {
+        budget_ladder,
+        manual: state.whitelist.list_manual().len(),
+        follow_derived: state.whitelist.list_follow_derived().len(),
+        blacklisted: state.whitelist.blacklist().len(),
+        wot_enabled: wot.is_some(),
+        wot_admitted,
+        wot_max_hops: wot.as_ref().map(|o| o.max_hops()).unwrap_or(0),
+        open_relay: state.whitelist.is_empty(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct AccessCheckQuery {
+    pubkey: String,
+}
+
+/// The admission decision for one pubkey, and which tier produced it.
+///
+/// Exists because "is the Web of Trust actually being used?" is otherwise
+/// unanswerable from the console: WoT admission is computed per pubkey and
+/// never appears in any list, so a relay admitting a hundred thousand accounts
+/// looks identical to one admitting none. This runs the real tier ladder --
+/// the same `Whitelist` the hot path uses -- rather than re-deriving it.
+#[derive(Serialize)]
+struct AccessCheckResponse {
+    hex: String,
+    npub: String,
+    admitted: bool,
+    /// `blacklist`, `manual`, `follow_sync`, `web_of_trust`, `open_relay`, or
+    /// `none`.
+    tier: &'static str,
+    /// Hops from the nearest root, when the graph could place them.
+    hops: Option<u8>,
+    explanation: String,
+}
+
+async fn handle_access_check(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<AccessCheckQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let input = params.pubkey.trim();
+    // The two decoders return different error types, so map each to () before
+    // joining them.
+    let pk = if input.starts_with("npub") {
+        PublicKey::from_bech32(input).map_err(|_| ())
+    } else {
+        PublicKey::from_hex(input).map_err(|_| ())
+    }
+    .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Not a valid npub or hex pubkey"))?;
+
+    let whitelist = &state.whitelist;
+    let wot = whitelist.wot();
+
+    // Ask the graph directly rather than the resolution cache: the cache is
+    // only filled when someone connects, and the question here is "would this
+    // key be admitted", not "has it been".
+    let hops = wot
+        .as_ref()
+        .and_then(|o| o.graph().map(|g| (o, g)))
+        .and_then(|(o, g)| g.distance(&o.roots(), &pk, o.max_hops()));
+
+    let (tier, admitted, explanation) = if whitelist.blacklist().contains(&pk) {
+        (
+            "blacklist",
+            false,
+            "Blocked. This overrides every other tier.".to_string(),
+        )
+    } else if whitelist.list_manual().contains(&pk) {
+        (
+            "manual",
+            true,
+            "Added by hand to the allowlist.".to_string(),
+        )
+    } else if whitelist.list_follow_derived().contains(&pk) {
+        (
+            "follow_sync",
+            true,
+            "Followed by a reference account, via follow sync.".to_string(),
+        )
+    } else if let Some(hops) = hops {
+        (
+            "web_of_trust",
+            true,
+            format!("{hops} hop(s) from a reference account in the follow graph."),
+        )
+    } else if whitelist.is_empty() {
+        (
+            "open_relay",
+            true,
+            "No tier restricts anything, so everyone is admitted.".to_string(),
+        )
+    } else {
+        let detail = match wot.as_ref().and_then(|o| o.graph()) {
+            Some(g) if !g.is_built() => " The follow graph is still being built.",
+            Some(g) if g.coverage().truncated => {
+                " The graph is incomplete at the outermost hop, so this may be                  a path that was never fetched rather than one that does not exist."
+            }
+            _ => "",
+        };
+        (
+            "none",
+            false,
+            format!("On no list, and not reachable in the follow graph.{detail}"),
+        )
+    };
+
+    Ok(Json(AccessCheckResponse {
+        hex: pk.to_hex(),
+        npub: pk.to_bech32().unwrap_or_default(),
+        admitted,
+        tier,
+        hops,
+        explanation,
+    }))
+}
+
+/// serde default for booleans that should stay on unless explicitly disabled.
+fn default_true() -> bool {
+    true
+}
+
+/// Editable Web-of-Trust settings.
+#[derive(Deserialize)]
+struct WotSettingsRequest {
+    enabled: bool,
+    /// Compute from this relay's own follow graph rather than an oracle.
+    #[serde(default = "default_true")]
+    local: bool,
+    oracle_url: String,
+    #[serde(default)]
+    fallback_oracle_url: String,
+    max_hops: u8,
+    /// Hex pubkeys. Empty means "track the reference accounts".
+    #[serde(default)]
+    roots: Vec<String>,
+}
+
+/// Write `relay.wot` to `settings.local.yml` as a one-line flow mapping.
+///
+/// Flow style, like `prune_retention_by_kind`, because `upsert_relay_value`
+/// replaces a key's entire block: a multi-line `wot:` written here and then
+/// re-saved would leave its children orphaned under a flow mapping, which is
+/// unparseable YAML and would stop the relay starting.
+fn persist_wot_settings(
+    config_dir: &StdPath,
+    req: &WotSettingsRequest,
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+
+    let roots = req
+        .roots
+        .iter()
+        .map(|r| format!("\"{r}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = format!(
+        "{{enabled: {}, local: {}, oracle_url: \"{}\", fallback_oracle_url: \"{}\", max_hops: {}, roots: [{}]}}",
+        req.enabled,
+        req.local,
+        req.oracle_url.replace('"', ""),
+        req.fallback_oracle_url.replace('"', ""),
+        req.max_hops,
+        roots,
+    );
+
+    let contents = upsert_relay_value(contents, "wot", &value);
+    std::fs::write(path, contents)
+}
+
+async fn handle_wot_settings_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<WotSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    // The oracle rejects anything outside 1..=5, so saving a value it will
+    // refuse would produce a tier that silently admits nobody.
+    if !(1..=5).contains(&req.max_hops) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "max_hops must be between 1 and 5",
+        ));
+    }
+    if req.enabled && !req.local && req.oracle_url.trim().is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "An oracle URL is required to enable Web-of-Trust admission",
+        ));
+    }
+    for root in &req.roots {
+        if PublicKey::from_hex(root).is_err() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Roots must be 64-character hex pubkeys",
+            ));
+        }
+    }
+
+    persist_wot_settings(StdPath::new(&state.config_dir), &req).map_err(|e| {
+        warn!("Failed to persist WoT settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist WoT settings",
+        )
+    })?;
+
+    *state.wot_configured.write() = crate::server::WotConfigured {
+        enabled: req.enabled,
+        local: req.local,
+        oracle_url: req.oracle_url.clone(),
+        fallback_oracle_url: req.fallback_oracle_url.clone(),
+        max_hops: req.max_hops,
+        roots: req.roots.clone(),
+    };
+
+    info!(
+        "Admin updated WoT settings: enabled={}, max_hops={}, {} root(s)",
+        req.enabled,
+        req.max_hops,
+        req.roots.len()
+    );
+
+    // Deliberately not applied live. The tier is constructed at startup — it
+    // owns an HTTP client, a verdict cache and the whitelist wiring — so
+    // pretending a toggle took effect here would be a lie. The response says a
+    // restart is required and the UI repeats it.
+    Ok(Json(serde_json::json!({
+        "saved": true,
+        "restart_required": true,
+    })))
+}
+
+/// Re-point the WoT graph at the current reference accounts.
+///
+/// Only when `relay.wot.roots` was left empty — an operator who pinned roots
+/// explicitly does not expect editing reference accounts to move them. Clears
+/// the verdict cache as a side effect, since every cached hop count was
+/// measured against the previous roots.
+fn refresh_wot_roots(state: &ServerState) {
+    if !state.wot_roots_follow_reference_accounts {
+        return;
+    }
+    let Some(oracle) = state.whitelist.wot() else {
+        return;
+    };
+    let roots = state.reference_accounts.list();
+    info!(
+        "Reference accounts changed: re-rooting the WoT graph on {} account(s)",
+        roots.len()
+    );
+    oracle.set_roots(roots);
+}
+
+/// A pubkey admitted by the Web-of-Trust tier, with how far it sits from the
+/// nearest root.
+#[derive(Serialize)]
+struct WotAdmittedEntry {
+    hex: String,
+    npub: String,
+    hops: u8,
+}
+
+/// Whether WoT admission is on, whether it is actually working, and who it has
+/// let in.
+///
+/// `enabled` alone is not enough for an operator: an enabled tier with a dead
+/// oracle or no roots admits nobody, and looks identical to a quiet relay.
+#[derive(Serialize)]
+struct WotStatusResponse {
+    enabled: bool,
+    /// Plain-language verdict: "admitting", "oracle unreachable", "no roots",
+    /// or "disabled".
+    status: String,
+    oracle_url: String,
+    /// Result of a live `/health` probe. None when the tier is off.
+    oracle_reachable: Option<bool>,
+    oracle_error: Option<String>,
+    /// True once repeated failures have tripped the breaker. Always false in
+    /// local mode: there is nothing remote to be degraded.
+    degraded: bool,
+    /// Computing from this relay's own follow graph rather than an oracle.
+    local: bool,
+    /// Accounts whose follow list the local graph knows, and total follow edges.
+    graph_accounts: usize,
+    graph_edges: usize,
+    /// Deepest hop the graph can answer for with confidence. Below `max_hops`
+    /// when the contact-list budget ran out, which makes refusals past this
+    /// depth "never fetched" rather than "not connected".
+    graph_complete_to_hop: u8,
+    graph_truncated: bool,
+    /// How many accounts the graph would admit. This is the number that answers
+    /// "is the tier working"; `admitted` only counts keys that have connected.
+    would_admit_total: usize,
+    max_hops: u8,
+    root_count: usize,
+    /// Keys resolved and admitted so far. Not the full set the graph would
+    /// admit — only those that have connected.
+    admitted: Vec<WotAdmittedEntry>,
+    /// What is on disk, which after a save is ahead of what is running.
+    configured: crate::server::WotConfigured,
+    /// True when the saved config differs from the running tier, so the UI can
+    /// say a restart is pending rather than showing the change as applied.
+    restart_required: bool,
+}
+
+async fn handle_wot_status(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let configured = state.wot_configured.read().clone();
+
+    let Some(oracle) = state.whitelist.wot() else {
+        return Ok(Json(WotStatusResponse {
+            enabled: false,
+            // Saved-on but not running means the relay has not been restarted
+            // since. Saying "disabled" there would be wrong.
+            status: if configured.enabled {
+                "saved — restart to apply".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            oracle_url: configured.oracle_url.clone(),
+            oracle_reachable: None,
+            oracle_error: None,
+            degraded: false,
+            local: configured.local,
+            graph_accounts: 0,
+            graph_edges: 0,
+            graph_complete_to_hop: 0,
+            graph_truncated: false,
+            would_admit_total: 0,
+            max_hops: configured.max_hops,
+            root_count: 0,
+            restart_required: configured.enabled,
+            configured,
+            admitted: Vec::new(),
+        }));
+    };
+
+    let health = oracle.health_check().await;
+    let reachable = health.is_ok();
+    let root_count = oracle.roots().len();
+    let local = oracle.is_local();
+    let (graph_accounts, graph_edges) = oracle.graph().map(|g| g.size()).unwrap_or((0, 0));
+    let graph_coverage = oracle.graph().map(|g| g.coverage()).unwrap_or_default();
+
+    // Report the first thing that would stop admission, in the order an
+    // operator can act on it. "No roots" comes first locally because without
+    // them the graph is not merely unbuilt, it is meaningless.
+    let status = if root_count == 0 {
+        "no roots — add reference accounts"
+    } else if local && !reachable {
+        "building the follow graph…"
+    } else if !local && !reachable {
+        "oracle unreachable"
+    } else if oracle.is_degraded() {
+        "degraded"
+    } else {
+        "admitting"
+    };
+
+    // In local mode show who the graph *admits*, nearest first -- not merely
+    // who has happened to connect. The latter is near-empty on a quiet relay
+    // and reads as a broken tier.
+    let blacklist = state.whitelist.blacklist();
+    let admitted: Vec<WotAdmittedEntry> = match oracle.graph() {
+        Some(graph) => graph
+            .admitted_sample()
+            .into_iter()
+            .filter(|(pk, _)| !blacklist.contains(pk))
+            .map(|(pk, hops)| WotAdmittedEntry {
+                hex: pk.to_hex(),
+                npub: pk.to_bech32().unwrap_or_default(),
+                hops,
+            })
+            .collect(),
+        None => state
+            .whitelist
+            .list_wot_admitted()
+            .into_iter()
+            .map(|(pk, hops)| WotAdmittedEntry {
+                hex: pk.to_hex(),
+                npub: pk.to_bech32().unwrap_or_default(),
+                hops,
+            })
+            .collect(),
+    };
+
+    // Compare what is running against what is saved, field by field, so the
+    // banner appears only when a restart would actually change something.
+    let restart_required = !configured.enabled
+        || configured.max_hops != oracle.max_hops()
+        || configured.oracle_url.trim_end_matches('/') != oracle.oracle_url();
+
+    Ok(Json(WotStatusResponse {
+        enabled: true,
+        status: status.to_string(),
+        oracle_url: oracle.oracle_url().to_string(),
+        oracle_reachable: Some(reachable),
+        oracle_error: health.err(),
+        degraded: oracle.is_degraded(),
+        local,
+        graph_accounts,
+        graph_edges,
+        graph_complete_to_hop: graph_coverage.complete_to_hop,
+        graph_truncated: graph_coverage.truncated,
+        would_admit_total: graph_coverage.reachable_total,
+        max_hops: oracle.max_hops(),
+        root_count,
+        admitted,
+        configured,
+        restart_required,
+    }))
+}
 
 async fn handle_blacklist_list(
     State(state): State<Arc<ServerState>>,
@@ -3665,6 +5114,15 @@ static STORAGE_STATS_CACHE: OnceCell<RwLock<Option<StorageStatsResponse>>> = Onc
 /// Guards against piling up concurrent scans when several admins (or a polling
 /// UI) ask for a refresh at once.
 static STORAGE_STATS_COMPUTING: AtomicBool = AtomicBool::new(false);
+
+/// Events deleted by an operator since this process started.
+///
+/// Separate from the pruner's `total_pruned`, which only counts what the
+/// automatic retention sweep removed. The Storage screen showed that figure
+/// under a bare "Events deleted" heading, so an operator deleting by hand
+/// watched a counter that could not move and reasonably concluded nothing was
+/// being deleted.
+static ADMIN_DELETED_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How long a computed storage snapshot stays fresh before a background
 /// refresh is triggered on the next request.

@@ -77,3 +77,71 @@ arming is safe. It runs in the background and can take minutes.
 Deletions are not reversible. Take a backup first
 (`scripts/backup-relays.sh`), and prefer testing a policy against a copy of the
 database rather than the live one.
+
+## Getting the disk back
+
+Pruning does not shrink `data.mdb`. LMDB puts freed pages on a free list and
+reuses them for later writes; it never returns them to the filesystem, so the
+file sits at its historical high-water mark however much you delete. A flat
+event count beside a flat-but-large file is not a broken policy — it is the
+policy working, with the space still held.
+
+**Reclaim disk space** on the Storage screen is what hands it back. It reports
+three numbers:
+
+| | |
+|---|---|
+| **File on disk** | What the filesystem sees. |
+| **Actually in use** | Pages holding data the relay still serves. A compaction leaves the file at roughly this size. |
+| **Reclaimable** | The free list. This is what you get back. |
+
+Measured on `public.obelisk.ar` after the first retention pass: a 605 MB file
+holding 238 MB of live data, compacted in 3.4 seconds to 238 MB, with all
+378,481 events intact.
+
+### What it does
+
+The relay restarts and compacts before it opens the database. It has to: the
+copy is taken from a read-transaction snapshot, so any write landing afterwards
+would be lost when the copy replaced the original — and the one moment nothing
+holds the database open is startup.
+
+1. The console writes `config/compaction-request.json` and the relay exits.
+2. Docker restarts it (`restart: unless-stopped`).
+3. Before opening the database, the relay consumes the request, copies the live
+   pages into `data.mdb.compacting`, moves the original to
+   `data.mdb.pre-compact`, swaps the new file in, and re-opens it to prove it
+   works. Only then is the original deleted.
+4. The outcome is appended to `config/compaction-log.json`, which the Storage
+   screen shows.
+
+If anything fails, the original is restored and the relay starts on it. The
+request is deleted *before* the work starts, so a compaction that kills the
+process cannot retry itself into a boot loop.
+
+### When it refuses
+
+- **Not enough free disk.** It needs 1.2× the live data, because the copy exists
+  alongside the original until it is proven. The check runs again immediately
+  before the restart is scheduled.
+- **Nothing to reclaim.** A free list of zero.
+- **`data.mdb.pre-compact` already exists.** An earlier attempt did not finish.
+  Work out by hand which file is current before removing it — this one is not
+  safe to guess at.
+
+### Verifying against a copy first
+
+Nothing here needs to be taken on trust:
+
+```bash
+cp -a /var/lib/docker/volumes/nostr-relay_public-relay-db/_data /tmp/dbtest
+docker run --rm -v /tmp/dbtest:/data <relay-image> /app/lmdb_stat --db /data
+OBELISK_COMPACT_TEST_DB=/tmp/dbtest \
+  cargo test --lib compacts_a_real_database -- --ignored --nocapture
+docker run --rm -v /tmp/dbtest:/data <relay-image> /app/nostr-lmdb-integrity --db-path /data
+```
+
+A compaction copies live pages verbatim: it neither introduces nor repairs index
+corruption. If `nostr-lmdb-integrity` reported stale `deleted-ids` entries before,
+it will report the same ones after. Clearing those still needs the
+`scripts/relay-data.sh export` → `import` round trip.

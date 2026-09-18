@@ -22,14 +22,29 @@
 # USAGE
 #
 #   docker compose build public_relay
-#   ./public-config/branding/retint.sh
+#   scripts/retint-branding.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
 #   # follow the printed instruction to update compose.yml, then:
 #   docker compose up -d public_relay
+#
+# A UI-driven update runs this for you: scripts/relay-updater.sh calls it
+# against the incoming image and re-points the compose mount before recreating
+# the container.
 #
 set -euo pipefail
 
 IMAGE="${1:-nostr-relay-public_relay}"
-OUT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets"
+# Output goes into the relay's config directory; this script does not.
+#
+# It used to live at public-config/branding/retint.sh and derive OUT_DIR from
+# its own location. That directory is bind-mounted into the relay read-write,
+# so the relay could rewrite this script -- and the update agent executes it as
+# root on the host. A remote-code-execution bug in a process terminating
+# untrusted WebSocket traffic would then have been root, which is the exact
+# outcome not giving the relay a Docker socket was meant to prevent.
+#
+# Code lives here, under scripts/, which is not mounted into any container.
+# Only the generated stylesheet lands in the config directory.
+OUT_DIR="${RETINT_OUT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/public-config/branding/assets}"
 
 # The accent pair, and the same colour in the rgba() form the bundle also uses.
 # The earlier hand-made overrides replaced only the hex, leaving green glows and

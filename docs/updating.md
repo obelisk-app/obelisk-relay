@@ -26,7 +26,7 @@ directory; a root-owned script on the host reads it and does the work:
 ```
 console → POST /api/admin/update
             ↓ writes public-config/update-request.json
-     systemd obelisk-relay-update.path fires
+     systemd obelisk-relay-update-<name>.path fires
             ↓ scripts/relay-updater.sh
             ↓   validate tag → docker pull → re-sync branding
             ↓   rewrite RELAY_IMAGE_TAG in .env → compose up -d
@@ -40,6 +40,25 @@ relay, against a character allowlist by the agent. The request carries a *tag*,
 never an image reference; the repository is a constant in the script. Neither
 side trusts the other to have checked, because the file crosses a privilege
 boundary: it is written by a network-facing service and read by root.
+
+### The rule that follows from that
+
+**The agent must never execute anything the relay can write.**
+
+`public-config/` is bind-mounted into the relay read-write, so the relay can
+change any file in it. The agent runs as root on the host. If those two facts
+meet — if the agent runs a script out of the config directory — then a
+remote-code-execution bug in the relay is root on the host, which is the very
+thing keeping the Docker socket out of the container was meant to prevent.
+
+This bit us once: the branding script lived at
+`public-config/branding/retint.sh` and the agent executed it. It now lives in
+`scripts/`, which is mounted into nothing, and the agent additionally refuses to
+run it unless it is root-owned and not group- or world-writable.
+
+Everything the agent reads out of the config directory is treated as untrusted
+*data*: parsed as JSON, validated against an allowlist, never executed and never
+interpolated into a shell word.
 
 ## Install
 
@@ -106,7 +125,7 @@ inside the image. A new image has a different hash, so an update would mount the
 override onto a path nothing loads and the theme would silently revert to green.
 This has already happened twice by hand.
 
-The updater therefore runs `public-config/branding/retint.sh` against the new
+The updater therefore runs `scripts/retint-branding.sh` against the new
 image before recreating the container, and **fails the update** if it cannot
 determine the hash rather than shipping a broken theme.
 
@@ -135,9 +154,29 @@ sed -i 's/^RELAY_IMAGE_TAG=.*/RELAY_IMAGE_TAG=<previous>/' .env
 docker compose up -d public_relay
 ```
 
-## Note on the running image
+## Running an unpublished build
 
-At the time of writing this relay runs `local-wot-attribution`, a locally built
-tag that does not exist in GHCR. The console only offers published tags, so the
-first update from the UI necessarily moves off it. Publish an equivalent tag
-first if those local changes matter.
+The console offers published tags only, so a locally built image it cannot see
+is a trap: comparing the running tag against the newest published one would
+report "update available" and offer what is actually a *downgrade*.
+
+It does not. When the running tag is absent from the registry the card says
+**Unpublished build**, and any tag older than the running one is marked
+`(older)` with an explicit downgrade warning. Tags with no date in them
+(`latest`, `main`, bare SHAs) are given no ordering at all rather than a guessed
+one.
+
+The fix for the state itself is to publish the build:
+
+```bash
+docker push ghcr.io/obelisk-app/obelisk-relay:<tag>
+```
+
+Note that a natively built image here is **arm64 only**, while the older
+`v2026.09.*` tags are multi-arch. Publish it under an `-arm64` suffix rather
+than a bare version tag, which would promise an amd64 that is not in there, and
+join the two when an amd64 leg exists:
+
+```bash
+docker buildx imagetools create -t <bare tag> <tag>-arm64 <tag>-amd64
+```

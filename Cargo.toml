@@ -8,6 +8,21 @@ repository = "https://github.com/obelisk-app/obelisk-relay"
 default-run = "groups_relay"
 
 [dependencies]
+# Upstream. This fork's protocol layer and storage engine are verse-pbc code,
+# not optional extras: relay_builder is the relay framework, and the nostr-*
+# crates below are their fork of rust-nostr, including the LMDB store the
+# events live in.
+#
+# DO NOT add `rev = "..."` to these. It looks like the right thing and it breaks
+# the build. relay_builder declares the same nostr crates *unpinned*, so pinning
+# on this side creates a second source identity for the identical commit --
+# `git+...?rev=X#X` alongside `git+...#X` -- and cargo then compiles two copies
+# of nostr 0.44.1 that do not unify. The symptom is a wall of "expected
+# ClientMessage<'static>, found nostr_sdk::ClientMessage<'_>". Tried, reverted.
+#
+# The pin that does work is Cargo.lock, which is committed and names the exact
+# commits. Treat a change to those lines in a diff as a dependency bump and
+# review it as one; `cargo update` is what would move them silently.
 relay_builder = { git = "https://github.com/verse-pbc/relay_builder" }
 tokio = { version = "1.45", features = ["full"] }
 anyhow = { version = "1.0.89", features = ["backtrace"] }

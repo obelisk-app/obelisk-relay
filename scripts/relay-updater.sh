@@ -129,11 +129,30 @@ set_tag() {
 # has already happened twice by hand. Re-point it, or refuse the update.
 resync_branding() {
   local image="$1"
-  local retint="$CONFIG_DIR/branding/retint.sh"
+  # Deliberately under REPO_DIR/scripts, never under CONFIG_DIR.
+  #
+  # CONFIG_DIR is bind-mounted into the relay read-write. This function runs as
+  # root on the host, so executing anything from there would hand the relay --
+  # which terminates untrusted traffic from the open internet -- a way to run
+  # code as root simply by overwriting the file and waiting for an update. That
+  # is precisely the escalation that keeping the Docker socket out of the
+  # container is meant to prevent, so the code it runs must live somewhere the
+  # container cannot reach.
+  local retint="$REPO_DIR/scripts/retint-branding.sh"
   [[ -x "$retint" ]] || { log "no branding script at $retint; nothing to re-sync"; return 0; }
 
+  # Defence in depth: refuse anything group- or world-writable, and anything not
+  # owned by root. Cheap, and it catches a bad deploy as well as an attacker.
+  local perms owner
+  perms="$(stat -c '%a' "$retint")"
+  owner="$(stat -c '%u' "$retint")"
+  if [[ "$owner" != "0" || "$perms" =~ ^[0-7][2367][0-7]$|^[0-7][0-7][2367]$ ]]; then
+    log "refusing to run $retint: owner=$owner mode=$perms (must be root-owned and not group/world writable)"
+    return 1
+  fi
+
   local out
-  if ! out="$("$retint" "$image" 2>&1)"; then
+  if ! out="$(RETINT_OUT_DIR="$CONFIG_DIR/branding/assets" "$retint" "$image" 2>&1)"; then
     log "branding re-sync failed: $(tail -2 <<<"$out")"
     return 1
   fi

@@ -51,7 +51,7 @@ services:
       #
       # Never hand-edit or hand-rename this. After any frontend change:
       #   docker compose build public_relay
-      #   ./public-config/branding/retint.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
+      #   scripts/retint-branding.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
       # then update both sides of the line below to the hash it prints.
       #
       # A UI-driven update does this for you: scripts/relay-updater.sh runs

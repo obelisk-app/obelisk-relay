@@ -223,7 +223,7 @@ frontend change:
 
 ```bash
 docker compose build public_relay
-./public-config/branding/retint.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
+scripts/retint-branding.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
 # then point both sides of the compose mount at the hash it prints
 ```
 

@@ -590,6 +590,18 @@ pub async fn run_server(
             let token = cancellation_token.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+                // `interval` fires its first tick immediately. Without consuming
+                // it here the loop rebuilds, awaits a tick that is already due,
+                // and rebuilds again back to back -- which is not merely wasted
+                // work: the second pass runs with the remote fetch budget spent,
+                // so it builds a *smaller* graph and then replaces the good one
+                // with it. Observed on production at startup: 14,836 contact
+                // lists admitting 146,011 accounts, immediately overwritten by
+                // 4,383 lists admitting 96,350. Fifty thousand keys lost
+                // admission for an hour, with nothing in the logs calling it an
+                // error. Same guard as the pruner's.
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await;
                 loop {
                     let roots = if configured_roots.is_empty() {
                         refs_for_graph.list()

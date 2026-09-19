@@ -360,3 +360,43 @@ Two things worth knowing if you use it:
 - It is not a privacy *setting* so much as a migration. If you only want new
   groups to be public, this is the wrong control — it rewrites the existing ones
   too.
+
+---
+
+## 17. Moderation reports (NIP-56 kind 1984)
+
+**Severity: informational. New capability — read before changing its visibility.**
+
+Kind 1984 is now accepted, queued and actionable from the admin console's
+Reports tab. Before this it could not be filed at all: a report carries no `h`
+tag, so `ValidationMiddleware` refused it outright, and a client that invented
+one got its report stored as ordinary group content.
+
+Three things are worth knowing.
+
+**Reports are admin-only to read, which diverges from NIP-56.** The spec treats
+reports as public. On a relay where admission is a social graph, public reports
+mean the reported person can look up who reported them — a retaliation channel.
+`verify_filters` therefore refuses any subscription naming kind 1984 unless the
+requester is a relay admin, and refuses it *explicitly* rather than returning an
+empty result, so a client learns it may not have them rather than concluding
+there are none. Mixing 1984 into a wider filter does not launder it past the
+check. If you ever want spec-conformant public reports, that is the one function
+to change — and it is a deliberate decision, not an oversight.
+
+**Reports group by target, not by reporter.** Ten people reporting one message is
+one case, and the queue counts distinct reporters rather than report volume, so
+four reports from one account read as one reporter. Cases are sorted by recency,
+not by count: a volume-ordered queue would let a brigade set the agenda.
+
+**Reports have their own rate limit**, separate from and far tighter than the
+general publishing budget (20/hour, burst 40, admins exempt). The resource being
+protected is the moderator's attention, not the database — a 1984 is a tiny
+event. Because cases group by target, flooding the queue requires reporting many
+*different* things, which is what this bounds.
+
+Resolutions live in `config/reports_state.json`, alongside the blacklist and for
+the same reason: whether a report was acted on is the operator's decision about
+someone else's claim, and must not be something the reporter or the reported can
+publish, replace or delete. Deleting that file reopens every case; it does not
+undo any action already taken.

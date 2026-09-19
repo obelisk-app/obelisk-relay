@@ -943,6 +943,83 @@ impl Groups {
     }
 
     /// Admin-only: get recent events in a group, optionally filtered by author.
+    /// Every stored moderation report, grouped into one case per target.
+    ///
+    /// Enriches each case with what was actually reported: an admin cannot tell
+    /// a real problem from a false positive without seeing the message, and
+    /// making them go and find it by id is how queues stop getting worked.
+    /// Reported events are looked up across scopes because a report carries no
+    /// group and the target may live in any of them.
+    pub async fn admin_get_reports(
+        &self,
+        state: &crate::reports::ReportsState,
+        limit: usize,
+    ) -> Result<Vec<crate::reports::ReportCase>, Error> {
+        use crate::reports::{group_into_cases, Report, ReportTarget, KIND_REPORT_1984};
+
+        let filter = Filter::new().kind(KIND_REPORT_1984).limit(limit);
+
+        // Reports have no group, so they land in whichever scope the reporter's
+        // connection was on. Sweep every scope this relay knows about, plus the
+        // default one, rather than assuming.
+        let mut scopes: Vec<Scope> = self.groups.iter().map(|e| e.key().0.clone()).collect();
+        scopes.push(Scope::Default);
+        scopes.sort_by_key(|s| format!("{s:?}"));
+        scopes.dedup_by_key(|s| format!("{s:?}"));
+
+        let mut parsed: Vec<Report> = Vec::new();
+        for scope in &scopes {
+            let raw = self
+                .db
+                .query(vec![filter.clone()], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+            for event in raw {
+                parsed.extend(Report::parse(&event));
+            }
+        }
+
+        let mut cases = group_into_cases(parsed, state);
+
+        // Fill in the reported event's content and the group it belongs to. The
+        // group is what decides whether "remove from group" is even offered.
+        for case in &mut cases {
+            let ReportTarget::Event { id } = &case.target else {
+                continue;
+            };
+            let Ok(event_id) = EventId::from_hex(id) else {
+                continue;
+            };
+
+            for scope in &scopes {
+                let found = self
+                    .db
+                    .query(vec![Filter::new().id(event_id).limit(1)], scope)
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()))?;
+                if let Some(event) = found.into_iter().next() {
+                    // Truncated: the queue is a list, not a reader. Enough to
+                    // judge, not so much that one long message buries the rest.
+                    case.reported_content = Some(if event.content.chars().count() > 500 {
+                        let truncated: String = event.content.chars().take(500).collect();
+                        format!("{truncated}…")
+                    } else {
+                        event.content.clone()
+                    });
+                    case.reported_pubkey = Some(event.pubkey.to_hex());
+                    case.group_id = event
+                        .tags
+                        .find(TagKind::h())
+                        .and_then(|t| t.content())
+                        .map(str::to_string);
+                    break;
+                }
+            }
+        }
+
+        Ok(cases)
+    }
+
     pub async fn admin_get_group_events(
         &self,
         group_id: &str,
@@ -1019,6 +1096,34 @@ impl Groups {
             results.push((id.clone(), outcome.err().map(|e| e.to_string())));
         }
         results
+    }
+
+    /// Who wrote a given event, across every scope.
+    ///
+    /// Needed because a report names an event but the actions an admin might
+    /// take -- remove from group, blacklist -- act on a person. Returns None if
+    /// the event is gone, which is a real case: someone may already have deleted
+    /// it between the report and the review.
+    pub async fn admin_find_event_author(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<String>, Error> {
+        let mut scopes: Vec<Scope> = self.groups.iter().map(|e| e.key().0.clone()).collect();
+        scopes.push(Scope::Default);
+        scopes.sort_by_key(|s| format!("{s:?}"));
+        scopes.dedup_by_key(|s| format!("{s:?}"));
+
+        for scope in &scopes {
+            let found = self
+                .db
+                .query(vec![Filter::new().id(*event_id).limit(1)], scope)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+            if let Some(event) = found.into_iter().next() {
+                return Ok(Some(event.pubkey.to_hex()));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn admin_delete_event(&self, event_id_hex: &str) -> Result<(), Error> {

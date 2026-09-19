@@ -272,6 +272,17 @@ export class AdminApiClient {
     })
   }
 
+  async getReports(status: 'open' | 'resolved' | 'all' = 'open'): Promise<ReportsResponse> {
+    return this.request(`/api/admin/reports?status=${status}`)
+  }
+
+  async resolveReport(req: ResolveReportRequest): Promise<{ resolved: boolean }> {
+    return this.request('/api/admin/reports/resolve', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
   async getReferenceAccounts(): Promise<Array<{ hex: string; npub: string }>> {
     return this.request('/api/admin/reference-accounts')
   }
@@ -979,6 +990,51 @@ export interface ConnectionSettingsRequest {
   force_public_groups: boolean
   /** Literal "FORCE PUBLIC"; required only when switching the flag on. */
   force_public_confirm?: string
+}
+
+/** One NIP-56 report, as filed. */
+export interface Report {
+  report_id: string
+  reporter: string
+  report_type: string
+  /** The reporter's own words. Untrusted -- render as text, never as markup. */
+  content: string
+  created_at: number
+}
+
+/** Everything reported about a single target: one row of the queue. */
+export interface ReportCase {
+  /** Round-trip key, "e:<id>" or "p:<hex>". */
+  key: string
+  target: { kind: 'event'; id: string } | { kind: 'pubkey'; hex: string }
+  reports: Report[]
+  /** Distinct reporters, not report count. */
+  reporter_count: number
+  types: string[]
+  last_reported_at: number
+  resolution: {
+    action: string
+    resolved_by: string
+    resolved_at: number
+    note: string
+  } | null
+  /** What was actually reported, so it can be judged without a second lookup. */
+  reported_content: string | null
+  reported_pubkey: string | null
+  /** Present only when the reported event belongs to a group. */
+  group_id: string | null
+}
+
+export interface ReportsResponse {
+  cases: ReportCase[]
+  resolved_total: number
+}
+
+export interface ResolveReportRequest {
+  key: string
+  action: 'dismiss' | 'delete_event' | 'remove_from_group' | 'blacklist'
+  note?: string
+  group_id?: string
 }
 
 export interface GroupInfo {

@@ -44,6 +44,13 @@ pub type PubkeyLimiter = DefaultKeyedRateLimiter<PublicKey>;
 ///
 /// The processor is extracted from the original Nip29Middleware to enable reusability
 /// and better testability while maintaining identical functionality.
+/// Sustained report budget per pubkey. Genuine reporting is occasional; this is
+/// generous for a person and useless for a flood.
+const REPORTS_PER_HOUR: NonZeroU32 = NonZeroU32::new(20).unwrap();
+
+/// Allowance for someone working through a spam wave in one sitting.
+const REPORTS_BURST: NonZeroU32 = NonZeroU32::new(40).unwrap();
+
 #[derive(Clone)]
 pub struct GroupsRelayProcessor {
     groups: Arc<Groups>,
@@ -55,6 +62,9 @@ pub struct GroupsRelayProcessor {
     pubkey_limiter: Option<Arc<PubkeyLimiter>>,
     /// One bucket per access tier, so publishing budget falls off with distance.
     tier_limiters: Option<Arc<HashMap<&'static str, Arc<PubkeyLimiter>>>>,
+    /// Separate, far tighter budget for kind 1984. Protects the moderation queue
+    /// rather than the database; see `with_pubkey_rate_limit`.
+    report_limiter: Option<Arc<PubkeyLimiter>>,
     /// Optional optimized Obelisk read index. Normal relay behavior does not
     /// depend on this; it is updated only after events pass relay validation.
     obelisk_index: Option<Arc<ObeliskIndex>>,
@@ -91,6 +101,7 @@ impl GroupsRelayProcessor {
             whitelist,
             pubkey_limiter: None,
             tier_limiters: None,
+            report_limiter: None,
             obelisk_index: None,
         }
     }
@@ -131,6 +142,19 @@ impl GroupsRelayProcessor {
         if let Some(n) = NonZeroU32::new(events_per_minute) {
             self.pubkey_limiter = Some(Arc::new(RateLimiter::keyed(Quota::per_minute(n))));
         }
+
+        // Reports get their own, much smaller budget, independent of the general
+        // one. The thing being protected is not the database -- a 1984 is a tiny
+        // event and the general limit already bounds write volume -- it is the
+        // moderation queue. Reports group by target, so flooding it means
+        // reporting many *different* things, which no honest user does: genuine
+        // reporting is occasional and considered. Left on the general budget, one
+        // account could file thousands of reports against legitimate messages and
+        // bury the real ones, which is a denial of service against moderation
+        // rather than against the relay.
+        self.report_limiter = Some(Arc::new(RateLimiter::keyed(
+            Quota::per_hour(REPORTS_PER_HOUR).allow_burst(REPORTS_BURST),
+        )));
         self
     }
 
@@ -229,6 +253,33 @@ impl EventProcessor for GroupsRelayProcessor {
 
         // For groups relay, we need to verify access to group queries
         for filter in filters {
+            // Moderation reports are readable only by relay admins.
+            //
+            // Kind 1984 has to be *accepted* without an `h` tag for reports to be
+            // filable at all, but accepting it must not make the queue public.
+            // NIP-56 treats reports as public by convention; on a relay where
+            // admission is a social graph, that convention means the reported
+            // person can look up who reported them. That is a retaliation
+            // channel, so this relay diverges deliberately.
+            //
+            // Refused rather than silently emptied: a client asking for reports
+            // should learn it may not have them, not conclude there are none.
+            if filter
+                .kinds
+                .as_ref()
+                .is_some_and(|kinds| kinds.contains(&crate::reports::KIND_REPORT_1984))
+            {
+                let is_admin = context
+                    .authed_pubkey
+                    .as_ref()
+                    .is_some_and(|pk| self.is_relay_admin(pk));
+                if !is_admin {
+                    return Err(relay_builder::Error::restricted(
+                        "Moderation reports are only readable by relay admins".to_string(),
+                    ));
+                }
+            }
+
             // Check if this filter queries group-related data
             if self.is_group_query(filter) {
                 // Get all group tags from the filter
@@ -316,6 +367,22 @@ impl EventProcessor for GroupsRelayProcessor {
                 return Err(relay_builder::Error::restricted(
                     "rate limit exceeded for this pubkey".to_string(),
                 ));
+            }
+        }
+
+        // Reports carry a second, much tighter budget on top of the general one.
+        // See `with_pubkey_rate_limit`: the resource being protected is the
+        // admin's attention, not the database. Relay admins are exempt so a
+        // moderator sweeping a spam wave is never throttled out of their own
+        // tooling.
+        if event.kind == crate::reports::KIND_REPORT_1984 {
+            if let Some(limiter) = &self.report_limiter {
+                if !self.is_relay_admin(&event.pubkey) && limiter.check_key(&event.pubkey).is_err()
+                {
+                    return Err(relay_builder::Error::restricted(
+                        "report rate limit exceeded; reports are limited per account".to_string(),
+                    ));
+                }
             }
         }
 
@@ -476,6 +543,187 @@ mod tests {
         // Verify the logic was created correctly
         assert_eq!(processor.relay_pubkey(), &admin_keys.public_key());
         assert!(Arc::ptr_eq(processor.groups(), &groups));
+    }
+
+    /// Reports have to be accepted without an `h` tag for anyone to file one,
+    /// which makes it easy to accidentally publish the moderation queue: the
+    /// reported party subscribes to kind 1984 and reads who reported them.
+    #[tokio::test]
+    async fn the_report_queue_is_not_readable_by_the_people_in_it() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+
+        // Open relay: admission is not what is being tested here.
+        let member = Keys::generate();
+        let processor = GroupsRelayProcessor::new(
+            groups,
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
+
+        let reports = vec![Filter::new().kind(crate::reports::KIND_REPORT_1984)];
+
+        let as_member = EventContext {
+            authed_pubkey: Some(member.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(
+            processor
+                .verify_filters(&reports, empty_state(), &as_member)
+                .is_err(),
+            "an ordinary admitted user must not be able to read reports"
+        );
+
+        let anonymous = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(
+            processor
+                .verify_filters(&reports, empty_state(), &anonymous)
+                .is_err(),
+            "nor an unauthenticated one"
+        );
+
+        let as_admin = EventContext {
+            authed_pubkey: Some(admin_keys.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(
+            processor
+                .verify_filters(&reports, empty_state(), &as_admin)
+                .is_ok(),
+            "the relay admin is the one who has to read them"
+        );
+
+        // Mixing 1984 into a wider filter must not launder it past the check.
+        let smuggled = vec![Filter::new()
+            .kind(Kind::Custom(9))
+            .kind(crate::reports::KIND_REPORT_1984)];
+        assert!(
+            processor
+                .verify_filters(&smuggled, empty_state(), &as_member)
+                .is_err(),
+            "asking for reports alongside chat must not slip through"
+        );
+    }
+
+    /// The queue is the scarce resource. Reports group by target, so flooding it
+    /// means reporting many *different* things -- which is why this budget is
+    /// separate from, and far tighter than, the general publishing one.
+    #[tokio::test]
+    async fn report_flooding_is_throttled_separately_from_publishing() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+
+        // A generous general budget: this must not be what stops the flood.
+        let processor = GroupsRelayProcessor::new(
+            groups,
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        )
+        .with_pubkey_rate_limit(100_000);
+
+        let flooder = Keys::generate();
+        let context = EventContext {
+            authed_pubkey: Some(flooder.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        let mut accepted = 0;
+        let mut refused = 0;
+        // Each report names a distinct target, so grouping does not absorb them.
+        for _ in 0..80 {
+            let report = create_test_event(
+                &flooder,
+                1984,
+                vec![Tag::parse(["p", &Keys::generate().public_key().to_hex(), "spam"]).unwrap()],
+            )
+            .await;
+            match processor
+                .handle_event(report, empty_state(), &context)
+                .await
+            {
+                Ok(_) => accepted += 1,
+                Err(_) => refused += 1,
+            }
+        }
+
+        assert!(
+            refused > 0,
+            "a report flood must be throttled even when the general budget is huge"
+        );
+        assert!(
+            accepted > 0,
+            "and honest reporting must still get through: {accepted} accepted"
+        );
+    }
+
+    /// Filing one, on the other hand, has to work for anybody admitted --
+    /// otherwise the queue is empty by construction.
+    #[tokio::test]
+    async fn anyone_admitted_can_file_a_report() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+        let processor = GroupsRelayProcessor::new(
+            groups,
+            admin_keys.public_key(),
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
+
+        let reporter = Keys::generate();
+        let context = EventContext {
+            authed_pubkey: Some(reporter.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        // No `h` tag: a report is about a person or an event, not a group.
+        let report = create_test_event(
+            &reporter,
+            1984,
+            vec![Tag::parse(["p", &Keys::generate().public_key().to_hex(), "spam"]).unwrap()],
+        )
+        .await;
+
+        assert!(
+            processor
+                .handle_event(report, empty_state(), &context)
+                .await
+                .is_ok(),
+            "a report without an h tag must be storable"
+        );
     }
 
     /// The console logs in over NIP-46 using this relay as its rendezvous, so

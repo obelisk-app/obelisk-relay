@@ -46,6 +46,9 @@ pub const KIND_NUTZAP_INFO_10019: Kind = Kind::Custom(10019);
 pub const KIND_NUTZAP_9321: Kind = Kind::Custom(9321);
 
 pub const KIND_SIMPLE_LIST_10009: Kind = Kind::Custom(10009);
+/// NIP-56 moderation report. Re-exported from `crate::reports`, which owns the
+/// parsing; named here so the allow-list below reads uniformly.
+pub const KIND_REPORT_1984: Kind = Kind::Custom(1984);
 pub const KIND_CLAIM_28934: Kind = Kind::Custom(28934);
 
 // MLS Related
@@ -82,8 +85,14 @@ pub const ADDRESSABLE_EVENT_KINDS: [Kind; 4] = [
     KIND_GROUP_ROLES_39003,
 ];
 
-pub const NON_GROUP_ALLOWED_KINDS: [Kind; 14] = [
+pub const NON_GROUP_ALLOWED_KINDS: [Kind; 15] = [
     KIND_SIMPLE_LIST_10009,
+    // A report is about a person or an event, not about a group, so it carries
+    // no `h` tag and was previously refused outright by ValidationMiddleware.
+    // Reads are restricted separately -- see `verify_filters`: accepting these
+    // must not turn the moderation queue into something the reported party can
+    // subscribe to.
+    KIND_REPORT_1984,
     KIND_CLAIM_28934,
     KIND_WALLET_17375,
     KIND_WALLET_BACKUP_375,

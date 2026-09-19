@@ -1880,6 +1880,223 @@ fn persist_connection_settings(
     std::fs::write(path, contents)
 }
 
+// --- Moderation reports (NIP-56) ---
+
+#[derive(Deserialize)]
+struct ReportsQuery {
+    /// "open" (default), "resolved", or "all".
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ResolveReportRequest {
+    /// The case key from the listing, e.g. "e:<id>" or "p:<hex>".
+    key: String,
+    /// dismiss | delete_event | remove_from_group | blacklist
+    action: String,
+    #[serde(default)]
+    note: String,
+    /// Required for remove_from_group; ignored otherwise.
+    #[serde(default)]
+    group_id: Option<String>,
+}
+
+async fn handle_reports_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<ReportsQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let limit = params.limit.unwrap_or(500).min(2000);
+    let cases = state
+        .http_state
+        .groups
+        .admin_get_reports(&state.reports, limit)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let status = params.status.as_deref().unwrap_or("open");
+    let filtered: Vec<_> = match status {
+        "all" => cases,
+        "resolved" => cases
+            .into_iter()
+            .filter(|c| c.resolution.is_some())
+            .collect(),
+        // Default to the work queue: what still needs a decision.
+        _ => cases
+            .into_iter()
+            .filter(|c| c.resolution.is_none())
+            .collect(),
+    };
+
+    Ok(Json(serde_json::json!({
+        "cases": filtered,
+        "resolved_total": state.reports.len(),
+    })))
+}
+
+async fn handle_report_resolve(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<ResolveReportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    let admin_pubkey = validate_session(&admin_state, &headers).ok_or_else(unauthorized)?;
+
+    let action = crate::reports::ResolutionAction::parse(&req.action)
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+
+    // Reconstruct the target from the key the listing handed out, so the client
+    // cannot invent a shape the server never offered.
+    let target = match req.key.split_once(':') {
+        Some(("e", id)) => crate::reports::ReportTarget::Event { id: id.to_string() },
+        Some(("p", hex)) => crate::reports::ReportTarget::Pubkey {
+            hex: hex.to_string(),
+        },
+        _ => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Malformed report key",
+            ))
+        }
+    };
+
+    // Carry out the action before recording it. If the action fails, the case
+    // stays open -- a queue that says "blacklisted" about someone who is not
+    // blacklisted is worse than one that still has work in it.
+    apply_report_action(&state, &action, &target, req.group_id.as_deref()).await?;
+
+    state.reports.resolve(
+        &target,
+        crate::reports::Resolution {
+            action: action.clone(),
+            resolved_by: admin_pubkey.to_hex(),
+            resolved_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            note: req.note.clone(),
+        },
+    );
+
+    if let Err(e) = state.reports.persist(StdPath::new(&state.config_dir)) {
+        // The decision is applied and held in memory; failing to write it means
+        // a restart would requeue it. Worth a loud log, not a failed request.
+        warn!("Failed to persist report resolution: {}", e);
+    }
+
+    info!(
+        "Admin {} resolved report {} as {:?}",
+        admin_pubkey, req.key, action
+    );
+
+    Ok(Json(serde_json::json!({ "resolved": true })))
+}
+
+/// Carry out what the admin decided, reusing the existing moderation paths.
+async fn apply_report_action(
+    state: &Arc<ServerState>,
+    action: &crate::reports::ResolutionAction,
+    target: &crate::reports::ReportTarget,
+    group_id: Option<&str>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    use crate::reports::{ReportTarget, ResolutionAction};
+
+    match (action, target) {
+        // A false positive: record the judgement, touch nothing.
+        (ResolutionAction::Dismissed, _) => Ok(()),
+
+        (ResolutionAction::DeletedEvent, ReportTarget::Event { id }) => state
+            .http_state
+            .groups
+            .admin_delete_event(id)
+            .await
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
+        (ResolutionAction::DeletedEvent, ReportTarget::Pubkey { .. }) => Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "This report names a person, not an event; there is nothing to delete",
+        )),
+
+        (ResolutionAction::RemovedFromGroup, _) => {
+            let group_id = group_id.ok_or_else(|| {
+                error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Removing from a group needs to know which group",
+                )
+            })?;
+            let hex = report_subject_pubkey(state, target).await?;
+            state
+                .http_state
+                .groups
+                .admin_remove_group_member(group_id, &hex)
+                .await
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+        }
+
+        (ResolutionAction::Blacklisted, _) => {
+            let hex = report_subject_pubkey(state, target).await?;
+            let pubkey = PublicKey::from_hex(&hex)
+                .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid pubkey"))?;
+
+            // The relay's own key must never be bannable from the relay.
+            if pubkey == state.relay_public_key {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Refusing to blacklist the relay's own key",
+                ));
+            }
+            if state.admin_pubkeys.contains(&pubkey) {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Refusing to blacklist a relay admin; remove them as admin first",
+                ));
+            }
+
+            state.whitelist.blacklist().add(pubkey);
+            state
+                .whitelist
+                .blacklist()
+                .persist(StdPath::new(&state.config_dir))
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            Ok(())
+        }
+    }
+}
+
+/// The person a case is about: the pubkey directly, or the author of the
+/// reported event.
+async fn report_subject_pubkey(
+    state: &Arc<ServerState>,
+    target: &crate::reports::ReportTarget,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    match target {
+        crate::reports::ReportTarget::Pubkey { hex } => Ok(hex.clone()),
+        crate::reports::ReportTarget::Event { id } => {
+            let event_id = EventId::from_hex(id)
+                .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid event id"))?;
+            state
+                .http_state
+                .groups
+                .admin_find_event_author(&event_id)
+                .await
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                .ok_or_else(|| {
+                    error_response(
+                        StatusCode::NOT_FOUND,
+                        "The reported event is no longer stored, so its author cannot be determined",
+                    )
+                })
+        }
+    }
+}
+
 // --- Routes ---
 
 /// Reject anything without a valid admin session, before the handler runs.
@@ -2015,6 +2232,8 @@ pub fn admin_routes(state: Arc<ServerState>) -> Router<Arc<ServerState>> {
             delete(handle_group_member_remove),
         )
         .route("/groups/{id}/members", get(handle_group_members))
+        .route("/reports", get(handle_reports_list))
+        .route("/reports/resolve", post(handle_report_resolve))
         .route("/users/{pubkey}/events", delete(handle_user_events_delete))
         // route_layer, not layer: it runs only for routes this router matched, so
         // an unknown /api/admin path still 404s rather than reporting 401.

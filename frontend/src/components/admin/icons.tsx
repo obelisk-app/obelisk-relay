@@ -95,3 +95,10 @@ export const RelayIcon = ({ class: className = '' }: IconProps) => (
     <path d="M3.6 3.6a9 9 0 0 0 0 12.8M16.4 16.4a9 9 0 0 0 0-12.8" {...stroke} />
   </svg>
 )
+
+/** Moderation reports: a flag. */
+export const ReportsIcon = ({ class: className = '' }: IconProps) => (
+  <svg class={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+    <path d="M4 21V4h11l-1 3 1 3H4" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+)

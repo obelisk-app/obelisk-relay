@@ -7,6 +7,7 @@ import { WhitelistManager } from './WhitelistManager'
 import { GroupsOverview } from './GroupsOverview'
 import { ReferenceAccountsManager } from './ReferenceAccountsManager'
 import { RelaySettings } from './RelaySettings'
+import { ReportsManager } from './ReportsManager'
 import { StorageManager } from './StorageManager'
 import { SearchIcon } from './SearchIcon'
 import { AdminSaveBar } from './AdminSaveBar'
@@ -18,10 +19,11 @@ import {
   ReferencesIcon,
   RelayIcon,
   SettingsIcon,
+  ReportsIcon,
   StorageIcon,
 } from './icons'
 
-type Tab = 'dashboard' | 'whitelist' | 'reference-accounts' | 'groups' | 'storage' | 'settings'
+type Tab = 'dashboard' | 'whitelist' | 'reference-accounts' | 'groups' | 'reports' | 'storage' | 'settings'
 
 type IconComponent = (props: { class?: string }) => preact.JSX.Element
 
@@ -41,6 +43,7 @@ const TAB_ICONS: Record<Tab, IconComponent> = {
   whitelist: AccessIcon,
   'reference-accounts': ReferencesIcon,
   groups: GroupsIcon,
+  reports: ReportsIcon,
   storage: StorageIcon,
   settings: SettingsIcon,
 }
@@ -65,6 +68,8 @@ const tabs: NavItem[] = [
     blurb: 'The accounts that seed follow sync and root the Web-of-Trust graph.' },
   { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon,
     blurb: 'Browse relay groups, metadata, members, and stored events.' },
+  { id: 'reports', label: 'Reports', description: 'User moderation reports', icon: ReportsIcon,
+    blurb: 'What users have reported, grouped by what was reported, with the decision you made.' },
   { id: 'storage', label: 'Storage', description: 'Database and pruning', icon: StorageIcon,
     blurb: 'What this relay has stored, and whether anything is being deleted.' },
   { id: 'settings', label: 'Settings', description: 'Reset and recovery', icon: SettingsIcon,
@@ -95,6 +100,12 @@ const searchTargets: SearchTarget[] = [
     title: 'Groups',
     description: 'Group metadata, members, events, moderation, delete groups',
     keywords: ['metadata', 'members', 'events', 'moderation', 'delete', 'channels'],
+  },
+  {
+    id: 'reports',
+    title: 'Reports',
+    description: 'NIP-56 moderation reports, spam, abuse, blocking accounts',
+    keywords: ['report', 'reports', '1984', 'nip-56', 'moderation', 'abuse', 'spam', 'flag', 'block', 'complaint'],
   },
   {
     id: 'storage',
@@ -389,6 +400,7 @@ export const AdminPanel = (_props: { path?: string }) => {
           {activeTab === 'whitelist' && <WhitelistManager />}
           {activeTab === 'reference-accounts' && <ReferenceAccountsManager />}
           {activeTab === 'groups' && <GroupsOverview />}
+          {activeTab === 'reports' && <ReportsManager />}
           {activeTab === 'storage' && <StorageManager />}
           {activeTab === 'settings' && (
             <RelaySettings

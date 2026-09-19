@@ -87,6 +87,11 @@ pub struct ServerState {
     /// Kept separately from the live oracle so the settings form can show the
     /// pending values rather than reverting to the running ones on reload.
     pub wot_configured: Arc<parking_lot::RwLock<WotConfigured>>,
+    /// Resolution state for moderation reports: which targets an admin has
+    /// already judged, and what they decided. Kept out of the event store on
+    /// purpose -- it is the operator's decision about someone else's claim, and
+    /// must not be something the reporter or the reported can publish or delete.
+    pub reports: crate::reports::ReportsState,
     /// The live connection limiter, so the admin console can report what is
     /// actually being enforced rather than only what is saved in the file. The
     /// two differ between a save and the restart that applies it.
@@ -722,6 +727,7 @@ pub async fn run_server(
         })),
         wot_roots_follow_reference_accounts: settings.wot.parsed_roots().is_empty(),
         connection_limiter: Arc::clone(&connection_limiter),
+        reports: crate::reports::ReportsState::new(Some(config_dir)),
     });
 
     let cors = CorsLayer::new()

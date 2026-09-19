@@ -24,6 +24,7 @@ pub mod reference_accounts;
 pub mod relay_middleware_integration_tests;
 #[cfg(test)]
 pub mod relay_middleware_tests;
+pub mod reports;
 pub mod sampled_metrics_handler;
 pub mod search_capability_middleware;
 pub mod server;

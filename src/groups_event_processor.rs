@@ -173,8 +173,24 @@ impl GroupsRelayProcessor {
     }
 
     /// Check if a pubkey is allowed to use this relay.
-    /// Returns true if whitelist is empty (no restriction) or pubkey is in the list.
+    ///
+    /// The blacklist is consulted *before* the open-relay short-circuit. It used
+    /// to come after, which meant that on a relay with no whitelist and no
+    /// Web-of-Trust tier -- i.e. an open one -- `is_empty()` returned true and
+    /// admission returned early, so blacklisting somebody silently did nothing.
+    /// The entry appeared in the console and in blacklist.json, and the account
+    /// carried on publishing. `Whitelist::contains` already honours the
+    /// blacklist; the bug was that it never got asked.
+    ///
+    /// A ban has to mean the same thing in every configuration, and "blocked"
+    /// is the one answer that must never depend on how permissive the relay is.
     fn is_allowed(&self, pubkey: &Option<PublicKey>) -> bool {
+        if let Some(pk) = pubkey {
+            if self.whitelist.blacklist().contains(pk) {
+                return false;
+            }
+        }
+
         if self.whitelist.is_empty() {
             return true;
         }
@@ -351,6 +367,23 @@ impl EventProcessor for GroupsRelayProcessor {
         let is_signer_traffic = event.kind.as_u16() == KIND_NIP46_SIGNER;
 
         // Enforce pubkey whitelist
+        // Check the *event's* author against the blacklist, not just the
+        // authenticated identity.
+        //
+        // `is_allowed` below keys on `context.authed_pubkey`, which is None
+        // whenever the client has not completed NIP-42 -- and on an open relay
+        // it never has to, because nothing forces an AUTH. So a banned key could
+        // simply not authenticate and publish freely: the ban applied to a
+        // session identity the spammer had no reason to establish.
+        //
+        // The signature is the identity here. Knowing who signed an event does
+        // not require them to have announced themselves first.
+        if !is_signer_traffic && self.whitelist.blacklist().contains(&event.pubkey) {
+            return Err(relay_builder::Error::restricted(
+                "This pubkey is blocked from this relay".to_string(),
+            ));
+        }
+
         if !is_signer_traffic && !self.is_allowed(&context.authed_pubkey) {
             return Err(relay_builder::Error::restricted(
                 "Access denied: your pubkey is not whitelisted on this relay".to_string(),
@@ -617,6 +650,82 @@ mod tests {
                 .verify_filters(&smuggled, empty_state(), &as_member)
                 .is_err(),
             "asking for reports alongside chat must not slip through"
+        );
+    }
+
+    /// Found by exercising the moderation queue end to end: blacklisting from a
+    /// report said "done", wrote the entry to disk, and the account kept
+    /// publishing. `is_allowed` short-circuited on `whitelist.is_empty()` before
+    /// the blacklist was ever consulted, so a ban was inert on exactly the
+    /// configuration where it is the *only* control available -- an open relay.
+    #[tokio::test]
+    async fn a_blacklisted_key_is_refused_even_on_an_open_relay() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+
+        let blacklist = crate::blacklist::Blacklist::new(None);
+        let whitelist = Whitelist::new(vec![], None, blacklist.clone());
+        assert!(
+            whitelist.is_empty(),
+            "this test is only meaningful on an open relay"
+        );
+
+        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), whitelist);
+
+        let spammer = Keys::generate();
+        // Unauthenticated, which is how clients actually connect to an open
+        // relay: nothing forces a NIP-42 exchange, so `authed_pubkey` is None
+        // and the ban has only the event signature to go on.
+        let context = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        let before = create_test_event(&spammer, 9, vec![Tag::custom(TagKind::h(), ["g"])]).await;
+        assert!(
+            processor
+                .handle_event(before, empty_state(), &context)
+                .await
+                .is_ok(),
+            "an open relay admits anyone to begin with"
+        );
+
+        blacklist.add(spammer.public_key());
+
+        let after = create_test_event(&spammer, 9, vec![Tag::custom(TagKind::h(), ["g"])]).await;
+        assert!(
+            processor
+                .handle_event(after, empty_state(), &context)
+                .await
+                .is_err(),
+            "a blacklisted key must be refused however permissive the relay is"
+        );
+
+        // And when the client *has* authenticated, the ban must hold there too.
+        let authed = EventContext {
+            authed_pubkey: Some(spammer.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(
+            processor
+                .verify_filters(
+                    &[Filter::new().kind(Kind::Custom(9))],
+                    empty_state(),
+                    &authed
+                )
+                .is_err(),
+            "a blacklisted key must not be able to read either"
         );
     }
 

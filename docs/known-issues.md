@@ -400,3 +400,52 @@ the same reason: whether a report was acted on is the operator's decision about
 someone else's claim, and must not be something the reporter or the reported can
 publish, replace or delete. Deleting that file reopens every case; it does not
 undo any action already taken.
+
+---
+
+## 18. The blacklist did not block anyone on an open relay
+
+**Severity: high. Fixed — found by end-to-end testing, not by review.**
+
+Blacklisting an account said "done", wrote the entry to `blacklist.json`, showed
+it in the console, and did not block them. Two independent faults, both in
+`is_allowed` (`src/groups_event_processor.rs`):
+
+1. **The blacklist was consulted after the open-relay short-circuit.** With no
+   manual whitelist and no Web-of-Trust tier, `Whitelist::is_empty()` returns
+   true and admission returned early — before the blacklist was read.
+   `Whitelist::contains` had always honoured the blacklist; it simply never got
+   asked.
+2. **Admission keyed on the authenticated pubkey.** `context.authed_pubkey` is
+   `None` until a client completes NIP-42, and on an open relay nothing forces
+   one. A banned account could just not authenticate. The ban applied to a
+   session identity the spammer had no reason to establish.
+
+Both are fixed: the blacklist is checked before the short-circuit, and an
+event's author is now checked against it directly. The signature is the
+identity — knowing who signed an event does not require them to announce
+themselves first.
+
+**public.obelisk.ar was not affected**, because Web-of-Trust is enabled there, so
+`is_empty()` returned false and the first path was never taken. That was luck,
+not design: any deployment running open — which the config file and the NIP-11
+description both describe this relay as — had an inert blacklist.
+
+Worth stating plainly for next time: **unit tests passed throughout.** The first
+version of the regression test authenticated the spammer, which no real client on
+an open relay does, so it exercised a path the bug did not live on. What found it
+was running the relay and trying to ban someone. Pinned now by
+`a_blacklisted_key_is_refused_even_on_an_open_relay`, which publishes
+unauthenticated.
+
+---
+
+## 19. `admin_delete_event` silently deleted nothing
+
+**Severity: medium. Fixed.**
+
+It built its scope list purely from managed groups, so on a relay with no managed
+groups the loop had nothing to iterate — and it returned `Ok(())` regardless. The
+caller, including the reports queue, was told the event had been deleted while it
+was still readable. Events in unmanaged groups and every non-group kind live in
+`Scope::Default`, which was never in the list. Fixed by always including it.

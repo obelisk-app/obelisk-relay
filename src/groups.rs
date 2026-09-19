@@ -1130,13 +1130,23 @@ impl Groups {
         let event_id =
             EventId::from_hex(event_id_hex).map_err(|_| Error::notice("Invalid event ID"))?;
 
-        let scopes: Vec<Scope> = self
+        // Scopes are derived from the managed groups, plus the default one.
+        //
+        // Without `Scope::Default` this deletes nothing on a relay with no
+        // managed groups -- the loop below simply has nothing to iterate -- and
+        // still returns Ok, so the caller is told the event was deleted when it
+        // is still there. Events in unmanaged groups, and every non-group kind,
+        // live in the default scope.
+        let mut scopes: Vec<Scope> = self
             .groups
             .iter()
             .map(|e| e.key().0.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+        if !scopes.contains(&Scope::Default) {
+            scopes.push(Scope::Default);
+        }
 
         for scope in &scopes {
             let filter = Filter::new().id(event_id);

@@ -36,7 +36,7 @@ services:
   # Automatic event retention pruning is disabled unless explicitly enabled in
   # public-config/settings.local.yml.
   public_relay:
-    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-v2026.09.19-reports-3-arm64}
+    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-v2026.09.19-reports-4-arm64}
     build:
       context: .
       dockerfile: Dockerfile
@@ -64,7 +64,7 @@ services:
       TOKIO_BLOCKING_THREADS: "2048"
       # See the note on the same line in groups_relay: the console reports the
       # running version from this, because the container cannot discover it.
-      RELAY_IMAGE_TAG: "${RELAY_IMAGE_TAG:-v2026.09.19-reports-3-arm64}"
+      RELAY_IMAGE_TAG: "${RELAY_IMAGE_TAG:-v2026.09.19-reports-4-arm64}"
     ports:
       - "127.0.0.1:8081:8080"
     # The relay process still runs as uid 0 inside the container, because the

@@ -37,6 +37,7 @@ use tracing::{info, warn};
 use crate::error::Error;
 
 const REPORTS_FILE: &str = "reports_state.json";
+const EVIDENCE_FILE: &str = "reports_evidence.json";
 
 /// NIP-56 kind for a moderation report.
 pub const KIND_REPORT_1984: Kind = Kind::Custom(1984);
@@ -317,6 +318,104 @@ impl ReportsState {
     }
 }
 
+/// What a reported message said, captured when the report arrived.
+///
+/// Without this a moderation queue is unworkable, because the evidence does not
+/// outlive the thing being moderated. Three ordinary events destroy it: the
+/// author deletes their own message, an admin deletes it, or the retention
+/// pruner reaches it -- and this relay has done the third, arming pruning in
+/// September 2026 to rescue a 5.2GB database. Reports filed before that now
+/// point at messages nobody can read, which is exactly the state that prompted
+/// this: a queue entry saying "spam" with nothing to judge.
+///
+/// The worst case is not accidental. A reported account can delete the message
+/// and the complaint against them becomes unreviewable, which makes deletion a
+/// defence rather than a remedy.
+///
+/// So the content is copied at report time, verbatim, along with who actually
+/// wrote it. The author here is *verified* -- it came off the stored event, not
+/// off the reporter's `p` tag -- so it stays actionable after the original is
+/// gone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Evidence {
+    /// Author of the reported event, read from the event itself.
+    pub author: String,
+    pub content: String,
+    /// Group the message was in, when it was in one.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    pub kind: u16,
+    pub created_at: u64,
+    /// When this snapshot was taken.
+    pub captured_at: u64,
+}
+
+/// Snapshots of reported content, keyed by the reported event's id.
+///
+/// A sidecar file, like the resolutions: it is the relay's record of what it saw
+/// at the time, and must not be something the reported party can revise.
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceStore {
+    inner: Arc<RwLock<HashMap<String, Evidence>>>,
+}
+
+impl EvidenceStore {
+    pub fn new(config_dir: Option<&Path>) -> Self {
+        let mut map = HashMap::new();
+        if let Some(dir) = config_dir {
+            let path = dir.join(EVIDENCE_FILE);
+            if path.exists() {
+                match std::fs::read_to_string(&path) {
+                    Ok(contents) => {
+                        match serde_json::from_str::<HashMap<String, Evidence>>(&contents) {
+                            Ok(loaded) => {
+                                info!("Loaded {} captured report snapshots", loaded.len());
+                                map = loaded;
+                            }
+                            Err(e) => warn!("Failed to parse {}: {}", path.display(), e),
+                        }
+                    }
+                    Err(e) => warn!("Failed to read {}: {}", path.display(), e),
+                }
+            }
+        }
+        Self {
+            inner: Arc::new(RwLock::new(map)),
+        }
+    }
+
+    pub fn get(&self, event_id: &str) -> Option<Evidence> {
+        self.inner.read().get(event_id).cloned()
+    }
+
+    /// Record a snapshot. First capture wins: a later report about the same
+    /// message must not be able to overwrite what the relay saw the first time.
+    pub fn capture(&self, event_id: String, evidence: Evidence) -> bool {
+        let mut guard = self.inner.write();
+        if guard.contains_key(&event_id) {
+            return false;
+        }
+        guard.insert(event_id, evidence);
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    pub fn persist(&self, config_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(config_dir)?;
+        let snapshot = self.inner.read().clone();
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(config_dir.join(EVIDENCE_FILE), json)
+    }
+}
+
 /// One row of the moderation queue: everything reported about a single target.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportCase {
@@ -347,6 +446,12 @@ pub struct ReportCase {
     pub reported_pubkey: Option<String>,
     /// Who the reporter *said* was responsible. Display only.
     pub claimed_pubkey: Option<String>,
+    /// True when `reported_content` came from a snapshot rather than from the
+    /// live event, i.e. the original has since been deleted or pruned. The
+    /// distinction matters to a moderator: one is the message as it stands, the
+    /// other is the message as it was when somebody objected to it.
+    #[serde(default)]
+    pub content_from_snapshot: bool,
     /// Group the reported event belongs to, derived from its `h` tag. Drives
     /// which actions apply: without it, "remove from group" is meaningless.
     pub group_id: Option<String>,
@@ -401,6 +506,7 @@ pub fn group_into_cases(reports: Vec<Report>, state: &ReportsState) -> Vec<Repor
                 reported_content: None,
                 reported_pubkey,
                 claimed_pubkey,
+                content_from_snapshot: false,
                 group_id: None,
             }
         })
@@ -588,6 +694,75 @@ mod tests {
             Some(subject.to_hex()),
             "when the report names a person, that person is the target"
         );
+    }
+
+    #[test]
+    fn a_snapshot_outlives_the_message_it_records() {
+        // The point of capturing: a reported account deleting their own message
+        // must not make the complaint unreviewable.
+        let store = EvidenceStore::default();
+        assert!(store.capture(
+            "evt".into(),
+            Evidence {
+                author: "author-hex".into(),
+                content: "buy my coin".into(),
+                group_id: Some("g1".into()),
+                kind: 9,
+                created_at: 100,
+                captured_at: 101,
+            },
+        ));
+
+        let kept = store.get("evt").expect("snapshot survives");
+        assert_eq!(kept.content, "buy my coin");
+        assert_eq!(
+            kept.author, "author-hex",
+            "the author comes off the real event, so the case stays actionable"
+        );
+    }
+
+    #[test]
+    fn the_first_capture_wins() {
+        // A later report about the same message must not be able to rewrite what
+        // the relay saw the first time -- otherwise the evidence is editable by
+        // whoever reports last.
+        let store = EvidenceStore::default();
+        let mk = |content: &str| Evidence {
+            author: "a".into(),
+            content: content.into(),
+            group_id: None,
+            kind: 9,
+            created_at: 1,
+            captured_at: 1,
+        };
+
+        assert!(store.capture("evt".into(), mk("original")));
+        assert!(!store.capture("evt".into(), mk("rewritten")));
+        assert_eq!(store.get("evt").unwrap().content, "original");
+    }
+
+    #[test]
+    fn snapshots_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("obelisk-evidence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = EvidenceStore::default();
+        store.capture(
+            "evt".into(),
+            Evidence {
+                author: "a".into(),
+                content: "kept".into(),
+                group_id: None,
+                kind: 9,
+                created_at: 1,
+                captured_at: 2,
+            },
+        );
+        store.persist(&dir).unwrap();
+
+        let reloaded = EvidenceStore::new(Some(&dir));
+        assert_eq!(reloaded.get("evt").unwrap().content, "kept");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

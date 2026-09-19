@@ -8,13 +8,14 @@ use crate::obelisk_index::ObeliskIndex;
 use crate::whitelist::{AccessTier, Whitelist};
 use crate::Groups;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use relay_builder::{EventContext, EventProcessor, Result, StoreCommand};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// NIP-46 remote-signing coordination (nostr-connect).
 ///
@@ -65,6 +66,11 @@ pub struct GroupsRelayProcessor {
     /// Separate, far tighter budget for kind 1984. Protects the moderation queue
     /// rather than the database; see `with_pubkey_rate_limit`.
     report_limiter: Option<Arc<PubkeyLimiter>>,
+    /// Snapshots of reported content, captured as reports arrive so the evidence
+    /// survives the message being deleted or pruned.
+    report_evidence: Option<Arc<crate::reports::EvidenceStore>>,
+    /// Where to persist those snapshots.
+    config_dir: Option<Arc<std::path::PathBuf>>,
     /// Optional optimized Obelisk read index. Normal relay behavior does not
     /// depend on this; it is updated only after events pass relay validation.
     obelisk_index: Option<Arc<ObeliskIndex>>,
@@ -102,6 +108,8 @@ impl GroupsRelayProcessor {
             pubkey_limiter: None,
             tier_limiters: None,
             report_limiter: None,
+            report_evidence: None,
+            config_dir: None,
             obelisk_index: None,
         }
     }
@@ -165,6 +173,89 @@ impl GroupsRelayProcessor {
         tiers
             .get(&tier.as_budget_key())
             .or(self.pubkey_limiter.as_ref())
+    }
+
+    /// Capture what a report points at, as it arrives.
+    pub fn with_report_evidence(
+        mut self,
+        evidence: Arc<crate::reports::EvidenceStore>,
+        config_dir: std::path::PathBuf,
+    ) -> Self {
+        self.report_evidence = Some(evidence);
+        self.config_dir = Some(Arc::new(config_dir));
+        self
+    }
+
+    /// Snapshot every event a report names, before anything can remove it.
+    ///
+    /// Runs on the way in rather than when the queue is read, because by read
+    /// time the message may be gone -- which is the whole problem. Failures are
+    /// logged and swallowed: a report must still be accepted even if the relay
+    /// cannot find what it refers to, since the reported event may live on
+    /// another relay entirely.
+    async fn capture_report_evidence(&self, report: &Event, scope: &Scope) {
+        let (Some(store), Some(config_dir)) = (&self.report_evidence, &self.config_dir) else {
+            return;
+        };
+
+        let targets: Vec<EventId> = report
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let v = t.as_slice();
+                (v.first().map(String::as_str) == Some("e") && v.len() >= 2)
+                    .then(|| EventId::from_hex(&v[1]).ok())
+                    .flatten()
+            })
+            .collect();
+
+        let mut captured_any = false;
+        for target in targets {
+            let hex = target.to_hex();
+            if store.get(&hex).is_some() {
+                continue;
+            }
+
+            let found = match self
+                .groups
+                .database()
+                .query(vec![Filter::new().id(target).limit(1)], scope)
+                .await
+            {
+                Ok(events) => events.into_iter().next(),
+                Err(e) => {
+                    debug!("Could not look up reported event {hex}: {e}");
+                    continue;
+                }
+            };
+
+            let Some(event) = found else { continue };
+
+            let captured = store.capture(
+                hex.clone(),
+                crate::reports::Evidence {
+                    author: event.pubkey.to_hex(),
+                    // Bounded: this is retained indefinitely, and a moderator
+                    // needs enough to judge rather than the whole payload.
+                    content: event.content.chars().take(2000).collect(),
+                    group_id: event
+                        .tags
+                        .find(TagKind::h())
+                        .and_then(|t| t.content())
+                        .map(str::to_string),
+                    kind: event.kind.as_u16(),
+                    created_at: event.created_at.as_secs(),
+                    captured_at: Timestamp::now().as_secs(),
+                },
+            );
+            captured_any |= captured;
+        }
+
+        if captured_any {
+            if let Err(e) = store.persist(config_dir.as_path()) {
+                warn!("Failed to persist report evidence: {e}");
+            }
+        }
     }
 
     pub fn with_obelisk_index(mut self, obelisk_index: Arc<ObeliskIndex>) -> Self {
@@ -420,6 +511,11 @@ impl EventProcessor for GroupsRelayProcessor {
         }
 
         let subdomain = context.subdomain.clone();
+
+        // Snapshot what this report points at, now, while it still exists.
+        if event.kind == crate::reports::KIND_REPORT_1984 {
+            self.capture_report_evidence(&event, &subdomain).await;
+        }
 
         // Allow events through for unmanaged groups (groups not in relay state)
         // Per NIP-29: In unmanaged groups, everyone is considered a member

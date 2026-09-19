@@ -1028,6 +1028,12 @@ export interface ReportCase {
   reported_pubkey: string | null
   /** Who the reporter *said* was responsible. Display only, never actionable. */
   claimed_pubkey: string | null
+  /**
+   * True when the content shown is a snapshot taken at report time because the
+   * original has since been deleted or pruned. A moderator should know whether
+   * they are reading the message as it stands or as it was when objected to.
+   */
+  content_from_snapshot: boolean
   /** Present only when the reported event belongs to a group. */
   group_id: string | null
 }

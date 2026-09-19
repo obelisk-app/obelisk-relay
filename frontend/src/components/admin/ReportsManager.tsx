@@ -322,15 +322,23 @@ export const ReportsManager = () => {
                 {/* What was reported. Rendered as a text child, so a hostile
                     message cannot inject markup into the console. */}
                 {c.reported_content !== null && (
-                  <blockquote class="mt-3 p-3 rounded bg-[var(--color-bg-secondary)] text-sm whitespace-pre-wrap break-words">
-                    {c.reported_content || <em class="text-[var(--color-text-tertiary)]">(no text content)</em>}
-                  </blockquote>
+                  <div class="mt-3">
+                    <blockquote class="p-3 rounded bg-[var(--color-bg-secondary)] text-sm whitespace-pre-wrap break-words">
+                      {c.reported_content || <em class="text-[var(--color-text-tertiary)]">(no text content)</em>}
+                    </blockquote>
+                    {c.content_from_snapshot && (
+                      <p class="text-xs text-[var(--color-text-tertiary)] mt-1">
+                        Captured when this was reported. The message has since been deleted or
+                        pruned, so this is what the relay saw at the time.
+                      </p>
+                    )}
+                  </div>
                 )}
                 {isEvent && c.reported_content === null && (
                   <p class="admin-access-hint mt-2">
-                    The reported message is no longer stored, so the relay cannot confirm who
-                    wrote it. Blocking is unavailable for that reason — only the reporter's
-                    unverified claim remains, and a ban should not rest on that.
+                    Nothing to show: this was reported before the relay began keeping a copy of
+                    reported messages, and the original is gone. Reports filed from now on keep
+                    a snapshot, so this will not happen again.
                   </p>
                 )}
 

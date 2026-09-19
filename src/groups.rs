@@ -953,6 +953,7 @@ impl Groups {
     pub async fn admin_get_reports(
         &self,
         state: &crate::reports::ReportsState,
+        evidence: &crate::reports::EvidenceStore,
         limit: usize,
     ) -> Result<Vec<crate::reports::ReportCase>, Error> {
         use crate::reports::{group_into_cases, Report, ReportTarget, KIND_REPORT_1984};
@@ -991,6 +992,7 @@ impl Groups {
                 continue;
             };
 
+            let mut found_live = false;
             for scope in &scopes {
                 let found = self
                     .db
@@ -1012,7 +1014,26 @@ impl Groups {
                         .find(TagKind::h())
                         .and_then(|t| t.content())
                         .map(str::to_string);
+                    found_live = true;
                     break;
+                }
+            }
+
+            // Gone from the store -- deleted by its author, removed by an admin,
+            // or pruned. Fall back to what was captured when it was reported.
+            // Both the content and the author come from the event the relay
+            // actually saw, so the case stays judgeable and stays actionable.
+            if !found_live {
+                if let Some(snapshot) = evidence.get(id) {
+                    case.reported_content = Some(if snapshot.content.chars().count() > 500 {
+                        let truncated: String = snapshot.content.chars().take(500).collect();
+                        format!("{truncated}…")
+                    } else {
+                        snapshot.content.clone()
+                    });
+                    case.reported_pubkey = Some(snapshot.author.clone());
+                    case.group_id = snapshot.group_id.clone();
+                    case.content_from_snapshot = true;
                 }
             }
         }
@@ -1104,6 +1125,11 @@ impl Groups {
     /// take -- remove from group, blacklist -- act on a person. Returns None if
     /// the event is gone, which is a real case: someone may already have deleted
     /// it between the report and the review.
+    /// The event store, for callers that need to look something up directly.
+    pub fn database(&self) -> &Arc<RelayDatabase> {
+        &self.db
+    }
+
     pub async fn admin_find_event_author(
         &self,
         event_id: &EventId,

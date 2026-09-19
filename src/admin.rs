@@ -1918,7 +1918,7 @@ async fn handle_reports_list(
     let cases = state
         .http_state
         .groups
-        .admin_get_reports(&state.reports, limit)
+        .admin_get_reports(&state.reports, &state.report_evidence, limit)
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -2087,6 +2087,10 @@ async fn report_subject_pubkey(
                 .admin_find_event_author(&event_id)
                 .await
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                // Deleted since, but the relay saw it when it was reported --
+                // that snapshot names the real author, so the case is still
+                // actionable. Deleting the evidence must not be a way out.
+                .or_else(|| state.report_evidence.get(id).map(|e| e.author))
                 .ok_or_else(|| {
                     error_response(
                         StatusCode::NOT_FOUND,

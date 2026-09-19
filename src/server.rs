@@ -92,6 +92,9 @@ pub struct ServerState {
     /// purpose -- it is the operator's decision about someone else's claim, and
     /// must not be something the reporter or the reported can publish or delete.
     pub reports: crate::reports::ReportsState,
+    /// Snapshots of reported content, so the queue still has something to show
+    /// after the original message is deleted or pruned.
+    pub report_evidence: Arc<crate::reports::EvidenceStore>,
     /// The live connection limiter, so the admin console can report what is
     /// actually being enforced rather than only what is saved in the file. The
     /// two differ between a save and the restart that applies it.
@@ -466,12 +469,18 @@ pub async fn run_server(
         info!("NIP-50 indexed search disabled; search filters will be rejected");
     }
 
+    // Shared with ServerState: the processor writes snapshots as reports arrive,
+    // the admin API reads them when the original message is gone.
+    let report_evidence = Arc::new(crate::reports::EvidenceStore::new(Some(config_dir)));
+
     let mut groups_processor = GroupsRelayProcessor::with_admin_pubkeys(
         groups.clone(),
         relay_keys.public_key,
         admin_pubkeys.clone(),
         whitelist.clone(),
     );
+    groups_processor = groups_processor
+        .with_report_evidence(Arc::clone(&report_evidence), config_dir.to_path_buf());
     if let Some(index) = &obelisk_index {
         groups_processor = groups_processor.with_obelisk_index(index.clone());
     }
@@ -728,6 +737,7 @@ pub async fn run_server(
         wot_roots_follow_reference_accounts: settings.wot.parsed_roots().is_empty(),
         connection_limiter: Arc::clone(&connection_limiter),
         reports: crate::reports::ReportsState::new(Some(config_dir)),
+        report_evidence: Arc::clone(&report_evidence),
     });
 
     let cors = CorsLayer::new()

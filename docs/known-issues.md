@@ -449,3 +449,42 @@ groups the loop had nothing to iterate — and it returned `Ok(())` regardless. 
 caller, including the reports queue, was told the event had been deleted while it
 was still readable. Events in unmanaged groups and every non-group kind live in
 `Scope::Default`, which was never in the list. Fixed by always including it.
+
+---
+
+## 20. Reported content is snapshotted, because evidence must outlive the message
+
+**Severity: design decision. Worth understanding before changing retention.**
+
+The reports queue keeps its own copy of every reported message, captured when
+the report arrives, in `config/reports_evidence.json`.
+
+Without it the queue is unworkable, because the evidence does not outlive the
+thing being moderated. Three ordinary events destroy it:
+
+- the author deletes their own message — which makes deletion a *defence*, not a
+  remedy: report me, I delete, your complaint becomes unreviewable;
+- an admin deletes it while working a different case;
+- the retention pruner reaches it. This relay has done exactly that: pruning was
+  armed on 2026-09-15 to rescue a 5.2 GB database, so reports filed before then
+  now point at messages nobody can read. That is the state that prompted this —
+  a queue entry saying "spam" with nothing to judge.
+
+The snapshot also records the **verified author**, read off the stored event
+rather than off the reporter's `p` tag. That is what keeps a case actionable
+after the original is gone: without it, blocking has to be refused, because the
+only remaining name is the accuser's claim (see §17).
+
+Properties worth knowing:
+
+- **First capture wins.** A later report about the same message cannot rewrite
+  what the relay saw first, or the evidence would be editable by whoever reports
+  last.
+- **Content is capped at 2000 characters.** It is retained indefinitely, and a
+  moderator needs enough to judge, not the whole payload.
+- **Capture failures are not fatal.** A report is still accepted if the relay
+  cannot find what it refers to — the reported event may live on another relay.
+  The queue then says so plainly rather than showing an empty quote.
+- **The file grows with reports, never shrinks.** It is small (one short text per
+  reported message) but it is not covered by the pruner, deliberately: pruning
+  the evidence would reintroduce the problem it exists to solve.

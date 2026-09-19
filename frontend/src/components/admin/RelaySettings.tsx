@@ -5,6 +5,7 @@ import {
   type BackupEntry,
   type ConfigResetResult,
   type ObeliskIndexSettings,
+  type ConnectionSettings,
   type RelayIdentity,
   type UpdateStatus,
 } from '../../services/AdminApiClient'
@@ -336,6 +337,7 @@ const UpdateCard = () => {
 export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps) => {
   const [identity, setIdentity] = useState<RelayIdentity | null>(null)
   const [obeliskIndex, setObeliskIndex] = useState<ObeliskIndexSettings | null>(null)
+  const [limits, setLimits] = useState<ConnectionSettings | null>(null)
   const [identityForm, setIdentityForm] = useState({
     relay_name: '',
     relay_description: '',
@@ -358,6 +360,9 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
   const [toast, setToast] = useState<string | null>(null)
   // Last-saved copies, so the save bar can tell an edit from a reload.
   const [obeliskBaseline, setObeliskBaseline] = useState<ObeliskIndexSettings | null>(null)
+  const [limitsBaseline, setLimitsBaseline] = useState<ConnectionSettings | null>(null)
+  // Typed confirmation for force_public_groups; see the card below.
+  const [forcePublicConfirm, setForcePublicConfirm] = useState('')
   // Faces for the admin list. An npub identifies a key but not a person, and
   // "who has the keys to this relay" is exactly the question worth answering.
   const [adminProfiles, setAdminProfiles] = useState<Map<string, NostrProfile>>(new Map())
@@ -372,11 +377,12 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
     setLoading(true)
     setError(null)
     try {
-      const [identityData, adminData, backupData, obeliskIndexData] = await Promise.all([
+      const [identityData, adminData, backupData, obeliskIndexData, limitsData] = await Promise.all([
         adminApi.getRelayIdentity(),
         adminApi.getAdminPubkeys(),
         adminApi.getConfigBackups(),
         adminApi.getObeliskIndexSettings(),
+        adminApi.getConnectionSettings(),
       ])
       setIdentity(identityData)
       setIdentityForm({
@@ -395,6 +401,8 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       setBackups(backupData)
       setObeliskIndex(obeliskIndexData)
       setObeliskBaseline(obeliskIndexData)
+      setLimits(limitsData)
+      setLimitsBaseline(limitsData)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load relay settings')
     } finally {
@@ -436,6 +444,85 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
       setBusy(null)
     }
   }
+
+  const updateLimits = (patch: Partial<ConnectionSettings>) => {
+    setLimits(prev => prev ? { ...prev, ...patch } : prev)
+  }
+
+  const saveLimits = async () => {
+    if (!limits) return
+    setBusy('limits')
+    setError(null)
+    try {
+      const response = await adminApi.updateConnectionSettings({
+        max_connections: limits.max_connections,
+        max_connections_per_ip: limits.max_connections_per_ip,
+        max_connection_duration_minutes: limits.max_connection_duration_minutes,
+        idle_timeout_minutes: limits.idle_timeout_minutes,
+        max_subscriptions: limits.max_subscriptions,
+        max_limit: limits.max_limit,
+        force_public_groups: limits.force_public_groups,
+        force_public_confirm: forcePublicConfirm,
+      })
+      setLimits(response)
+      setLimitsBaseline(response)
+      setForcePublicConfirm('')
+      showToast('Connection limits saved. Restart relay to apply them.')
+    } catch (e) {
+      // Rethrown so the save bar can name this section in its failure list.
+      setError(e instanceof Error ? e.message : 'Failed to save connection limits')
+      throw e
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Compare only the fields that are actually sent. The response echoes derived
+  // values (running_*, active_connections, restart_required) that change on
+  // their own, and including them would report the section as permanently dirty.
+  const limitsDirty = Boolean(
+    limits && limitsBaseline && (
+      limits.max_connections !== limitsBaseline.max_connections ||
+      limits.max_connections_per_ip !== limitsBaseline.max_connections_per_ip ||
+      limits.max_connection_duration_minutes !== limitsBaseline.max_connection_duration_minutes ||
+      limits.idle_timeout_minutes !== limitsBaseline.idle_timeout_minutes ||
+      limits.max_subscriptions !== limitsBaseline.max_subscriptions ||
+      limits.max_limit !== limitsBaseline.max_limit ||
+      limits.force_public_groups !== limitsBaseline.force_public_groups
+    ),
+  )
+
+  // Only switching the flag *on* destroys information, so only that direction
+  // is gated. Turning it back off is safe and needs no phrase.
+  const turningForcePublicOn = Boolean(
+    limits && limitsBaseline && limits.force_public_groups && !limitsBaseline.force_public_groups,
+  )
+
+  // Caught here as well as server-side so the save bar can explain the block
+  // instead of the user discovering it as a failed request.
+  const limitsBlocked = limits && limits.max_connections_per_ip > limits.max_connections
+    ? 'The per-IP limit cannot exceed the total connection limit.'
+    : turningForcePublicOn && !confirmMatches(forcePublicConfirm, 'FORCE PUBLIC')
+      ? 'Type FORCE PUBLIC to confirm making every existing group public.'
+      : undefined
+
+  useDirtySection(
+    {
+      id: 'limits',
+      label: 'Connection limits',
+      dirty: limitsDirty,
+      blocked: limitsBlocked,
+      consequence: turningForcePublicOn
+        ? 'On restart this clears private and hidden on every existing group. It cannot be undone.'
+        : limitsDirty
+          ? 'Applies after the relay restarts.'
+          : undefined,
+    },
+    {
+      save: saveLimits,
+      discard: () => setLimits(limitsBaseline),
+    },
+  )
 
   const updateObeliskIndex = (patch: Partial<ObeliskIndexSettings>) => {
     setObeliskIndex(prev => prev ? { ...prev, ...patch } : prev)
@@ -800,6 +887,161 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
               </div>
             </div>
           </section>
+
+          {limits && (
+            <section class="admin-settings-card">
+              <div class="admin-settings-card-header">
+                <div>
+                  <h3>Connection limits</h3>
+                  <p>
+                    How much of this relay one client, or everyone together, can occupy.
+                    These are the only limits that apply before a client authenticates.
+                  </p>
+                </div>
+                <div class="admin-row-actions">
+                  <span class="admin-status-badge">
+                    {limits.active_connections} connected
+                  </span>
+                  {limits.restart_required && (
+                    <span class="admin-status-badge admin-status-badge-warn">Restart required</span>
+                  )}
+                </div>
+              </div>
+
+              <div class="admin-rate-grid mt-4">
+                <label>
+                  <span>Max connections</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.max_connections}
+                    onInput={e =>
+                      updateLimits({
+                        max_connections: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>Currently enforcing {limits.running_max_connections}.</small>
+                </label>
+                <label>
+                  <span>Max per IP</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.max_connections_per_ip}
+                    onInput={e =>
+                      updateLimits({
+                        max_connections_per_ip: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>Currently enforcing {limits.running_max_connections_per_ip}.</small>
+                </label>
+                <label>
+                  <span>Max connection age (min)</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.max_connection_duration_minutes}
+                    onInput={e =>
+                      updateLimits({
+                        max_connection_duration_minutes: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>A client is disconnected after this and must reconnect.</small>
+                </label>
+                <label>
+                  <span>Idle timeout (min)</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.idle_timeout_minutes}
+                    onInput={e =>
+                      updateLimits({
+                        idle_timeout_minutes: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>Reading is not traffic: a client sitting in a channel looks idle.</small>
+                </label>
+                <label>
+                  <span>Max subscriptions</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.max_subscriptions}
+                    onInput={e =>
+                      updateLimits({
+                        max_subscriptions: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>Concurrent REQs allowed on one connection.</small>
+                </label>
+                <label>
+                  <span>Max events per query</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={limits.max_limit}
+                    onInput={e =>
+                      updateLimits({
+                        max_limit: Number((e.target as HTMLInputElement).value),
+                      })
+                    }
+                  />
+                  <small>Ceiling on a filter&apos;s own limit.</small>
+                </label>
+              </div>
+
+              <label class="admin-toggle-row mt-4">
+                <input
+                  type="checkbox"
+                  checked={limits.force_public_groups}
+                  onChange={e =>
+                    updateLimits({
+                      force_public_groups: (e.target as HTMLInputElement).checked,
+                    })
+                  }
+                />
+                <span>
+                  <strong>Force all groups public</strong>
+                  <small>
+                    Currently {limits.running_force_public_groups ? 'on' : 'off'}. On restart this
+                    clears <code>private</code> and <code>hidden</code> on every stored group —
+                    including groups other people created. There is no undo.
+                  </small>
+                </span>
+              </label>
+
+              {turningForcePublicOn && (
+                <label class="mt-2 block">
+                  <span class="block text-sm mb-1">
+                    Type <strong>FORCE PUBLIC</strong> to confirm
+                  </span>
+                  <input
+                    type="text"
+                    value={forcePublicConfirm}
+                    onInput={e => setForcePublicConfirm((e.target as HTMLInputElement).value)}
+                    placeholder="FORCE PUBLIC"
+                    autocomplete="off"
+                  />
+                </label>
+              )}
+
+              {limitsBlocked && (
+                <p class="admin-access-hint" role="alert">{limitsBlocked}</p>
+              )}
+
+              <p class="admin-access-hint">
+                Saved values take effect when the relay restarts; until then the relay keeps
+                enforcing the &quot;currently enforcing&quot; figures above. Setting the per-IP
+                limit too low will disconnect people sharing an address, such as an office or a
+                household.
+              </p>
+            </section>
+          )}
 
           {obeliskIndex && (
             <section class="admin-settings-card">

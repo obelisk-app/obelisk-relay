@@ -1,6 +1,7 @@
 import { NostrClient } from '../api/nostr_client'
 import type { Group } from '../types'
 import { BaseComponent } from './BaseComponent'
+import { ModalPanel } from './ModalPanel'
 
 interface GroupInfoProps {
   group: Group
@@ -25,6 +26,17 @@ interface GroupInfoState {
   isAdmin: boolean
   isMember: boolean
   copiedId: boolean
+  /**
+   * Metadata edited here that the relay has accepted but not yet broadcast back.
+   *
+   * These fields used to be written straight onto `this.props.group` -- an
+   * object owned by App's groupsMap -- with no setState. The re-render happened
+   * only because something else triggered one, and the next relay event
+   * overwrote the value. Holding the edit locally and layering it over the prop
+   * makes the optimistic update explicit and survives until the real event
+   * arrives.
+   */
+  localEdits: Partial<Pick<Group, 'name' | 'about' | 'picture' | 'private' | 'closed' | 'broadcast'>>
 }
 
 export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
@@ -42,6 +54,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
     isUpdatingImage: false,
     isAdmin: false,
     isMember: false,
+    localEdits: {},
     copiedId: false
   }
 
@@ -144,13 +157,13 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
       await this.props.client.updateGroupMetadata(updatedGroup)
 
       if ('private' in changes && changes.private !== undefined) {
-        this.props.group.private = changes.private
+        this.setState(prev => ({ localEdits: { ...prev.localEdits, private: changes.private } }))
         this.props.showMessage('Group privacy updated successfully!', 'success')
       } else if ('closed' in changes && changes.closed !== undefined) {
-        this.props.group.closed = changes.closed
+        this.setState(prev => ({ localEdits: { ...prev.localEdits, closed: changes.closed } }))
         this.props.showMessage('Group membership setting updated successfully!', 'success')
       } else if ('broadcast' in changes && changes.broadcast !== undefined) {
-        this.props.group.broadcast = changes.broadcast
+        this.setState(prev => ({ localEdits: { ...prev.localEdits, broadcast: changes.broadcast } }))
         this.props.showMessage('Group broadcast setting updated successfully!', 'success')
       }
     } catch (error) {
@@ -188,7 +201,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
         ...group,
         name: editingName
       });
-      group.name = editingName;
+      this.setState(prev => ({ localEdits: { ...prev.localEdits, name: editingName } }));
       this.setState({ showEditName: false });
       showMessage('Group name updated successfully!', 'success');
     } catch (error) {
@@ -212,7 +225,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
         ...group,
         about: editingAbout
       });
-      group.about = editingAbout;
+      this.setState(prev => ({ localEdits: { ...prev.localEdits, about: editingAbout } }));
       this.setState({ showEditAbout: false });
       showMessage('Group description updated successfully!', 'success');
     } catch (error) {
@@ -234,7 +247,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
         ...this.props.group,
         picture: this.state.editingImage
       });
-      this.props.group.picture = this.state.editingImage;
+      this.setState(prev => ({ localEdits: { ...prev.localEdits, picture: this.state.editingImage } }));
       this.handleHideEditImage();
       this.props.showMessage('Group image updated successfully!', 'success');
     } catch (error) {
@@ -266,8 +279,13 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
   }
 
   render() {
-    const { group, isEditing, onEditCancel } = this.props
-    const { editingName, editingAbout, showConfirmDelete, isDeleting, showEditName, showEditAbout, showEditImage, editingImage, isUpdatingImage } = this.state
+    const { group: groupProp, isEditing, onEditCancel } = this.props
+    const { editingName, editingAbout, showConfirmDelete, isDeleting, showEditName, showEditAbout, showEditImage, editingImage, isUpdatingImage, localEdits } = this.state
+
+    // Layer this session's accepted edits over the group from App. Once the
+    // relay broadcasts the new metadata the two agree and this is a no-op; until
+    // then it is what makes the change visible.
+    const group = { ...groupProp, ...localEdits }
 
     return (
       <div class="space-y-6">
@@ -275,13 +293,31 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
         <div class="flex flex-col gap-4">
           <div class="flex items-start justify-between">
             <div class="flex items-center gap-4 min-w-0">
+              {/* A bare div with onClick meant admins could not open the image
+                  editor from a keyboard at all. Given button semantics only when
+                  it is actually actionable, so non-admins still get a plain
+                  decorative avatar rather than a focusable no-op. */}
               <div
-                class={`relative w-20 h-20 bg-[var(--color-bg-primary)] rounded-full flex items-center justify-center text-3xl overflow-hidden border border-[var(--color-border)] ${this.state.isAdmin ? 'group cursor-pointer' : ''}`}
+                class={`relative w-20 h-20 bg-[var(--color-bg-primary)] rounded-full flex items-center justify-center text-3xl overflow-hidden border border-[var(--color-border)] ${this.state.isAdmin ? 'group cursor-pointer focus-visible:ring-2 focus-visible:ring-accent' : ''}`}
                 onClick={this.state.isAdmin ? this.handleShowEditImage : undefined}
+                onKeyDown={
+                  this.state.isAdmin
+                    ? (e: KeyboardEvent) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          this.handleShowEditImage()
+                        }
+                      }
+                    : undefined
+                }
+                role={this.state.isAdmin ? 'button' : undefined}
+                tabIndex={this.state.isAdmin ? 0 : undefined}
+                aria-label={this.state.isAdmin ? 'Change group image' : undefined}
               >
                 {group.picture ? (
                   <img
                     src={group.picture}
+                    referrerpolicy="no-referrer"
                     alt={group.name || 'Group'}
                     class="w-full h-full object-cover"
                     onError={(e) => {
@@ -294,7 +330,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
                 )}
                 {/* Hover overlay - only for admins */}
                 {this.state.isAdmin && (
-                  <div class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 transition-opacity">
                     <svg class="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                       <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -347,7 +383,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
                         {this.state.isAdmin && (
                           <button
                             onClick={() => this.setState({ showEditName: true, editingName: group.name })}
-                            class="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors opacity-0 group-hover:opacity-100"
+                            class="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100"
                             title="Edit group name"
                           >
                             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -391,7 +427,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
                         {this.state.isAdmin && (
                           <button
                             onClick={() => this.setState({ showEditAbout: true, editingAbout: group.about || '' })}
-                            class="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors opacity-0 group-hover:opacity-100 shrink-0"
+                            class="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 shrink-0"
                             title="Edit group description"
                           >
                             <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -591,14 +627,18 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
         {/* Image Edit Modal */}
         {showEditImage && (
           <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div class="bg-[var(--color-bg-secondary)] rounded-lg shadow-xl max-w-md w-full p-4 space-y-4">
-              <h3 class="text-lg font-medium text-[var(--color-text-primary)]">Edit Group Image</h3>
+            <ModalPanel
+              labelledBy="edit-group-image-title"
+              onClose={() => this.setState({ showEditImage: false })}
+              class="bg-[var(--color-bg-secondary)] rounded-lg shadow-xl max-w-md w-full p-4 space-y-4"
+            >
+              <h3 id="edit-group-image-title" class="text-lg font-medium text-[var(--color-text-primary)]">Edit Group Image</h3>
               <form onSubmit={this.handleImageSubmit} class="space-y-4">
                 <div class="space-y-2">
-                  <label class="block text-sm font-medium text-[var(--color-text-secondary)]">
+                  <label class="block text-sm font-medium text-[var(--color-text-secondary)]" for="groupinfo-image-url">
                     Image URL
                   </label>
-                  <input
+                  <input id="groupinfo-image-url"
                     type="url"
                     value={editingImage}
                     onInput={(e) => this.setState({ editingImage: (e.target as HTMLInputElement).value })}
@@ -654,7 +694,7 @@ export class GroupInfo extends BaseComponent<GroupInfoProps, GroupInfoState> {
                   </button>
                 </div>
               </form>
-            </div>
+            </ModalPanel>
           </div>
         )}
       </div>

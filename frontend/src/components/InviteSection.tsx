@@ -212,7 +212,7 @@ export class InviteSection extends Component<InviteSectionProps, InviteSectionSt
                     <div class="flex items-center gap-2">
                       <button
                         onClick={() => this.copyInviteLink(code)}
-                        class="opacity-0 group-hover:opacity-100 text-[11px] text-[var(--color-text-tertiary)]
+                        class="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-[11px] text-[var(--color-text-tertiary)]
                                hover:text-[var(--color-text-secondary)] transition-all duration-150 flex items-center gap-1"
                       >
                         {showCopied ? (
@@ -240,7 +240,7 @@ export class InviteSection extends Component<InviteSectionProps, InviteSectionSt
                             this.setState({ inviteAction: { type: 'delete', code } })
                           }
                         }}
-                        class={`opacity-0 group-hover:opacity-100 text-[11px] transition-all duration-150 flex items-center gap-1
+                        class={`opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-[11px] transition-all duration-150 flex items-center gap-1
                                ${inviteAction?.type === 'delete' && inviteAction.code === code
                                  ? 'text-red-400 hover:text-red-300'
                                  : 'text-red-400 hover:text-red-300'}`}

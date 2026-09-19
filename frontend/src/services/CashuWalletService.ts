@@ -224,6 +224,9 @@ export class CashuWalletService implements ICashuWalletService {
         try {
           walletP2pk = await this.wallet.getP2pk();
         } catch (error) {
+          // Swallowed deliberately, but not silently: this file had no logging at
+          // all, so wallet failures left no trace anywhere to debug from.
+          console.error("[CashuWallet] wallet ready-wait failed:", error);
         }
         
         if (!walletP2pk) {
@@ -644,6 +647,9 @@ export class CashuWalletService implements ICashuWalletService {
           return balance;
         }
       } catch (error) {
+        // Swallowed deliberately, but not silently: this file had no logging at
+        // all, so wallet failures left no trace anywhere to debug from.
+        console.error("[CashuWallet] loadCachedBalanceForUser failed:", error);
       }
     }
     return 0;
@@ -1075,6 +1081,9 @@ export class CashuWalletService implements ICashuWalletService {
       // Get mint balances to trigger calculation
       await this.getMintBalances();
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] refreshWalletState failed:", error);
     }
   }
 
@@ -1203,6 +1212,9 @@ export class CashuWalletService implements ICashuWalletService {
           return { proofs: [], claimed: true };
         }
       } catch (error) {
+        // Swallowed deliberately, but not silently: this file had no logging at
+        // all, so wallet failures left no trace anywhere to debug from.
+        console.error("[CashuWallet] checkAndClaimTokens failed:", error);
       }
 
       return { proofs: [], claimed: false };
@@ -1390,6 +1402,9 @@ export class CashuWalletService implements ICashuWalletService {
             }
           }
         } catch (err) {
+          // Swallowed deliberately, but not silently: this file had no logging at
+          // all, so wallet failures left no trace anywhere to debug from.
+          console.error("[CashuWallet] fetchExistingWallet failed:", err);
         }
       } else {
         // No mints found at all
@@ -1467,6 +1482,9 @@ export class CashuWalletService implements ICashuWalletService {
         await this.startNutzapMonitor();
       }
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] addP2PKKeyToExistingWallet failed:", error);
     }
   }
 
@@ -1531,6 +1549,9 @@ export class CashuWalletService implements ICashuWalletService {
             await this.wallet.backup();  // Update backup
           }
         } catch (error) {
+          // Swallowed deliberately, but not silently: this file had no logging at
+          // all, so wallet failures left no trace anywhere to debug from.
+          console.error("[CashuWallet] publishNutzapConfig failed:", error);
         }
       }
 
@@ -1550,6 +1571,9 @@ export class CashuWalletService implements ICashuWalletService {
       await mintList.publishReplaceable();
 
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] publishNutzapConfig failed:", error);
     }
   }
 
@@ -1598,6 +1622,9 @@ export class CashuWalletService implements ICashuWalletService {
         } else {
         }
       } catch (error) {
+        // Swallowed deliberately, but not silently: this file had no logging at
+        // all, so wallet failures left no trace anywhere to debug from.
+        console.error("[CashuWallet] startNutzapMonitor failed:", error);
       }
 
       // Listen for all nutzap monitor events
@@ -1660,6 +1687,9 @@ export class CashuWalletService implements ICashuWalletService {
         });
 
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] startNutzapMonitor failed:", error);
       // Don't throw - the wallet can still function without nutzap monitoring
     }
   }
@@ -1710,6 +1740,9 @@ export class CashuWalletService implements ICashuWalletService {
           this.cachedBalance = balance;
         }
       } catch (error) {
+        // Swallowed deliberately, but not silently: this file had no logging at
+        // all, so wallet failures left no trace anywhere to debug from.
+        console.error("[CashuWallet] loadCachedBalance failed:", error);
       }
     }
   }
@@ -1730,6 +1763,9 @@ export class CashuWalletService implements ICashuWalletService {
       try {
         this.transactionHistory = JSON.parse(stored);
       } catch (error) {
+        // Swallowed deliberately, but not silently: this file had no logging at
+        // all, so wallet failures left no trace anywhere to debug from.
+        console.error("[CashuWallet] loadTransactionHistoryFromStorage failed:", error);
       }
     }
   }
@@ -1769,6 +1805,9 @@ export class CashuWalletService implements ICashuWalletService {
       await historyEvent.publish();
 
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] createSpendingHistoryEvent failed:", error);
     }
   }
 
@@ -1863,6 +1902,9 @@ export class CashuWalletService implements ICashuWalletService {
             addedCount++;
           }
         } catch (err) {
+          // Swallowed deliberately, but not silently: this file had no logging at
+          // all, so wallet failures left no trace anywhere to debug from.
+          console.error("[CashuWallet] loadTransactionHistory failed:", err);
         }
       }
 
@@ -1877,6 +1919,9 @@ export class CashuWalletService implements ICashuWalletService {
         this.saveTransactionHistory();
       }
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] loadTransactionHistory failed:", error);
     }
   }
 
@@ -2148,6 +2193,9 @@ export class CashuWalletService implements ICashuWalletService {
               }
             }
           } catch (outboxError) {
+            // Swallowed deliberately, but not silently: this file had no logging at
+            // all, so wallet failures left no trace anywhere to debug from.
+            console.error("[CashuWallet] fetchUser10019 outbox lookup failed:", outboxError);
           }
 
           // If outbox model failed or returned null, try direct fetch from current relays
@@ -2244,6 +2292,9 @@ export class CashuWalletService implements ICashuWalletService {
       });
       
     } catch (error) {
+      // Swallowed deliberately, but not silently: this file had no logging at
+      // all, so wallet failures left no trace anywhere to debug from.
+      console.error("[CashuWallet] fetchMultipleUsers10019 failed:", error);
     }
     
     return result;

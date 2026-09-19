@@ -14,6 +14,17 @@ export default defineConfig({
     host: true,
     cors: true,
   },
+  // Strip debug logging from production bundles. The app ships ~90 console
+  // calls, including ones that dump the whole relay-pool state on every group
+  // fetch -- noise for users, and a slow drip of internal detail into anyone's
+  // devtools. `console.error`/`warn` are deliberately kept: those are the ones
+  // worth seeing in a bug report.
+  // `pure` rather than `drop: ["console"]`: drop removes every console method,
+  // error and warn included. These are marked side-effect-free instead, so the
+  // minifier eliminates them in production while dev builds keep them.
+  esbuild: {
+    pure: ["console.log", "console.info", "console.debug", "console.trace"],
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,

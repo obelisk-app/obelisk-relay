@@ -4,6 +4,7 @@ import type { Group, GroupContent as GroupChatMessage } from "../types";
 import { CreateGroupForm } from "./CreateGroupForm";
 import { GroupCard } from "./GroupCard";
 import { FlashMessage } from "./FlashMessage";
+import { ConnectionBanner } from "./ConnectionBanner";
 import { GroupSidebar } from "./GroupSidebar";
 import { BurgerButton } from "./BurgerButton";
 import { ProfileMenu } from "./ProfileMenu";
@@ -66,6 +67,14 @@ const dTaggedContentKinds: NDKKind[] = [
 export interface FlashMessageData {
   message: string;
   type: "success" | "error" | "info";
+  /**
+   * Distinguishes two showings of the same text. Without it, re-raising an
+   * identical message looks like "no change" to FlashMessage, which would keep
+   * running the first message's timer and dismiss the second one early.
+   * Used as the render key, so every message gets a fresh component and a full
+   * dwell.
+   */
+  seq: number;
 }
 
 interface AppProps {
@@ -1140,11 +1149,15 @@ export class App extends Component<AppProps, AppState> {
     message: string,
     type: "success" | "error" | "info" = "info"
   ) => {
-    this.setState({
-      flashMessage: { message, type },
-    });
-     // Optional: Auto-dismiss after a few seconds
-     // setTimeout(() => this.dismissMessage(), 5000);
+    // Auto-dismiss is FlashMessage's own responsibility -- doing it here too
+    // would race its timer and dismiss the *next* message early.
+    this.setState(prev => ({
+      flashMessage: {
+        message,
+        type,
+        seq: (prev.flashMessage?.seq ?? 0) + 1,
+      },
+    }));
   };
 
   dismissMessage = () => {
@@ -1204,8 +1217,11 @@ export class App extends Component<AppProps, AppState> {
           </div>
         </header>
 
+        <ConnectionBanner client={client} />
+
         {flashMessage && (
           <FlashMessage
+            key={flashMessage.seq}
             message={flashMessage.message}
             type={flashMessage.type}
             onDismiss={this.dismissMessage}

@@ -2,6 +2,8 @@ import { Component } from 'preact'
 import { NostrClient } from '../api/nostr_client'
 import type { Proof } from '@cashu/cashu-ts'
 import { TIMEOUTS, MIN_NUTZAP_AMOUNT } from '../constants'
+import { getMintHostname } from '../utils/mint'
+import { ModalPanel } from './ModalPanel'
 
 interface UserDisplayProps {
   pubkey: string
@@ -424,6 +426,7 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
             {profilePicture ? (
               <img
                 src={profilePicture}
+                referrerpolicy="no-referrer"
                 alt=""
                 class="w-full h-full object-cover"
                 onError={(e) => {
@@ -453,7 +456,7 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
             {showCopy && (
               <button
                 onClick={this.handleCopy}
-                class="opacity-0 group-hover:opacity-100 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-all"
+                class="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-all"
                 title={copied ? "Copied!" : "Copy npub"}
               >
                 {copied ? (
@@ -507,8 +510,12 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
             />
 
             {/* Modal */}
-            <div class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-border)] p-6 z-50 w-96 max-w-[90vw] shadow-xl">
-              <h3 class="text-lg font-semibold mb-4">Send Nutzap</h3>
+            <ModalPanel
+              labelledBy="send-nutzap-title"
+              onClose={() => this.setState({ showNutzapModal: false })}
+              class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-border)] p-6 z-50 w-96 max-w-[90vw] shadow-xl"
+            >
+              <h3 id="send-nutzap-title" class="text-lg font-semibold mb-4">Send Nutzap</h3>
 
               <div class="space-y-4">
                 <div>
@@ -519,7 +526,7 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
                     {Object.entries(this.state.mintBalances).map(([mint, balance]) => (
                       <div key={mint} class="flex items-center gap-2">
                         <span>•</span>
-                        <span>{new URL(mint).hostname}</span>
+                        <span>{getMintHostname(mint)}</span>
                         <span class="text-[#f7931a] font-medium">₿{(balance as number).toLocaleString()} sats</span>
                       </div>
                     ))}
@@ -530,10 +537,10 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
                 </div>
 
                 <div>
-                  <label class="block text-sm text-[var(--color-text-secondary)] mb-1">
+                  <label class="block text-sm text-[var(--color-text-secondary)] mb-1" for="userdisplay-amount">
                     Amount
                   </label>
-                  <input
+                  <input id="userdisplay-amount"
                     type="number"
                     value={amount}
                     onInput={(e) => this.setState({ amount: (e.target as HTMLInputElement).value })}
@@ -547,10 +554,10 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
                 </div>
 
                 <div>
-                  <label class="block text-sm text-[var(--color-text-secondary)] mb-1">
+                  <label class="block text-sm text-[var(--color-text-secondary)] mb-1" for="userdisplay-comment-optional">
                     Comment (optional)
                   </label>
-                  <textarea
+                  <textarea id="userdisplay-comment-optional"
                     value={comment}
                     onInput={(e) => this.setState({ comment: (e.target as HTMLTextAreaElement).value })}
                     placeholder="Thanks for the help!"
@@ -581,7 +588,7 @@ export class UserDisplay extends Component<UserDisplayProps, UserDisplayState> {
                   </button>
                 </div>
               </div>
-            </div>
+            </ModalPanel>
           </>
         )}
       </div>

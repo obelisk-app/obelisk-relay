@@ -234,3 +234,126 @@ The real fix would be to stop pinning a hashed filename — serve the accent fro
 relay config and let the frontend apply it at runtime, which is now possible
 because every accent colour goes through `--color-accent` / `--color-accent-rgb`
 rather than being hardcoded in inline styles.
+
+---
+
+## 12. A relay secret key is in this repo's public git history
+
+**Severity: medium. Stale — documented rather than rewritten.**
+
+`config/settings.local.yml` was tracked in early commits (`7a235dd`, `5ce75e8`)
+with a real `relay_secret_key` in it. The file is gitignored now, but this
+repository is public, so the key is permanently readable by anyone who clones it:
+
+```bash
+git log --all -S"3ab7d45a8843e45946cdd5eea06d565976e7f70397983f518783cdc704180500"
+```
+
+**The live relay does not use it.** `public-config/settings.local.yml` holds a
+different key, rotated 2026-08-11. So nothing is currently exposed, and the
+deliberate decision was to document rather than rewrite history — a rewrite
+would invalidate every clone and fork to protect a key that is already public
+and already unused.
+
+What matters if this ever comes up again: the relay key is a superuser in this
+codebase. `can_edit_members`, `can_delete_event` and `can_see_event` all
+short-circuit for `relay_pubkey`, and `is_relay_admin` keys off it. **Never
+reuse that key, and never restore an old config that contains it.** Rotation is
+the mitigation, not obscurity; the console can do it under Settings → rotate key.
+
+Related: `public-config/settings.yml:6` still ships the upstream *example* key
+and is tracked. That one is mitigated in code — `ensure_relay_identity`
+(`src/config.rs`) recognises the constant and mints a fresh key at startup — so
+a fresh deploy self-heals. The mitigation depends on that constant staying in
+step with the file; change one and you must change the other.
+
+---
+
+## 13. NIP-46 pairing secrets sit in the repo root
+
+**Severity: medium if leaked, currently untracked.**
+
+`bunker-uri.txt`, `bunker-qr.png` and `bunker-status.txt` are live NIP-46 pairing
+artefacts. A `nostrconnect://` URI carries the secret that authenticates a signer
+to a browser session, and the QR renders that secret in a form anyone can scan
+off a screenshot — these are credentials, not screenshots.
+
+They are correctly gitignored and `git ls-files` confirms they are untracked. The
+risk is everything *other* than git: a `docker build` with a loose context, a
+screen share, a backup of the directory, a support screenshot. Delete them once
+pairing is done rather than leaving them lying in the working tree.
+
+---
+
+## 14. Admin route auth is per-handler, not a router layer
+
+**Severity: low today, structural.**
+
+Every `/api/admin/*` route authenticates by calling `validate_session` as the
+first statement of its own handler — around 45 hand-written copies. All of them
+are currently present and correct; the only handlers without one
+(`/challenge`, `/auth`, `/setup*`, `/relay-info`) are intentionally public.
+
+The problem is that correctness here is maintained by memory. The 46th route
+added is the one that forgets, and nothing in the type system or the tests would
+catch it. The fix is `axum::middleware::from_fn` on the `/api/admin` nest with
+the public routes split into a sibling router, which also resolves issue 10
+(`422` returned before the auth check, because Axum runs the `Json` extractor
+first). Deliberately not done in the same pass as the security fixes above:
+touching 45 call sites is a large diff with a real chance of dropping a check
+while removing them, and it wants to be its own reviewable change.
+
+---
+
+## 15. Invites now expire, are use-limited, and need a long code
+
+**Severity: behaviour change. Deliberate — read this before debugging an invite.**
+
+`Invite` previously had no expiry field, no use counter, and no constraint on the
+code. A reusable invite was therefore a permanent, unlimited credential, and the
+code was whatever the client sent — a four-character one was accepted and was
+guessable at the per-pubkey rate limit, across rotating pubkeys.
+
+Three rules now apply at `create_invite`:
+
+| Rule | Default | Override |
+|---|---|---|
+| Minimum code length | 16 characters | none — it is a floor |
+| Expiry | 30 days from `created_at` | `expiration` tag, unix seconds |
+| Max redemptions (reusable only) | 100 | `max_uses` tag |
+
+**What this can break.** The shipping web client generates 24 hex characters, so
+it is unaffected. Any *other* client in the ecosystem that generates a shorter
+code will start getting `Invite code is too short to be secret`. If that happens,
+fix the client rather than lowering `MIN_INVITE_CODE_LEN` — a code short enough
+to be convenient is short enough to be guessed.
+
+Invites already stored keep working: the three new fields are `#[serde(default)]`,
+so state written before this deserializes with no expiry and no cap, i.e. exactly
+the old behaviour. They are grandfathered, not retroactively expired. A test
+(`an_invite_without_limits_keeps_the_old_behaviour`) pins that.
+
+---
+
+## 16. `force_public_groups` is editable from the console, behind a phrase
+
+**Severity: informational. The gate is the point.**
+
+The Connection limits card now exposes `force_public_groups`, which was
+previously file-only. It is the one setting there that destroys information:
+`Groups::load_groups` sweeps every stored group at startup and clears
+`private` and `hidden` (`src/groups.rs:283-290`), including groups other people
+created. Nothing restores them — turning the flag back off leaves every group
+that was coerced still public.
+
+So switching it **on** requires typing `FORCE PUBLIC`, server-side as well as in
+the UI; the API rejects the change without it. Switching it **off** needs no
+confirmation, because that direction destroys nothing.
+
+Two things worth knowing if you use it:
+
+- The coercion happens **at startup**, not at save time. Between saving and
+  restarting, groups are still private, and the card says so.
+- It is not a privacy *setting* so much as a migration. If you only want new
+  groups to be public, this is the wrong control — it rewrites the existing ones
+  too.

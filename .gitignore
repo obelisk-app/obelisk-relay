@@ -20,6 +20,13 @@ config/settings.local.yml
 config/admin_pubkeys_runtime.json
 config/blacklist.json
 config/backups/
+# Same category, and they were tracked by oversight: only the public-config
+# twins below were ignored. whitelist_follows.json is the follow-derived
+# admission list -- on a populated deployment that is the relay's social graph,
+# not its configuration -- and the other two carry operator pubkeys.
+config/whitelist_runtime.json
+config/whitelist_follows.json
+config/reference_accounts.json
 
 # The same state for the public instance. Previously only the `config/` copies
 # were ignored, so these sat untracked-but-committable in a public repo: they

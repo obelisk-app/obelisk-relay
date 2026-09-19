@@ -20,6 +20,25 @@
    */
   --color-accent-rgb: 180, 249, 83;
   --color-border: #262626;
+  /*
+   * The three tokens below were referenced across the app but never defined
+   * here, and CSS fails silently: an invalid `var()` on an inherited property
+   * makes it inherit instead. So every "tertiary" text -- 45 uses across 15
+   * files, the dimmest step in the scale -- rendered at --color-text-primary,
+   * i.e. full white. The type hierarchy did not degrade, it collapsed: hint
+   * text, timestamps and captions were as loud as headings. Likewise
+   * `hover:border-[var(--color-border-hover)]` resolved to `currentColor`, so
+   * hovering a message or member card flashed its border to the text colour,
+   * and GroupCard's loading spinner drew in currentColor rather than the accent.
+   *
+   * --color-primary is the accent under another name (its one use is a spinner).
+   * Defined *through* --color-accent rather than repeating the hex, so the
+   * purple retint in scripts/retint-branding.sh keeps working without having to
+   * learn about another token.
+   */
+  --color-text-tertiary: #737373;
+  --color-border-hover: #404040;
+  --color-primary: var(--color-accent);
   --color-lc-olive: #2d3a1a;
   --color-lc-olive-dark: #1e2812;
 }

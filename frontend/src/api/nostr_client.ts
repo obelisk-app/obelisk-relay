@@ -108,6 +108,7 @@ export class NostrClient {
 
       this.groupsNdk.pool.on("relay:connect", (relay: NDKRelay) => {
         console.log(`NDK relay connected: ${relay.url}, status: ${relay.status}`);
+        if (this.isMainRelay(relay.url)) this.setConnectionState(true);
         // Use a custom auth policy that's more flexible with URL matching
         relay.authPolicy = async (relay: NDKRelay, challenge: string) => {
           try {
@@ -147,6 +148,7 @@ export class NostrClient {
         console.log(`NDK relay disconnected: ${relay.url}, status: ${relay.status}`);
         // Normal disconnections should trigger reconnection, not be counted as failures
         this.markRelayAsDead(relay.url, false);
+        if (this.isMainRelay(relay.url)) this.setConnectionState(false);
       });
       
       // Track flapping relays (frequently connecting/disconnecting)
@@ -933,6 +935,48 @@ export class NostrClient {
   }
 
   // Add a relay to the temporary dead list if it fails repeatedly
+  /**
+   * Connection state, published so the UI can say something about it.
+   *
+   * Losing the relay used to be completely invisible: `relay:disconnect` wrote a
+   * line to the console and updated internal bookkeeping, and nothing reached
+   * the interface. The app simply stopped updating, which is indistinguishable
+   * from a quiet room -- so people kept typing into a socket that was gone.
+   */
+  private connectionListeners = new Set<(online: boolean) => void>();
+  private mainRelayOnline = true;
+
+  /** Compare ignoring the trailing slash NDK sometimes adds. */
+  private isMainRelay(url: string): boolean {
+    const normalize = (u: string) => u.replace(/\/+$/, "").toLowerCase();
+    return normalize(url) === normalize(this.config.relayUrl);
+  }
+
+  private setConnectionState(online: boolean): void {
+    if (this.mainRelayOnline === online) return;
+    this.mainRelayOnline = online;
+    for (const listener of this.connectionListeners) {
+      try {
+        listener(online);
+      } catch (err) {
+        console.error("Connection listener threw:", err);
+      }
+    }
+  }
+
+  /**
+   * Subscribe to relay connectivity. Fires immediately with the current state so
+   * a component mounting mid-outage renders the banner rather than waiting for
+   * the next transition. Returns an unsubscribe function.
+   */
+  onConnectionChange(listener: (online: boolean) => void): () => void {
+    this.connectionListeners.add(listener);
+    listener(this.mainRelayOnline);
+    return () => {
+      this.connectionListeners.delete(listener);
+    };
+  }
+
   private markRelayAsDead(relayUrl: string, isActualFailure: boolean = true, error?: Error): void {
     // Handle normal disconnections differently
     if (!isActualFailure && this.isNormalDisconnection(error)) {
@@ -1440,7 +1484,39 @@ export class NostrClient {
     }
   }
 
+  /**
+   * Whether the signed-in user is the relay's own key.
+   *
+   * Memoized because of how it is called, not because the request is slow: six
+   * components ask for it, and Member.tsx asks in both componentDidMount *and*
+   * componentDidUpdate. A 50-member group therefore fired 50 `no-cache` HTTP
+   * requests on mount and 50 more every time the members array changed.
+   *
+   * The answer is a property of (relay identity, signed-in key), neither of
+   * which changes within a session, so one in-flight promise is shared by every
+   * caller and the result is kept. `resetRelayAdminCache` exists for the one
+   * thing that does invalidate it -- the relay rotating its key.
+   */
+  private relayAdminCheck: Promise<boolean> | null = null;
+
+  resetRelayAdminCache(): void {
+    this.relayAdminCheck = null;
+  }
+
   async checkIsRelayAdmin(): Promise<boolean> {
+    if (!this.relayAdminCheck) {
+      this.relayAdminCheck = this.fetchIsRelayAdmin().catch((error) => {
+        // Don't cache a transient network failure as a permanent "not admin".
+        this.relayAdminCheck = null;
+        throw error;
+      });
+    }
+    // A rejection here means the lookup itself failed; callers treat the
+    // absence of proof as "not an admin", same as before.
+    return this.relayAdminCheck.catch(() => false);
+  }
+
+  private async fetchIsRelayAdmin(): Promise<boolean> {
     try {
       const user = await this.ndkInstance.signer?.user();
       if (!user?.pubkey) return false;
@@ -1475,7 +1551,10 @@ export class NostrClient {
 
       return false;
     } catch (error) {
-      return false;
+      // Rethrow so the memo above drops itself: a relay that was briefly
+      // unreachable must not be remembered as "you are not an admin" for the
+      // rest of the session. The public wrapper still resolves to false.
+      throw error;
     }
   }
 }

@@ -15,12 +15,19 @@ interface GroupHeaderProps {
 interface GroupHeaderState {
   isAdmin: boolean
   isEditing: boolean
+  /**
+   * An accepted `about` edit, held until the relay broadcasts it back. Replaces
+   * a direct write to `props.group.about`, which mutated App's state object
+   * without telling App and was then clobbered by the next relay event.
+   */
+  localAbout: string | null
 }
 
 export class GroupHeader extends BaseComponent<GroupHeaderProps, GroupHeaderState> {
-  state = {
+  state: GroupHeaderState = {
     isAdmin: false,
-    isEditing: false
+    isEditing: false,
+    localAbout: null
   }
 
   async componentDidMount() {
@@ -44,7 +51,7 @@ export class GroupHeader extends BaseComponent<GroupHeaderProps, GroupHeaderStat
       if (about !== group.about) {
         const updatedGroup = { ...group, about }
         await client.updateGroupMetadata(updatedGroup)
-        group.about = about
+        this.setState({ localAbout: about })
       }
 
       this.setState({ isEditing: false })
@@ -60,8 +67,10 @@ export class GroupHeader extends BaseComponent<GroupHeaderProps, GroupHeaderStat
   }
 
   render() {
-    const { group, client, showMessage } = this.props
-    const { isEditing } = this.state
+    const { group: groupProp, client, showMessage } = this.props
+    const { isEditing, localAbout } = this.state
+    // Layer the pending edit over the group from App.
+    const group = localAbout === null ? groupProp : { ...groupProp, about: localAbout }
 
     return (
       <div class="flex-shrink-0">

@@ -227,6 +227,14 @@ pub struct WebSocketSettings {
     pub idle_timeout: Option<Duration>,
     #[serde(default = "default_max_connections")]
     pub max_connections: Option<usize>,
+    /// Ceiling on concurrent connections from a single client address.
+    ///
+    /// `max_connections` alone is a self-service outage: one host can take every
+    /// slot and lock everybody else out. Nothing else in the stack is per-IP --
+    /// the rate limits are per-connection and per-pubkey, and both only begin to
+    /// apply after an AUTH an attacker never has to complete.
+    #[serde(default = "default_max_connections_per_ip")]
+    pub max_connections_per_ip: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -270,6 +278,12 @@ fn default_max_connection_duration() -> Option<Duration> {
 
 fn default_idle_timeout() -> Option<Duration> {
     Some(Duration::from_secs(10 * 60)) // 10 minutes default, same as max_connection_duration
+}
+
+/// Well above honest use -- a shared NAT, a household, or one person with
+/// several tabs and a phone are all normal -- so this only bites on a flood.
+fn default_max_connections_per_ip() -> Option<usize> {
+    Some(32)
 }
 
 fn default_max_connections() -> Option<usize> {
@@ -489,6 +503,11 @@ impl WebSocketSettings {
 
     pub fn max_connections(&self) -> Option<usize> {
         self.max_connections.or_else(default_max_connections)
+    }
+
+    pub fn max_connections_per_ip(&self) -> Option<usize> {
+        self.max_connections_per_ip
+            .or_else(default_max_connections_per_ip)
     }
 }
 

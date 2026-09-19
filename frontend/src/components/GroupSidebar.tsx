@@ -91,6 +91,7 @@ export class GroupSidebar extends Component<GroupSidebarProps, GroupSidebarState
             {group.picture ? (
               <img
                 src={group.picture}
+                referrerpolicy="no-referrer"
                 alt={group.name}
                 class="w-full h-full object-cover rounded-lg"
                 onError={(e) => {

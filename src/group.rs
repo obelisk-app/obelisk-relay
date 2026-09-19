@@ -180,6 +180,7 @@ impl GroupMetadata {
         let mut saw_restricted = false;
         let mut saw_open = false;
         let mut saw_closed = false;
+        let mut saw_public = false;
 
         // Process all tags in one pass
         for tag in event.tags.iter() {
@@ -207,6 +208,7 @@ impl GroupMetadata {
                         }
                         "public" => {
                             self.private = false;
+                            saw_public = true;
                             access_updated = true;
                         }
                         "hidden" => saw_hidden = true,
@@ -272,8 +274,23 @@ impl GroupMetadata {
             // Legacy Obelisk clients used `private` without the newer explicit
             // access flags. Migrate that privacy-safe; `open` only controlled
             // joining and must not expose the group's metadata.
-            self.hidden = saw_hidden || (self.private && !saw_restricted);
-            self.restricted = saw_restricted || (saw_closed && !saw_open);
+            //
+            // The trailing clause on each line is the part that matters for
+            // access control: an edit may *raise* these flags by implication, but
+            // it may only *lower* one by carrying the tag that explicitly opens
+            // the group up -- `open` for `restricted`, `public` for `hidden`.
+            //
+            // Without it, a 9002 carrying nothing but `["private"]` -- which is
+            // exactly what the legacy clients this migration exists for send --
+            // set `access_updated` with `saw_restricted` and `saw_closed` both
+            // false and so cleared `restricted`, while `closed` kept its old
+            // value. A private, closed group silently became one that any
+            // non-member could post into, and then read their own events back
+            // out of.
+            self.hidden =
+                saw_hidden || (self.private && !saw_restricted) || (self.hidden && !saw_public);
+            self.restricted =
+                saw_restricted || (saw_closed && !saw_open) || (self.restricted && !saw_open);
         } else {
             if saw_hidden {
                 self.hidden = true;
@@ -288,6 +305,12 @@ impl GroupMetadata {
             .retain(|tag| !found_tags.contains_key(&tag.kind()));
         self.unknown_tags.extend(found_tags.into_values());
     }
+}
+
+/// See `Group::snapshot_membership`.
+struct MembershipSnapshot {
+    members: HashMap<PublicKey, GroupMember>,
+    join_requests: HashSet<PublicKey>,
 }
 
 #[derive(Display, Debug, Clone, Serialize, Deserialize, EnumIter, PartialEq, Eq, Hash)]
@@ -386,12 +409,39 @@ impl TryFrom<&Tag> for GroupMember {
     }
 }
 
+/// Shortest invite code this relay will accept.
+///
+/// The code is chosen by the client and used verbatim, so without a floor a
+/// client could create a 4-character invite and hand an attacker a guessable
+/// door into a closed group. 16 characters of any sane alphabet is far past
+/// what a guessing loop can reach, and clients already generate longer.
+pub const MIN_INVITE_CODE_LEN: usize = 16;
+
+/// Default lifetime of an invite. `Invite` had no expiry field at all, so a
+/// reusable invite was valid forever, for unlimited uses -- a credential with no
+/// end date, handed out in chat and never revoked.
+pub const DEFAULT_INVITE_TTL_SECS: u64 = 60 * 60 * 24 * 30;
+
+/// Cap on how many times a reusable invite can be redeemed, when the creator
+/// does not set one. Bounded so an invite that leaks has a blast radius.
+pub const DEFAULT_INVITE_MAX_USES: u32 = 100;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub event_id: EventId,
     pub roles: HashSet<GroupRole>,
     pub reusable: bool,
     pub redeemed_by: Option<(PublicKey, Timestamp)>,
+    /// When this invite stops working. `None` only for invites deserialized from
+    /// state written before expiry existed.
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
+    /// Redemptions so far, for reusable invites.
+    #[serde(default)]
+    pub uses: u32,
+    /// Ceiling on `uses`. `None` means the pre-existing unlimited behaviour.
+    #[serde(default)]
+    pub max_uses: Option<u32>,
 }
 
 impl Invite {
@@ -401,15 +451,41 @@ impl Invite {
             roles,
             reusable: false,
             redeemed_by: None,
+            expires_at: None,
+            uses: 0,
+            max_uses: None,
         }
     }
 
-    pub fn can_use(&self) -> bool {
+    pub fn is_expired(&self, now: Timestamp) -> bool {
+        self.expires_at.is_some_and(|expiry| now > expiry)
+    }
+
+    /// Whether this invite may be redeemed right now.
+    ///
+    /// Takes the current time so expiry is testable without sleeping, and so the
+    /// caller's notion of "now" is the one that applies.
+    pub fn can_use_at(&self, now: Timestamp) -> bool {
+        if self.is_expired(now) {
+            return false;
+        }
+        if let Some(max) = self.max_uses {
+            if self.uses >= max {
+                return false;
+            }
+        }
         self.reusable || self.redeemed_by.is_none()
+    }
+
+    pub fn can_use(&self) -> bool {
+        self.can_use_at(Timestamp::now())
     }
 
     pub fn mark_used(&mut self, pubkey: PublicKey, timestamp: Timestamp) {
         // println!("[mark_used] Marking invite as used, reusable={}", self.reusable);
+        // Counted for every invite, reusable or not: this is what `max_uses`
+        // bounds, and a reusable invite previously had no record of use at all.
+        self.uses = self.uses.saturating_add(1);
         if !self.reusable {
             // println!("[mark_used] Setting redeemed_by for single-use invite");
             self.redeemed_by = Some((pubkey, timestamp));
@@ -689,7 +765,18 @@ impl Group {
             self.invites.remove(&code);
         }
 
-        let filter = Filter::new().ids(event_ids);
+        // Constrain the deletion to this group.
+        //
+        // `can_delete_event` only establishes that the signer is an admin *here*;
+        // it says nothing about where the targeted events live. Without the `h`
+        // tag below, the filter is "these event ids" and nothing more, so anyone
+        // admitted to the relay could create a throwaway group -- 9007 makes its
+        // creator the sole admin -- and then delete any event in the scope by id.
+        // Pairing the ids with the group's own tag means a target that belongs to
+        // another group simply does not match, and is left alone.
+        let filter = Filter::new()
+            .ids(event_ids)
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), self.id.to_string());
 
         Ok(vec![
             StoreCommand::DeleteEvents(filter, self.scope.clone(), None),
@@ -750,6 +837,8 @@ impl Group {
         &mut self,
         group_members: impl Iterator<Item = GroupMember>,
     ) -> Result<(), Error> {
+        let snapshot = self.snapshot_membership();
+
         for member in group_members {
             self.join_requests.remove(&member.pubkey);
 
@@ -760,6 +849,7 @@ impl Group {
                     && existing.roles.contains(&GroupRole::Admin)
                     && !member.roles.contains(&GroupRole::Admin)
                 {
+                    self.restore_membership(&snapshot);
                     return Err(Error::notice("Notice: Cannot unset last admin role"));
                 }
             }
@@ -771,7 +861,10 @@ impl Group {
         self.update_state();
 
         // Validate the group still has at least one admin
-        self.validate_has_admin()?;
+        if let Err(err) = self.validate_has_admin() {
+            self.restore_membership(&snapshot);
+            return Err(err);
+        }
 
         Ok(())
     }
@@ -804,6 +897,33 @@ impl Group {
         Ok(())
     }
 
+    /// Membership as it stood before a mutation, so a rejected one can be undone.
+    ///
+    /// The membership handlers mutate `self` as they walk the event's `p` tags and
+    /// only check the group's invariants afterwards. The error propagates and no
+    /// events are stored, but the handlers run against a `DashMap` `RefMut` -- the
+    /// live group -- so the half-applied mutation stayed. One 9001 naming both
+    /// remaining admins slipped past the per-tag last-admin guard (it snapshots
+    /// `admins` before the loop, so the count never drops during it), removed
+    /// both, and failed `validate_has_admin`. The group was left with zero admins
+    /// and nobody who could edit it, until a restart rebuilt state from the
+    /// stored events.
+    fn snapshot_membership(&self) -> MembershipSnapshot {
+        MembershipSnapshot {
+            members: self.members.clone(),
+            join_requests: self.join_requests.clone(),
+        }
+    }
+
+    fn restore_membership(&mut self, snapshot: &MembershipSnapshot) {
+        self.members = snapshot.members.clone();
+        self.join_requests = snapshot.join_requests.clone();
+        // Both are derived from `members`, so they have to be recomputed rather
+        // than snapshotted.
+        self.update_roles();
+        self.update_state();
+    }
+
     pub fn remove_members(
         &mut self,
         members_event: Box<Event>,
@@ -825,13 +945,23 @@ impl Group {
 
         let admins = self.admin_pubkeys();
         let mut removed_admins = false;
+        let snapshot = self.snapshot_membership();
 
         for tag in members_event.tags.filter(TagKind::p()) {
-            let member = GroupMember::try_from(tag)?;
+            let member = match GroupMember::try_from(tag) {
+                Ok(member) => member,
+                Err(err) => {
+                    // A malformed tag halfway through the list would otherwise
+                    // leave the earlier removals applied.
+                    self.restore_membership(&snapshot);
+                    return Err(err);
+                }
+            };
             let removed_pubkey = member.pubkey;
 
             // Exit early if this removal would remove the last admin.
             if admins.len() == 1 && admins.contains(&removed_pubkey) {
+                self.restore_membership(&snapshot);
                 return Err(Error::notice("Cannot remove last admin"));
             }
 
@@ -853,7 +983,10 @@ impl Group {
         self.update_state();
 
         // Validate the group still has at least one admin after removal
-        self.validate_has_admin()?;
+        if let Err(err) = self.validate_has_admin() {
+            self.restore_membership(&snapshot);
+            return Err(err);
+        }
 
         let mut events = vec![StoreCommand::SaveSignedEvent(
             members_event,
@@ -933,6 +1066,12 @@ impl Group {
             }
         }
 
+        // The loop above only rejects demoting the *sole* admin. An event that
+        // demotes two of two admins clears that check tag by tag and is caught
+        // only by `validate_has_admin` below -- after the roles have already been
+        // written to the live group.
+        let snapshot = self.snapshot_membership();
+
         for tag in event.tags.filter(TagKind::p()) {
             let member = GroupMember::try_from(tag)?;
             if let Some(existing_member) = self.members.get_mut(&member.pubkey) {
@@ -944,7 +1083,10 @@ impl Group {
         self.update_state();
 
         // Validate the group still has at least one admin after role changes
-        self.validate_has_admin()?;
+        if let Err(err) = self.validate_has_admin() {
+            self.restore_membership(&snapshot);
+            return Err(err);
+        }
 
         let roles_event = self.generate_roles_event(relay_pubkey);
         let members_event = self.generate_members_event(relay_pubkey);
@@ -1249,6 +1391,15 @@ impl Group {
             ));
         }
 
+        // The code is whatever the client sent, so the relay is the only thing
+        // standing between a four-character invite and a guessing loop.
+        if invite_code.chars().count() < MIN_INVITE_CODE_LEN {
+            return Err(Error::event_error(
+                "Invite code is too short to be secret; use at least 16 characters",
+                invite_event.id,
+            ));
+        }
+
         // Check if the invite is reusable
         let is_reusable = invite_event
             .tags
@@ -1257,6 +1408,30 @@ impl Group {
 
         let mut invite = Invite::new(invite_event.id, HashSet::from([GroupRole::Member]));
         invite.reusable = is_reusable;
+
+        // Expiry, from an explicit `expiration` tag (NIP-40 spelling) or the
+        // default. An invite is a credential; credentials expire.
+        let explicit_expiry = invite_event
+            .tags
+            .find(TagKind::custom("expiration"))
+            .and_then(|t| t.content())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Timestamp::from);
+        invite.expires_at = Some(explicit_expiry.unwrap_or_else(|| {
+            Timestamp::from(invite_event.created_at.as_secs() + DEFAULT_INVITE_TTL_SECS)
+        }));
+
+        // Only reusable invites need a use ceiling; a single-use invite is
+        // already bounded by `redeemed_by`.
+        if is_reusable {
+            let explicit_max = invite_event
+                .tags
+                .find(TagKind::custom("max_uses"))
+                .and_then(|t| t.content())
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|v| *v > 0);
+            invite.max_uses = Some(explicit_max.unwrap_or(DEFAULT_INVITE_MAX_USES));
+        }
 
         self.invites.insert(invite_code.to_string(), invite);
         self.update_state();
@@ -2211,6 +2386,182 @@ mod tests {
         assert!(!group.metadata.restricted);
     }
 
+    #[test]
+    fn an_expired_invite_cannot_be_used() {
+        let mut invite = Invite::new(EventId::all_zeros(), HashSet::from([GroupRole::Member]));
+        invite.reusable = true;
+        let now = Timestamp::now();
+        invite.expires_at = Some(Timestamp::from(now.as_secs() - 1));
+
+        assert!(
+            !invite.can_use_at(now),
+            "an invite past its expiry must be refused however reusable it is"
+        );
+    }
+
+    #[test]
+    fn a_reusable_invite_stops_at_its_use_limit() {
+        // Reusable invites previously had no record of use at all, so one that
+        // leaked was an unlimited, permanent door into the group.
+        let mut invite = Invite::new(EventId::all_zeros(), HashSet::from([GroupRole::Member]));
+        invite.reusable = true;
+        invite.max_uses = Some(2);
+        let now = Timestamp::now();
+
+        assert!(invite.can_use_at(now));
+        invite.mark_used(Keys::generate().public_key(), now);
+        assert!(invite.can_use_at(now));
+        invite.mark_used(Keys::generate().public_key(), now);
+
+        assert!(
+            !invite.can_use_at(now),
+            "a reusable invite must stop once it has been redeemed max_uses times"
+        );
+    }
+
+    #[test]
+    fn an_invite_without_limits_keeps_the_old_behaviour() {
+        // State written before expiry existed deserializes with all three fields
+        // absent; those invites must keep working exactly as they did.
+        let mut invite = Invite::new(EventId::all_zeros(), HashSet::from([GroupRole::Member]));
+        invite.reusable = true;
+        let now = Timestamp::now();
+
+        for _ in 0..1000 {
+            assert!(invite.can_use_at(now));
+            invite.mark_used(Keys::generate().public_key(), now);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guessable_invite_code_is_refused() {
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+
+        let short = create_test_invite_event(&admin_keys, &group_id, "letmein").await;
+        assert!(
+            group
+                .create_invite(&short, &admin_keys.public_key())
+                .is_err(),
+            "a code short enough to guess must not be accepted"
+        );
+
+        let long =
+            create_test_invite_event(&admin_keys, &group_id, "b5f2c1a09e7d43681f2ab4c7").await;
+        assert!(
+            group.create_invite(&long, &admin_keys.public_key()).is_ok(),
+            "a code the shipping client would actually generate must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_created_invite_gets_an_expiry() {
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+
+        let code = "c3d9e1f70a2b48561c9df3a2";
+        let event = create_test_invite_event(&admin_keys, &group_id, code).await;
+        group
+            .create_invite(&event, &admin_keys.public_key())
+            .unwrap();
+
+        let invite = group.invites.get(code).expect("invite was stored");
+        assert!(
+            invite.expires_at.is_some(),
+            "every invite must carry an expiry, not just ones that ask for it"
+        );
+        assert!(invite.can_use_at(Timestamp::now()));
+        assert!(
+            !invite.can_use_at(Timestamp::from(
+                Timestamp::now().as_secs() + DEFAULT_INVITE_TTL_SECS + 60
+            )),
+            "and it must actually lapse once that expiry passes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_removal_leaves_the_group_administrable() {
+        let (admin_keys, second_admin_keys, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+
+        // Two admins, so the per-tag "cannot remove last admin" guard -- which
+        // snapshots the admin list before the loop -- never fires.
+        group
+            .add_members(vec![GroupMember::new_admin(second_admin_keys.public_key())].into_iter())
+            .unwrap();
+        assert_eq!(group.admin_pubkeys().len(), 2);
+
+        // One 9001 naming both of them.
+        let remove_both = create_test_event(
+            &admin_keys,
+            KIND_GROUP_REMOVE_USER_9001.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::public_key(admin_keys.public_key()),
+                Tag::public_key(second_admin_keys.public_key()),
+            ],
+        )
+        .await;
+
+        let result = group.remove_members(Box::new(remove_both), &admin_keys.public_key());
+        assert!(result.is_err(), "removing every admin must be refused");
+
+        // The refusal is only meaningful if the group is also left intact: the
+        // handlers mutate the live group, so a half-applied removal used to
+        // survive the error and leave nobody able to administer it.
+        assert!(
+            group.has_admin(),
+            "a refused removal must not strip the group of its admins"
+        );
+        assert!(group.members.contains_key(&admin_keys.public_key()));
+        assert!(group.members.contains_key(&second_admin_keys.public_key()));
+    }
+
+    #[tokio::test]
+    async fn a_lone_private_tag_cannot_unrestrict_a_closed_group() {
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+
+        // Establish a private, closed group the normal way.
+        let setup = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("private"), &[] as &[String]),
+                Tag::custom(TagKind::custom("closed"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&setup, &admin_keys.public_key())
+            .unwrap();
+        assert!(group.metadata.restricted);
+        assert!(group.metadata.closed);
+
+        // A legacy client now edits the group sending only `private` -- no
+        // `closed`, no `restricted`. This used to clear `restricted` while
+        // leaving `closed` set, opening the group to non-member writes.
+        let legacy_edit = create_test_event(
+            &admin_keys,
+            KIND_GROUP_EDIT_METADATA_9002.into(),
+            vec![
+                Tag::custom(TagKind::h(), [&group_id]),
+                Tag::custom(TagKind::custom("private"), &[] as &[String]),
+            ],
+        )
+        .await;
+        group
+            .set_metadata(&legacy_edit, &admin_keys.public_key())
+            .unwrap();
+
+        assert!(
+            group.metadata.restricted,
+            "an edit that never mentions access must not open the group to non-members"
+        );
+        assert!(group.metadata.hidden, "nor may it un-hide the group");
+    }
+
     #[tokio::test]
     async fn test_metadata_management_handles_unknown_tags() {
         let (admin_keys, _, _) = create_test_keys().await;
@@ -2242,7 +2593,8 @@ mod tests {
         let (admin_keys, _, _) = create_test_keys().await;
         let (mut group, group_id) = create_test_group(&admin_keys).await;
 
-        let event = create_test_invite_event(&admin_keys, &group_id, "test_invite_123").await;
+        let event =
+            create_test_invite_event(&admin_keys, &group_id, "test_invite_1234567890ab").await;
 
         assert!(group
             .create_invite(&event, &admin_keys.public_key())
@@ -2255,7 +2607,7 @@ mod tests {
         let (admin_keys, _, _) = create_test_keys().await;
         let (mut group, group_id) = create_test_group(&admin_keys).await;
 
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let create_invite_event =
             create_test_invite_event(&admin_keys, &group_id, invite_code).await;
 
@@ -2271,7 +2623,7 @@ mod tests {
         let (mut group, group_id) = create_test_group(&admin_keys).await;
 
         // Create invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let create_invite_event =
             create_test_invite_event(&admin_keys, &group_id, invite_code).await;
         group
@@ -2581,6 +2933,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_9005_cannot_reach_outside_its_own_group() {
+        // Being admin of one group used to be enough to delete any event in the
+        // scope: the filter was built from the request's `e` tags alone, so a
+        // throwaway group created with 9007 -- which makes its creator the sole
+        // admin -- was a relay-wide delete primitive for anyone admitted.
+        let (attacker_keys, victim_keys, _) = create_test_keys().await;
+        let (mut attacker_group, attacker_group_id) = create_test_group(&attacker_keys).await;
+        let relay_pubkey = attacker_keys.public_key();
+
+        // An event that lives in somebody else's group.
+        let foreign_event = create_test_event(
+            &victim_keys,
+            11,
+            vec![Tag::custom(TagKind::h(), ["someone-elses-group"])],
+        )
+        .await;
+
+        let delete_event =
+            create_test_delete_event(&attacker_keys, &attacker_group_id, &foreign_event).await;
+
+        // The request still succeeds -- the attacker is a legitimate admin of
+        // their own group -- but the filter must not select the foreign event.
+        let commands = attacker_group
+            .delete_event_request(Box::new(delete_event), &relay_pubkey)
+            .expect("an admin may issue a 9005 in their own group");
+
+        match &commands[0] {
+            StoreCommand::DeleteEvents(filter, _, None) => {
+                let h_values = filter
+                    .generic_tags
+                    .get(&SingleLetterTag::lowercase(Alphabet::H))
+                    .expect("the delete filter must be constrained to a group");
+                assert!(
+                    h_values.contains(&attacker_group_id.to_string()),
+                    "the filter must be pinned to the group that issued the request"
+                );
+                assert!(
+                    !h_values.contains(&"someone-elses-group".to_string()),
+                    "the filter must never name the victim's group"
+                );
+            }
+            _ => panic!("Expected DeleteEvents command"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_delete_event_request_wrong_kind() {
         let (admin_keys, member_keys, _) = create_test_keys().await;
         let (mut group, _group_id) = create_test_group(&admin_keys).await;
@@ -2739,7 +3137,7 @@ mod tests {
         let relay_pubkey = admin_keys.public_key();
 
         // Create an invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let create_invite_event =
             create_test_invite_event(&admin_keys, &group_id, invite_code).await;
         group
@@ -3291,7 +3689,7 @@ mod tests {
         let (mut group, group_id) = create_test_group(&admin_keys).await;
 
         // Create a single-use invite (no reusable tag)
-        let invite_code = "test_single_use";
+        let invite_code = "test_single_use_01234567";
         let create_invite_event =
             create_test_invite_event(&admin_keys, &group_id, invite_code).await;
 
@@ -3313,7 +3711,7 @@ mod tests {
         let (mut group, group_id) = create_test_group(&admin_keys).await;
 
         // Create a reusable invite with the tag
-        let invite_code = "test_reusable";
+        let invite_code = "test_reusable_0123456789";
 
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
@@ -3339,7 +3737,7 @@ mod tests {
         let relay_keys = Keys::generate();
 
         // Create a single-use invite
-        let invite_code = "test_single_use";
+        let invite_code = "test_single_use_01234567";
         let create_invite_event =
             create_test_invite_event(&admin_keys, &group_id, invite_code).await;
 
@@ -3386,7 +3784,7 @@ mod tests {
         let relay_keys = Keys::generate();
 
         // Create a reusable invite
-        let invite_code = "test_reusable";
+        let invite_code = "test_reusable_0123456789";
 
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),

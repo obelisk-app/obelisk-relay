@@ -1,7 +1,8 @@
 import { Component } from 'preact';
 import { NostrClient } from '../api/nostr_client';
 import { UserDisplay } from './UserDisplay';
-import { WalletDisplay } from './WalletDisplay';
+import { WalletDisplay } from './WalletDisplay'
+import { ModalPanel } from './ModalPanel';
 import type { Proof } from '@cashu/cashu-ts';
 
 interface ProfileMenuProps {
@@ -199,14 +200,15 @@ export class ProfileMenu extends Component<ProfileMenuProps, ProfileMenuState> {
                 Loading...
               </div>
             ) : this.state.mintCount === 0 ? (
-              <button
-                onClick={() => {
-                  this.setState({ showMenu: false, showWalletModal: true });
-                }}
-                class="text-purple-400 hover:text-purple-300 font-semibold text-sm transition-colors"
-              >
+              // A <button> here sat inside the profile <button>. Nested
+              // interactive elements are invalid HTML and behave unpredictably
+              // in assistive tech and in click handling. It is redundant too:
+              // opening the menu already offers "Open Wallet", which is the same
+              // action. So this is now a label, and the outer button owns the
+              // click.
+              <span class="text-purple-400 font-semibold text-sm">
                 Add Mints →
-              </button>
+              </span>
             ) : (
               <div class="text-[#f7931a] font-semibold flex items-center gap-1">
                 <span class="text-sm">₿</span>
@@ -310,7 +312,13 @@ export class ProfileMenu extends Component<ProfileMenuProps, ProfileMenuState> {
             }
           }}
         >
-          <div class="w-full max-w-md">
+          <ModalPanel
+            labelledBy="wallet-modal-title"
+            onClose={() => this.setState({ showWalletModal: false })}
+            class="w-full max-w-md"
+          >
+            {/* WalletDisplay renders its own heading; this names the dialog. */}
+            <h2 id="wallet-modal-title" class="sr-only">Wallet</h2>
             <WalletDisplay 
               client={client} 
               onClose={async () => {
@@ -328,7 +336,7 @@ export class ProfileMenu extends Component<ProfileMenuProps, ProfileMenuState> {
               walletBalance={this.state.cashuBalance}
               isWalletInitialized={this.props.client.isWalletInitialized()}
             />
-          </div>
+          </ModalPanel>
         </div>
       )}
       </>

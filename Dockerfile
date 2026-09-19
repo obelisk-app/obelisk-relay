@@ -55,8 +55,22 @@ ENV BUILD_TIME=${BUILD_TIME}
 
 RUN cargo build --release --bins
 
-# Install binaries from relay_builder
+# Install binaries from relay_builder.
+#
+# Pinned to the same commit Cargo.lock names for the relay itself. Unpinned, this
+# resolved to whatever upstream HEAD happened to be at build time -- which is
+# already a different commit from the one the relay is built against, so these
+# tools were being compiled against a newer storage layer than the database they
+# operate on. For export_import, nostr-lmdb-dump and nostr-lmdb-integrity, all of
+# which read and rewrite the live LMDB, that mismatch is the kind that corrupts
+# rather than the kind that fails loudly.
+#
+# Keep this in step with the `relay_builder` entry in Cargo.lock. `--locked` makes
+# the build fail rather than silently resolve a different dependency graph.
+ARG RELAY_BUILDER_REV=0c9c93a91eff45365a1f9908ca95fa1f0b5a13af
 RUN cargo install --git https://github.com/verse-pbc/relay_builder \
+    --rev ${RELAY_BUILDER_REV} \
+    --locked \
     --bin export_import \
     --bin negentropy_sync \
     --bin nostr-lmdb-dump \

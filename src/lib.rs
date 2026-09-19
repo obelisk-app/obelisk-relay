@@ -5,6 +5,7 @@ pub mod app_state;
 pub mod blacklist;
 pub mod compaction;
 pub mod config;
+pub mod connection_limits;
 pub mod create_client;
 pub mod error;
 pub mod follow_sync;

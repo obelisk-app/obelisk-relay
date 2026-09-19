@@ -261,6 +261,17 @@ export class AdminApiClient {
     })
   }
 
+  async getConnectionSettings(): Promise<ConnectionSettings> {
+    return this.request('/api/admin/connection-settings')
+  }
+
+  async updateConnectionSettings(settings: ConnectionSettingsRequest): Promise<ConnectionSettings> {
+    return this.request('/api/admin/connection-settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
   async getReferenceAccounts(): Promise<Array<{ hex: string; npub: string }>> {
     return this.request('/api/admin/reference-accounts')
   }
@@ -936,6 +947,38 @@ export interface ObeliskIndexSettingsRequest {
   bootstrap_requests_per_minute: number
   message_requests_per_minute: number
   reconcile_interval_minutes: number
+}
+
+/**
+ * Capacity and abuse limits. Every field needs a relay restart to take effect,
+ * so the response also reports what the running process is enforcing -- that is
+ * the only way the screen can tell "saved" apart from "in force".
+ */
+export interface ConnectionSettings {
+  max_connections: number
+  max_connections_per_ip: number
+  max_connection_duration_minutes: number
+  idle_timeout_minutes: number
+  max_subscriptions: number
+  max_limit: number
+  force_public_groups: boolean
+  running_force_public_groups: boolean
+  running_max_connections: number
+  running_max_connections_per_ip: number
+  active_connections: number
+  restart_required: boolean
+}
+
+export interface ConnectionSettingsRequest {
+  max_connections: number
+  max_connections_per_ip: number
+  max_connection_duration_minutes: number
+  idle_timeout_minutes: number
+  max_subscriptions: number
+  max_limit: number
+  force_public_groups: boolean
+  /** Literal "FORCE PUBLIC"; required only when switching the flag on. */
+  force_public_confirm?: string
 }
 
 export interface GroupInfo {

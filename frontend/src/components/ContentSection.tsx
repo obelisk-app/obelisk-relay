@@ -2,6 +2,7 @@ import { NostrClient } from '../api/nostr_client'
 import type { Group } from '../types'
 import { UserDisplay } from './UserDisplay'
 import { BaseComponent } from './BaseComponent'
+import { ModalPanel } from './ModalPanel'
 import type { Proof } from '@cashu/cashu-ts'
 import { MIN_NUTZAP_AMOUNT } from '../constants'
 
@@ -19,6 +20,14 @@ interface ContentSectionProps {
 
 interface ContentSectionState {
   deletingEvents: Set<string>
+  /**
+   * Events deleted here, hidden until the relay's own broadcast removes
+   * them from the group. This used to be done by assigning to
+   * `this.props.group.content` -- mutating an object owned by App's
+   * groupsMap, with no setState, so the re-render was incidental and the
+   * next relay event overwrote it.
+   */
+  locallyDeleted: Set<string>
   showConfirmDelete: string | null
   showNutzapModal: string | null
   nutzapAmount: string
@@ -39,6 +48,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
   private unsubscribeBalance: (() => void) | null = null;
   state = {
     deletingEvents: new Set<string>(),
+    locallyDeleted: new Set<string>(),
     showConfirmDelete: null,
     showNutzapModal: null,
     nutzapAmount: '',
@@ -199,7 +209,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
       // 1. NDK outbox model relays (kind 10002/kind 3) 
       // 2. Kind 10019 nutzap relays (NIP-61 compliance)
       
-      let eventsSet = new Set<any>()
+      const eventsSet = new Set<any>()
       
       // First: Get nutzaps from outbox model (kind 10002/kind 3 relays)
       console.log('🔍 Step 1: Fetching via outbox model')
@@ -476,7 +486,9 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
 
     try {
       await this.props.client.deleteEvent(this.props.group.id, eventId)
-      this.props.group.content = this.props.group.content?.filter(item => item.id !== eventId) || []
+      this.setState(prev => ({
+        locallyDeleted: new Set(prev.locallyDeleted).add(eventId),
+      }))
       this.props.showMessage('Event deleted successfully', 'success')
     } catch (error) {
       console.error('Failed to delete event:', error)
@@ -600,7 +612,10 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
   render() {
     const { group, client } = this.props
     const { deletingEvents, showConfirmDelete, showNutzapModal, nutzapAmount, nutzapLoading, nutzapError, walletBalance } = this.state
-    const content = group.content || []
+    // Drop anything deleted in this session that the relay has not yet echoed.
+    const content = (group.content || []).filter(
+      item => !this.state.locallyDeleted.has(item.id),
+    )
 
     // Get wallet state from client
     const cashuProofs = client.getCashuProofs()
@@ -668,7 +683,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
                                 this.setState({ showNutzapModal: item.id })
                                 await this.fetchWalletBalance()
                               }}
-                              class="text-[11px] opacity-0 group-hover:opacity-100 text-[#f7931a]
+                              class="text-[11px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-[#f7931a]
                                      hover:text-[#f68e0a] transition-all duration-150 flex items-center p-1"
                               title="Nutzap this message"
                             >
@@ -679,7 +694,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
                           ) : (
                             <button
                               disabled
-                              class="text-[11px] opacity-0 group-hover:opacity-100 text-gray-500 
+                              class="text-[11px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-gray-500 
                                      transition-all duration-150 flex items-center p-1 cursor-not-allowed opacity-50"
                               title={this.state.authorCompatibility.get(item.pubkey)?.reason || "Unable to send nutzap"}
                             >
@@ -718,7 +733,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
                       <button
                         onClick={() => this.setState({ showConfirmDelete: item.id })}
                         disabled={deletingEvents.has(item.id)}
-                        class="text-[11px] opacity-0 group-hover:opacity-100 text-red-400
+                        class="text-[11px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 sm:focus-visible:opacity-100 text-red-400
                                hover:text-red-300 transition-all duration-150 flex items-center"
                         title="Delete message"
                       >
@@ -759,8 +774,12 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
             />
             
             {/* Modal */}
-            <div class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-[var(--color-bg-primary)] rounded-lg border border-[var(--color-border)] p-6 z-50 w-96 max-w-[90vw]">
-              <h3 class="text-lg font-semibold mb-4">Nutzap Event</h3>
+            <ModalPanel
+              labelledBy="nutzap-modal-title"
+              onClose={() => this.setState({ showNutzapModal: null, nutzapError: null })}
+              class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-[var(--color-bg-primary)] rounded-lg border border-[var(--color-border)] p-6 z-50 w-96 max-w-[90vw]"
+            >
+              <h3 id="nutzap-modal-title" class="text-lg font-semibold mb-4">Nutzap Event</h3>
               
               <div class="space-y-4">
                 {/* Balance display */}
@@ -770,10 +789,10 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
 
                 {/* Amount input */}
                 <div>
-                  <label class="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
+                  <label class="block text-sm font-medium text-[var(--color-text-secondary)] mb-1" for="contentsection-amount-sats">
                     Amount (sats)
                   </label>
-                  <input
+                  <input id="contentsection-amount-sats"
                     type="number"
                     value={nutzapAmount}
                     onInput={(e: any) => this.setState({ nutzapAmount: e.target.value, nutzapError: null })}
@@ -834,7 +853,7 @@ export class ContentSection extends BaseComponent<ContentSectionProps, ContentSe
                   </button>
                 </div>
               </div>
-            </div>
+            </ModalPanel>
           </>
         )}
       </div>

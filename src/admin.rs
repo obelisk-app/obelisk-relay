@@ -1,9 +1,10 @@
 use crate::follow_sync;
 use crate::server::ServerState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -435,6 +436,52 @@ struct ObeliskIndexSettingsResponse {
     restart_required: bool,
 }
 
+/// The relay's capacity and abuse limits, as a single editable group.
+///
+/// These all lived in the config file only, with no console path, which stopped
+/// being acceptable when `websocket.max_connections` went from dead config to an
+/// enforced ceiling: a limit you cannot see or adjust is one you discover by
+/// outage. Every field here needs a restart to take effect -- they are read once
+/// at startup into `RelayConfig`, the middleware stack and the connection
+/// limiter -- so the response says so plainly rather than implying a live change.
+#[derive(Serialize)]
+struct ConnectionSettingsResponse {
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    max_connection_duration_minutes: u32,
+    idle_timeout_minutes: u32,
+    max_subscriptions: u32,
+    max_limit: u32,
+    /// Coerce every group public at startup. Irreversible in practice: the
+    /// startup sweep clears `private`/`hidden` on all stored groups, and nothing
+    /// puts them back.
+    force_public_groups: bool,
+    running_force_public_groups: bool,
+    /// What the running process is actually enforcing, which is not the saved
+    /// value until a restart. Shown next to the field so the difference is
+    /// visible rather than implied by a badge.
+    running_max_connections: u32,
+    running_max_connections_per_ip: u32,
+    active_connections: u32,
+    restart_required: bool,
+}
+
+#[derive(Deserialize)]
+struct ConnectionSettingsRequest {
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    max_connection_duration_minutes: u32,
+    idle_timeout_minutes: u32,
+    max_subscriptions: u32,
+    max_limit: u32,
+    #[serde(default)]
+    force_public_groups: bool,
+    /// Must be the literal `FORCE PUBLIC` to turn the flag on. Ignored when
+    /// turning it off, which is the safe direction.
+    #[serde(default)]
+    force_public_confirm: String,
+}
+
 #[derive(Deserialize)]
 struct RestartRelayRequest {
     confirm: String,
@@ -840,17 +887,22 @@ fn read_yaml_u32(config_dir: &StdPath, key: &str, default_value: u32) -> u32 {
         .unwrap_or(default_value)
 }
 
-fn read_obelisk_index_scalar(config_dir: &StdPath, key: &str, default_value: &str) -> String {
+/// Read one child of a nested `relay:` block, e.g. `websocket.idle_timeout`.
+///
+/// Generalized from the `obelisk_index` reader. The flat `read_yaml_scalar` is
+/// indentation-blind, so it would happily return `wot.enabled` when asked for
+/// `obelisk_index.enabled`; scoping the scan to the block is what keeps leaf
+/// names from colliding across blocks. A block ends at the first non-empty,
+/// non-comment line indented no further than the block header.
+fn read_block_scalar(config_dir: &StdPath, block: &str, key: &str, default_value: &str) -> String {
+    let header = format!("{block}:");
     for file_name in [SETTINGS_LOCAL_FILE, SETTINGS_DEFAULT_FILE] {
         let path = config_dir.join(file_name);
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
         let lines: Vec<&str> = contents.lines().collect();
-        let Some(start) = lines
-            .iter()
-            .position(|line| line.trim_start() == "obelisk_index:")
-        else {
+        let Some(start) = lines.iter().position(|line| line.trim_start() == header) else {
             continue;
         };
 
@@ -874,6 +926,16 @@ fn read_obelisk_index_scalar(config_dir: &StdPath, key: &str, default_value: &st
     }
 
     default_value.to_string()
+}
+
+fn read_obelisk_index_scalar(config_dir: &StdPath, key: &str, default_value: &str) -> String {
+    read_block_scalar(config_dir, "obelisk_index", key, default_value)
+}
+
+fn read_block_u32(config_dir: &StdPath, block: &str, key: &str, default_value: u32) -> u32 {
+    read_block_scalar(config_dir, block, key, "")
+        .parse::<u32>()
+        .unwrap_or(default_value)
 }
 
 fn read_obelisk_index_u32(config_dir: &StdPath, key: &str, default_value: u32) -> u32 {
@@ -961,17 +1023,28 @@ fn upsert_relay_value(contents: String, key: &str, value: &str) -> String {
     next
 }
 
-fn upsert_obelisk_index_value(contents: String, key: &str, value: &str) -> String {
+/// Write one child of a nested `relay:` block, creating the block if needed.
+///
+/// Replaces a single child line in place, so sibling children, their comments
+/// and the block's own comments all survive. This is the difference between
+/// this and `upsert_relay_value`, which owns a key's whole indented subtree and
+/// would delete it -- which is why `wot` had to be written as a one-line flow
+/// map and cannot be read back out of the file.
+fn upsert_block_value(contents: String, block: &str, key: &str, value: &str) -> String {
+    let header = format!("{block}:");
     let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
     let block_start = lines
         .iter()
-        .position(|line| line.trim_start() == "obelisk_index:")
+        .position(|line| line.trim_start() == header)
         .unwrap_or_else(|| {
+            // `websocket:` is where `upsert_relay_value` inserts new flat keys,
+            // so put a new block before it to stay out of that path. If there is
+            // no websocket block, append.
             let insert_at = lines
                 .iter()
                 .position(|line| line.trim_start().starts_with("websocket:"))
                 .unwrap_or(lines.len());
-            lines.insert(insert_at, "  obelisk_index:".to_string());
+            lines.insert(insert_at, format!("  {header}"));
             insert_at
         });
 
@@ -1003,6 +1076,10 @@ fn upsert_obelisk_index_value(contents: String, key: &str, value: &str) -> Strin
     let mut next = lines.join("\n");
     next.push('\n');
     next
+}
+
+fn upsert_obelisk_index_value(contents: String, key: &str, value: &str) -> String {
+    upsert_block_value(contents, "obelisk_index", key, value)
 }
 
 fn config_bool(config_dir: &StdPath, key: &str, default_value: bool) -> bool {
@@ -1588,12 +1665,257 @@ pub fn load_runtime_admin_pubkeys(config_dir: &StdPath) -> Vec<PublicKey> {
     }
 }
 
+// --- Connection / capacity limits ---
+
+/// Defaults mirror `config.rs`; kept here so a missing key reads back as the
+/// value the relay would actually use rather than as zero.
+const DEFAULT_MAX_CONNECTIONS: u32 = 1000;
+const DEFAULT_MAX_CONNECTIONS_PER_IP: u32 = 32;
+const DEFAULT_MAX_CONNECTION_DURATION_MINUTES: u32 = 10;
+const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 10;
+const DEFAULT_MAX_SUBSCRIPTIONS: u32 = 50;
+const DEFAULT_MAX_LIMIT: u32 = 500;
+
+/// Upper bounds on what the form may set.
+///
+/// Not arbitrary: these are the values past which a setting stops being a limit.
+/// A relay configured for a million connections has no connection limit, and
+/// saying so at save time is kinder than discovering it when the box runs out of
+/// file descriptors.
+const MAX_ALLOWED_CONNECTIONS: u32 = 100_000;
+const MAX_ALLOWED_SUBSCRIPTIONS: u32 = 10_000;
+const MAX_ALLOWED_LIMIT: u32 = 10_000;
+const MAX_ALLOWED_TIMEOUT_MINUTES: u32 = 60 * 24 * 7;
+
+fn connection_settings_response(
+    state: &Arc<ServerState>,
+    restart_required: bool,
+) -> ConnectionSettingsResponse {
+    let dir = StdPath::new(&state.config_dir);
+    ConnectionSettingsResponse {
+        max_connections: read_block_u32(
+            dir,
+            "websocket",
+            "max_connections",
+            DEFAULT_MAX_CONNECTIONS,
+        ),
+        max_connections_per_ip: read_block_u32(
+            dir,
+            "websocket",
+            "max_connections_per_ip",
+            DEFAULT_MAX_CONNECTIONS_PER_IP,
+        ),
+        max_connection_duration_minutes: parse_duration_minutes(
+            &read_block_scalar(dir, "websocket", "max_connection_duration", ""),
+            DEFAULT_MAX_CONNECTION_DURATION_MINUTES,
+        ),
+        idle_timeout_minutes: parse_duration_minutes(
+            &read_block_scalar(dir, "websocket", "idle_timeout", ""),
+            DEFAULT_IDLE_TIMEOUT_MINUTES,
+        ),
+        max_subscriptions: read_yaml_u32(dir, "max_subscriptions", DEFAULT_MAX_SUBSCRIPTIONS),
+        max_limit: read_yaml_u32(dir, "max_limit", DEFAULT_MAX_LIMIT),
+        force_public_groups: config_bool(dir, "force_public_groups", false),
+        running_force_public_groups: state.http_state.groups.force_public_groups,
+        running_max_connections: state.connection_limiter.configured_max_total().unwrap_or(0)
+            as u32,
+        running_max_connections_per_ip: state.connection_limiter.configured_max_per_ip() as u32,
+        active_connections: state.connection_limiter.active() as u32,
+        restart_required,
+    }
+}
+
+async fn handle_connection_settings(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    Ok(Json(connection_settings_response(&state, false)))
+}
+
+async fn handle_connection_settings_update(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<ConnectionSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    // Zero is the dangerous input throughout: a zero connection cap locks
+    // everyone out including the operator, and a zero timeout disconnects every
+    // client immediately. Neither is recoverable from this console afterwards.
+    let checks: [(&str, u32, u32); 6] = [
+        (
+            "Max connections",
+            req.max_connections,
+            MAX_ALLOWED_CONNECTIONS,
+        ),
+        (
+            "Max connections per IP",
+            req.max_connections_per_ip,
+            MAX_ALLOWED_CONNECTIONS,
+        ),
+        (
+            "Max connection duration",
+            req.max_connection_duration_minutes,
+            MAX_ALLOWED_TIMEOUT_MINUTES,
+        ),
+        (
+            "Idle timeout",
+            req.idle_timeout_minutes,
+            MAX_ALLOWED_TIMEOUT_MINUTES,
+        ),
+        (
+            "Max subscriptions",
+            req.max_subscriptions,
+            MAX_ALLOWED_SUBSCRIPTIONS,
+        ),
+        ("Max limit", req.max_limit, MAX_ALLOWED_LIMIT),
+    ];
+    for (label, value, ceiling) in checks {
+        if value == 0 {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("{label} must be at least 1"),
+            ));
+        }
+        if value > ceiling {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("{label} must be at most {ceiling}"),
+            ));
+        }
+    }
+
+    if req.max_connections_per_ip > req.max_connections {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Per-IP limit cannot exceed the total connection limit",
+        ));
+    }
+
+    // Turning this on is a one-way door: on the next start every stored group
+    // has `private` and `hidden` cleared, and nothing restores them. A checkbox
+    // is not enough friction for that, so require the phrase -- but only in the
+    // direction that destroys information.
+    let currently_on = config_bool(
+        StdPath::new(&state.config_dir),
+        "force_public_groups",
+        false,
+    );
+    if req.force_public_groups
+        && !currently_on
+        && req.force_public_confirm.trim().to_uppercase() != "FORCE PUBLIC"
+    {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Type FORCE PUBLIC to confirm making every existing group public",
+        ));
+    }
+
+    persist_connection_settings(StdPath::new(&state.config_dir), &req).map_err(|e| {
+        warn!("Failed to persist connection settings: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist connection settings",
+        )
+    })?;
+
+    Ok(Json(connection_settings_response(&state, true)))
+}
+
+fn persist_connection_settings(
+    config_dir: &StdPath,
+    req: &ConnectionSettingsRequest,
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(SETTINGS_LOCAL_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|_| "relay:\n".to_string());
+
+    // The websocket trio are children of a nested block, so they go through the
+    // block-aware writer -- `upsert_relay_value` would swallow the block and the
+    // comments in it. The other two are flat `relay:` scalars.
+    let contents = upsert_block_value(
+        contents,
+        "websocket",
+        "max_connections",
+        &req.max_connections.to_string(),
+    );
+    let contents = upsert_block_value(
+        contents,
+        "websocket",
+        "max_connections_per_ip",
+        &req.max_connections_per_ip.to_string(),
+    );
+    let contents = upsert_block_value(
+        contents,
+        "websocket",
+        "max_connection_duration",
+        &yaml_quote(&format!("{}m", req.max_connection_duration_minutes)),
+    );
+    let contents = upsert_block_value(
+        contents,
+        "websocket",
+        "idle_timeout",
+        &yaml_quote(&format!("{}m", req.idle_timeout_minutes)),
+    );
+    let contents = upsert_relay_scalar(contents, "max_subscriptions", req.max_subscriptions);
+    let contents = upsert_relay_scalar(contents, "max_limit", req.max_limit);
+    let contents = upsert_relay_value(
+        contents,
+        "force_public_groups",
+        if req.force_public_groups {
+            "true"
+        } else {
+            "false"
+        },
+    );
+
+    std::fs::write(path, contents)
+}
+
 // --- Routes ---
 
-pub fn admin_routes() -> Router<Arc<ServerState>> {
-    Router::new()
+/// Reject anything without a valid admin session, before the handler runs.
+///
+/// Every protected handler still performs its own `validate_session` check, and
+/// those are deliberately left in place -- this is a second, structural gate, not
+/// a replacement. The per-handler checks are ~45 hand-written copies, correct
+/// today, but correctness maintained by memory is a defect waiting for the next
+/// route to be added. With this layer, forgetting one is no longer exploitable.
+///
+/// It also fixes an ordering bug: Axum runs the `Json` extractor before the
+/// handler body, so an unauthenticated request with a malformed body used to get
+/// `422 Unprocessable Entity` instead of `401`. A layer runs before extraction,
+/// so the status is now right.
+async fn require_admin_session(
+    State(state): State<Arc<ServerState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, req.headers()).is_none() {
+        return unauthorized().into_response();
+    }
+    next.run(req).await
+}
+
+pub fn admin_routes(state: Arc<ServerState>) -> Router<Arc<ServerState>> {
+    // Unauthenticated by design: these are how a client *obtains* a session, and
+    // `/setup` is guarded instead by `admin_pubkeys` being empty.
+    let public = Router::new()
         .route("/setup/status", get(handle_setup_status))
         .route("/setup", post(handle_setup))
+        .route("/challenge", get(handle_challenge))
+        .route("/auth", post(handle_auth));
+
+    let protected = Router::new()
         .route("/config/reset", post(handle_config_reset))
         .route("/config/backups", get(handle_config_backups_list))
         .route(
@@ -1616,6 +1938,10 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         )
         .route("/relay-identity/rotate-key", post(handle_relay_key_rotate))
         .route(
+            "/connection-settings",
+            get(handle_connection_settings).post(handle_connection_settings_update),
+        )
+        .route(
             "/access-settings",
             get(handle_access_settings).post(handle_access_settings_update),
         )
@@ -1627,8 +1953,6 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
             "/obelisk-index-settings",
             get(handle_obelisk_index_settings).post(handle_obelisk_index_settings_update),
         )
-        .route("/challenge", get(handle_challenge))
-        .route("/auth", post(handle_auth))
         .route("/session", get(handle_session_check))
         .route("/whitelist", get(handle_whitelist_list))
         .route("/whitelist/sources", get(handle_access_sources))
@@ -1692,6 +2016,11 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         )
         .route("/groups/{id}/members", get(handle_group_members))
         .route("/users/{pubkey}/events", delete(handle_user_events_delete))
+        // route_layer, not layer: it runs only for routes this router matched, so
+        // an unknown /api/admin path still 404s rather than reporting 401.
+        .route_layer(middleware::from_fn_with_state(state, require_admin_session));
+
+    public.merge(protected)
 }
 
 pub fn public_api_routes() -> Router<Arc<ServerState>> {
@@ -5146,8 +5475,9 @@ pub fn init_admin_state(admin_pubkeys: Vec<PublicKey>, relay_url: String, config
 
 #[cfg(test)]
 mod settings_yaml_tests {
-    use super::upsert_relay_value;
+    use super::{upsert_block_value, upsert_relay_scalar, upsert_relay_value};
     use crate::config::Config;
+    use std::time::Duration;
 
     /// Write `local` as settings.local.yml next to a minimal settings.yml and
     /// load it exactly as the relay does at boot. Returns Err if the file the
@@ -5167,6 +5497,101 @@ mod settings_yaml_tests {
             .map_err(|e| e.to_string())?
             .get_settings()
             .map_err(|e| e.to_string())
+    }
+
+    /// force_public_groups is a one-way door -- the startup sweep clears
+    /// `private` and `hidden` on every stored group -- so prove the written
+    /// config round-trips to the value the relay will actually act on.
+    #[test]
+    fn force_public_groups_round_trips_through_the_config() {
+        let local = concat!(
+            "relay:\n",
+            "  relay_secret_key: \"\"\n",
+            "  local_addr: \"127.0.0.1:1\"\n",
+            "  relay_url: \"ws://127.0.0.1:1\"\n",
+            "  db_path: \"db\"\n",
+            "  force_public_groups: false\n",
+        );
+
+        let on = upsert_relay_value(local.to_string(), "force_public_groups", "true");
+        assert!(
+            boots_with(&on, "fpg-on")
+                .expect("config must parse")
+                .force_public_groups
+        );
+
+        let off = upsert_relay_value(on, "force_public_groups", "false");
+        assert!(
+            !boots_with(&off, "fpg-off")
+                .expect("config must parse")
+                .force_public_groups,
+            "turning it back off must be expressible, even though it cannot undo the sweep"
+        );
+    }
+
+    /// The websocket block is the one place where two writers meet: it is the
+    /// insert anchor `upsert_relay_value` uses for new flat keys, and now also a
+    /// block the console rewrites child-by-child. So prove the result still
+    /// parses, and that the comments and untouched siblings survive.
+    #[test]
+    fn saving_connection_settings_keeps_the_websocket_block_loadable() {
+        let local = concat!(
+            "relay:\n",
+            "  relay_secret_key: \"\"\n",
+            "  local_addr: \"127.0.0.1:1\"\n",
+            "  relay_url: \"ws://127.0.0.1:1\"\n",
+            "  db_path: \"db\"\n",
+            "  max_subscriptions: 50\n",
+            "  websocket:\n",
+            "    # Raised so an idle reader keeps its connection for a session.\n",
+            "    max_connection_duration: \"6h\"\n",
+            "    idle_timeout: \"2h\"\n",
+            "    max_connections: 500\n",
+        );
+
+        let written = upsert_block_value(local.to_string(), "websocket", "idle_timeout", "\"45m\"");
+        let written = upsert_block_value(written, "websocket", "max_connections", "250");
+        let written = upsert_block_value(written, "websocket", "max_connections_per_ip", "16");
+        let written = upsert_relay_scalar(written, "max_subscriptions", 64);
+
+        assert!(
+            written.contains("# Raised so an idle reader keeps its connection"),
+            "the block's comments must survive a save:\n{written}"
+        );
+        assert!(
+            written.contains("max_connection_duration: \"6h\""),
+            "an untouched sibling must survive a save:\n{written}"
+        );
+
+        let settings = boots_with(&written, "ws-block").expect("written config must parse");
+        assert_eq!(
+            settings.websocket.idle_timeout(),
+            Some(Duration::from_secs(45 * 60))
+        );
+        assert_eq!(settings.websocket.max_connections(), Some(250));
+        assert_eq!(settings.websocket.max_connections_per_ip(), Some(16));
+        assert_eq!(
+            settings.websocket.max_connection_duration(),
+            Some(Duration::from_secs(6 * 3600))
+        );
+        assert_eq!(settings.max_subscriptions, 64);
+    }
+
+    /// A relay with no `websocket:` block at all -- the console must create one
+    /// rather than write orphaned children at the wrong depth.
+    #[test]
+    fn connection_settings_can_create_a_missing_websocket_block() {
+        let local = concat!(
+            "relay:\n",
+            "  relay_secret_key: \"\"\n",
+            "  local_addr: \"127.0.0.1:1\"\n",
+            "  relay_url: \"ws://127.0.0.1:1\"\n",
+            "  db_path: \"db\"\n",
+        );
+
+        let written = upsert_block_value(local.to_string(), "websocket", "max_connections", "300");
+        let settings = boots_with(&written, "ws-create").expect("written config must parse");
+        assert_eq!(settings.websocket.max_connections(), Some(300));
     }
 
     /// The exact corruption seen in production on 2026-09-15.

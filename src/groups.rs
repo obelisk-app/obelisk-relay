@@ -2459,7 +2459,7 @@ mod tests {
         let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
 
         // Create invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2478,7 +2478,7 @@ mod tests {
         let (groups, admin_keys, member_keys, _, group_id, scope) = setup_test_groups().await;
 
         // Create invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2509,7 +2509,7 @@ mod tests {
         let (groups, admin_keys, member_keys, _, group_id, scope) = setup_test_groups().await;
 
         // Create invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2533,7 +2533,7 @@ mod tests {
         let (groups, admin_keys, member_keys, _, group_id, scope) = setup_test_groups().await;
 
         // Create invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2940,7 +2940,7 @@ mod tests {
     async fn test_handle_create_invite_non_admin_cannot_create() {
         let (groups, _, non_member_keys, _, group_id, scope) = setup_test_groups().await;
 
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2962,7 +2962,7 @@ mod tests {
         groups.handle_put_user(add_event, &scope).unwrap();
 
         // Try to create invite as member
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -2976,7 +2976,7 @@ mod tests {
         let (groups, admin_keys, _, _, group_id, scope) = setup_test_groups().await;
 
         // Create first invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -3006,7 +3006,7 @@ mod tests {
     async fn test_handle_create_invite_rejects_invalid_group() {
         let (groups, admin_keys, _, _, _, scope) = setup_test_groups().await;
 
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), ["invalid_group_id"]),
             Tag::custom(TagKind::custom("code"), [invite_code]),
@@ -3021,7 +3021,7 @@ mod tests {
             setup_test_groups().await;
 
         // Create and use invite
-        let invite_code = "test_invite_123";
+        let invite_code = "test_invite_1234567890ab";
         let tags = vec![
             Tag::custom(TagKind::h(), [&group_id]),
             Tag::custom(TagKind::custom("code"), [invite_code]),

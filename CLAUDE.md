@@ -1,8 +1,35 @@
 # CLAUDE.md — Obelisk Nostr Relay
 
-This is the **Obelisk NIP-29 Groups Relay** — a whitelisted Nostr relay for relay-based group chat, forked from [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay) and customized for the Obelisk ecosystem.
+This is the **Obelisk NIP-29 Groups Relay** — a Nostr relay for relay-based group chat, forked from [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay) and customized for the Obelisk ecosystem.
 
-Production URL: `wss://relay.obelisk.ar`
+## What is actually deployed
+
+**Production URL: `wss://public.obelisk.ar`** — the `public_relay` service in
+`compose.yml`, config in `public-config/settings.local.yml`, bound to
+`127.0.0.1:8081` and fronted by a Cloudflare tunnel.
+
+`relay.obelisk.ar` is **retired** (2026-07-23). The `groups_relay` service that
+served it is marked `profiles: ["retired"]` and does not start; `Caddyfile` is an
+empty stub. Sections below that describe `config/settings.local.yml`, Caddy, or a
+three-pubkey whitelist describe that retired instance and are kept only because
+the code paths are shared — check `public-config/` for anything live.
+
+**Admission is not a manual whitelist.** `whitelisted_pubkeys` is empty on the
+live relay. Access is decided by, in order: the blacklist (overrides everything),
+then a manual runtime list, a follow-derived list, or — the one that actually
+admits most people — web-of-trust distance from the relay's reference accounts.
+`relay.wot.local` defaults to `true`, so the follow graph is built in-process and
+the `wot-oracle` sidecar is **not** required; it is behind a compose profile and
+is normally not running. At the time of writing that tier admits ~144,000
+accounts within 3 hops. See `src/whitelist.rs` and `src/wot_graph.rs`.
+
+Enabling WoT *narrows* an otherwise-open relay rather than widening it, because
+an empty whitelist plus an active tier must not mean "admit everyone" — see
+`docs/known-issues.md` §7.
+
+Before changing anything here, read `docs/known-issues.md`. It records the
+failure modes that have actually bitten this deployment, including the one that
+silently reverts the site's theme on any frontend change.
 
 ## What This Relay Does
 
@@ -169,7 +196,27 @@ docker compose logs -f groups_relay
 docker compose down
 ```
 
-The relay listens on port 8080. Caddy (in the obelisk stack) reverse-proxies `relay.obelisk.ar` → `localhost:8080` with WebSocket support.
+The relay listens on 8080 in the container. The live instance publishes that to
+`127.0.0.1:8081` on the host, and a Cloudflare tunnel serves it as
+`public.obelisk.ar`. Caddy is no longer in this path.
+
+### Deploying a change
+
+Not just `up -d --build` — the frontend build invalidates the theme override:
+
+```bash
+# The box also serves traffic; the default job count thrashes it (see Dockerfile).
+docker compose build public_relay --build-arg CARGO_BUILD_JOBS=1
+# Rebuilds the purple stylesheet against the new bundle hash, or the site
+# silently reverts to green. Then update BOTH sides of the CSS bind-mount line
+# in compose.yml to the hash it prints.
+scripts/retint-branding.sh ghcr.io/obelisk-app/obelisk-relay:<tag>
+docker compose up -d public_relay
+```
+
+Afterwards, confirm `/health`, confirm the site is still purple, and watch the
+logs for the follow-graph rebuild line to be sure admission still reports its
+expected account count.
 
 ## Frontend
 

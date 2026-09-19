@@ -114,10 +114,10 @@ export class CreateGroupForm extends BaseComponent<CreateGroupFormProps, CreateG
         <form onSubmit={this.handleSubmit} class="space-y-5 px-3">
           <div class="space-y-5">
             <div class="space-y-2">
-              <label class="block text-sm font-medium text-[var(--color-text-primary)]">
+              <label class="block text-sm font-medium text-[var(--color-text-primary)]" for="creategroupform-name">
                 Name
               </label>
-              <input
+              <input id="creategroupform-name"
                 type="text"
                 value={this.state.name}
                 onInput={(e) => this.setState({ name: (e.target as HTMLInputElement).value })}
@@ -132,10 +132,10 @@ export class CreateGroupForm extends BaseComponent<CreateGroupFormProps, CreateG
             </div>
 
             <div class="space-y-2">
-              <label class="block text-sm font-medium text-[var(--color-text-primary)]">
+              <label class="block text-sm font-medium text-[var(--color-text-primary)]" for="creategroupform-description">
                 Description
               </label>
-              <textarea
+              <textarea id="creategroupform-description"
                 value={this.state.about}
                 onInput={(e) => this.setState({ about: (e.target as HTMLTextAreaElement).value })}
                 placeholder="Enter channel description"
@@ -149,10 +149,10 @@ export class CreateGroupForm extends BaseComponent<CreateGroupFormProps, CreateG
             </div>
 
             <div class="space-y-2">
-              <label class="block text-sm font-medium text-[var(--color-text-primary)]">
+              <label class="block text-sm font-medium text-[var(--color-text-primary)]" for="creategroupform-picture-url">
                 Picture URL
               </label>
-              <input
+              <input id="creategroupform-picture-url"
                 type="url"
                 value={this.state.picture}
                 onInput={(e) => this.setState({ picture: (e.target as HTMLInputElement).value })}

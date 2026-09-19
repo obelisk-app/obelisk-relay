@@ -1,6 +1,7 @@
 import { useState, useEffect } from "preact/hooks";
 import type { NostrClient, Transaction } from "../api/nostr_client";
 import QRCode from "qrcode";
+import { getMintHostname } from '../utils/mint'
 
 interface WalletDisplayProps {
   client: NostrClient;
@@ -13,18 +14,6 @@ interface WalletDisplayProps {
   isWalletInitialized?: boolean;
 }
 
-// Helper function to safely parse mint URLs
-const getMintHostname = (mint: string): string => {
-  try {
-    // Add https:// if no protocol is present
-    const urlString = mint.includes('://') ? mint : `https://${mint}`;
-    return new URL(urlString).hostname;
-  } catch {
-    // If URL parsing fails, return the original string
-    return mint;
-  }
-};
-
 export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, walletBalance, isWalletInitialized }: WalletDisplayProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +24,11 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
   const [mints, setMints] = useState<string[]>([]);
   const [showMintManager, setShowMintManager] = useState(false);
   const [newMintUrl, setNewMintUrl] = useState("");
+  // Mint awaiting a second click before it is de-authorized. Removing a mint
+  // that still holds ecash is how you lose it: the proofs stay valid but the
+  // wallet stops tracking the mint they belong to. A one-click `text-xs` link
+  // next to a displayed balance was far too easy to hit by accident.
+  const [confirmingRemoveMint, setConfirmingRemoveMint] = useState<string | null>(null);
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [receiveMode, setReceiveMode] = useState<'paste' | 'mint'>('paste');
   const [tokenInput, setTokenInput] = useState("");
@@ -655,12 +649,38 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
                         Accept
                       </button>
                     )}
-                    <button
-                      onClick={() => removeMint(mint)}
-                      class="text-red-400 hover:text-red-300 text-xs"
-                    >
-                      Remove
-                    </button>
+                    {confirmingRemoveMint === mint ? (
+                      <>
+                        <span class="text-[11px] text-yellow-300">
+                          {balance > 0
+                            ? `Remove and stop tracking ${balance.toLocaleString()} sats?`
+                            : 'Remove this mint?'}
+                        </span>
+                        <button
+                          onClick={async () => {
+                            setConfirmingRemoveMint(null);
+                            await removeMint(mint);
+                          }}
+                          class="text-red-400 hover:text-red-300 text-xs font-medium"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          onClick={() => setConfirmingRemoveMint(null)}
+                          class="text-gray-400 hover:text-gray-300 text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmingRemoveMint(mint)}
+                        class="text-red-400 hover:text-red-300 text-xs"
+                        aria-label={`Remove mint ${getMintHostname(mint)}`}
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
                 </div>
                 );
@@ -778,10 +798,10 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
           {receiveMode === 'paste' && (
             <div class="space-y-4">
               <div>
-                <label class="block text-sm font-medium text-gray-400 mb-2">
+                <label class="block text-sm font-medium text-gray-400 mb-2" for="walletdisplay-paste-your-cashu-token">
                   Paste your Cashu token
                 </label>
-                <textarea
+                <textarea id="walletdisplay-paste-your-cashu-token"
                   value={tokenInput}
                   onInput={(e) => setTokenInput((e.target as HTMLTextAreaElement).value)}
                   placeholder="cashuAeyJ0..."
@@ -810,10 +830,10 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
               {!mintInvoice ? (
                 <>
                   <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">
+                    <label class="block text-sm font-medium text-gray-400 mb-2" for="walletdisplay-select-mint">
                       Select Mint
                     </label>
-                    <select
+                    <select id="walletdisplay-select-mint"
                       value={selectedMint}
                       onChange={(e) => setSelectedMint((e.target as HTMLSelectElement).value)}
                       class="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-sm
@@ -837,10 +857,10 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
                   </div>
                   
                   <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">
+                    <label class="block text-sm font-medium text-gray-400 mb-2" for="walletdisplay-amount-sats">
                       Amount (sats)
                     </label>
-                    <input
+                    <input id="walletdisplay-amount-sats"
                       type="number"
                       value={mintAmount}
                       onInput={(e) => setMintAmount((e.target as HTMLInputElement).value)}
@@ -1026,10 +1046,10 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
             {/* Mint selection */}
             {mints.length > 1 && (
               <div>
-                <label class="block text-sm font-medium text-gray-400 mb-2">
+                <label class="block text-sm font-medium text-gray-400 mb-2" for="walletdisplay-select-mint-optional">
                   Select Mint (optional)
                 </label>
-                <select
+                <select id="walletdisplay-select-mint-optional"
                   value={meltSelectedMint}
                   onChange={(e) => setMeltSelectedMint((e.target as HTMLSelectElement).value)}
                   class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm
@@ -1051,10 +1071,10 @@ export const WalletDisplay = ({ client, onClose, isModal, initialCashuBalance, w
 
             {/* Invoice input */}
             <div>
-              <label class="block text-sm font-medium text-gray-400 mb-2">
+              <label class="block text-sm font-medium text-gray-400 mb-2" for="walletdisplay-lightning-invoice">
                 Lightning Invoice
               </label>
-              <textarea
+              <textarea id="walletdisplay-lightning-invoice"
                 value={meltInvoice}
                 onInput={(e) => setMeltInvoice((e.target as HTMLTextAreaElement).value)}
                 placeholder="lnbc..."

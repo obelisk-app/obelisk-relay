@@ -14,6 +14,12 @@ interface MembersSectionState {
   newMemberNpub: string
   isAddingMember: boolean
   removingMembers: Set<string>
+  /**
+   * Members removed here, hidden until the relay broadcasts the updated
+   * member list. Replaces a direct assignment to `props.group.members`,
+   * which mutated App's state object without telling it.
+   */
+  locallyRemoved: Set<string>
   showConfirmRemove: string | null
 }
 
@@ -22,6 +28,7 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
     newMemberNpub: '',
     isAddingMember: false,
     removingMembers: new Set<string>(),
+    locallyRemoved: new Set<string>(),
     showConfirmRemove: null
   }
 
@@ -66,7 +73,9 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
 
     try {
       await this.props.client.removeMember(this.props.group.id, pubkey)
-      this.props.group.members = this.props.group.members.filter(m => m.pubkey !== pubkey)
+      this.setState(prev => ({
+        locallyRemoved: new Set(prev.locallyRemoved).add(pubkey),
+      }))
       this.props.showMessage('Member removed successfully', 'success')
     } catch (error) {
       this.showError('Failed to remove member', error)
@@ -85,7 +94,9 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
 
   render() {
     const { group, client, showMessage, isAdmin } = this.props
-    const { newMemberNpub, isAddingMember, removingMembers, showConfirmRemove } = this.state
+    const { newMemberNpub, isAddingMember, removingMembers, showConfirmRemove, locallyRemoved } = this.state
+    // Members removed in this session that the relay has not echoed yet.
+    const members = group.members.filter(m => !locallyRemoved.has(m.pubkey))
 
     // Get wallet state from client
     const cashuProofs = client.getCashuProofs()
@@ -100,7 +111,7 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
               <input
                 type="text"
                 value={newMemberNpub}
-                onChange={(e) => this.setState({ newMemberNpub: (e.target as HTMLInputElement).value })}
+                onInput={(e) => this.setState({ newMemberNpub: (e.target as HTMLInputElement).value })}
                 placeholder="Enter member npub or name@domain.com"
                 class="flex-1 px-3 py-2 bg-[var(--color-bg-secondary)] border border-[var(--color-border)]
                        text-sm rounded-lg text-[var(--color-text-primary)]
@@ -128,7 +139,7 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
         )}
 
         <div class="space-y-2">
-          {group.members.map(member => (
+          {members.map(member => (
             <Member
               key={member.pubkey}
               member={member}
@@ -148,7 +159,7 @@ export class MembersSection extends Component<MembersSectionProps, MembersSectio
             />
           ))}
 
-          {group.members.length === 0 && (
+          {members.length === 0 && (
             <div class="text-center py-12">
               <div class="mb-3 text-2xl">👥</div>
               <p class="text-sm text-[var(--color-text-tertiary)]">No members yet</p>

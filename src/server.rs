@@ -2,7 +2,11 @@ use crate::{
     admin,
     app_state::HttpServerState,
     blacklist::Blacklist,
-    config, follow_sync,
+    config,
+    connection_limits::{
+        client_ip, ConnectionLimiter, PermitHolder, DEFAULT_MAX_CONNECTIONS_PER_IP,
+    },
+    follow_sync,
     group_state_filter::{GroupStateAuthors, GroupStateFilterMiddleware},
     groups::Groups,
     groups_event_processor::GroupsRelayProcessor,
@@ -29,11 +33,12 @@ use axum::{
 };
 use governor::Quota;
 use nostr_sdk::prelude::PublicKey;
-use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
+use relay_builder::handle_upgrade_with_config;
 use relay_builder::{
     middlewares::RateLimitMiddleware, CryptoHelper, Nip40ExpirationMiddleware, Nip70Middleware,
     RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig,
 };
+use relay_builder::{websocket::ConnectionConfig, HandlerFactory, WebSocketUpgrade};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -82,6 +87,10 @@ pub struct ServerState {
     /// Kept separately from the live oracle so the settings form can show the
     /// pending values rather than reverting to the running ones on reload.
     pub wot_configured: Arc<parking_lot::RwLock<WotConfigured>>,
+    /// The live connection limiter, so the admin console can report what is
+    /// actually being enforced rather than only what is saved in the file. The
+    /// two differ between a save and the restart that applies it.
+    pub connection_limiter: Arc<crate::connection_limits::ConnectionLimiter>,
     /// True when `relay.wot.roots` was left empty, so the WoT graph roots track
     /// the reference accounts and must be refreshed whenever those change.
     /// False when the operator pinned roots explicitly — editing reference
@@ -273,6 +282,22 @@ pub async fn run_server(
             .map(|d| d.as_secs()),
         idle_timeout: settings.websocket.idle_timeout().map(|d| d.as_secs()),
     };
+
+    // The same limits again, in the shape the socket layer actually reads. The
+    // `WebSocketConfig` above only reaches `create_database_from_config`, where it
+    // is ignored; see `connection_limits` for why enforcement lives here.
+    let connection_config = ConnectionConfig {
+        max_connections: settings.websocket.max_connections(),
+        max_connection_duration: settings.websocket.max_connection_duration(),
+        idle_timeout: settings.websocket.idle_timeout(),
+    };
+    let connection_limiter = ConnectionLimiter::new(
+        settings.websocket.max_connections(),
+        settings
+            .websocket
+            .max_connections_per_ip()
+            .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_IP),
+    );
 
     let _crypto_helper = CryptoHelper::new(Arc::new(relay_keys.clone()));
     // Keep a handle to the database for the background pruner before moving it into RelayConfig.
@@ -656,7 +681,7 @@ pub async fn run_server(
                 chain
                     .with(wot_admission)
                     .with(group_state_filter)
-                    .with(UnindexedQueryMiddleware)
+                    .with(UnindexedQueryMiddleware::new())
                     .with(search_capability)
                     .with(rate_limiter)
                     .with(Nip40ExpirationMiddleware::new())
@@ -696,6 +721,7 @@ pub async fn run_server(
             roots: settings.wot.roots.clone(),
         })),
         wot_roots_follow_reference_accounts: settings.wot.parsed_roots().is_empty(),
+        connection_limiter: Arc::clone(&connection_limiter),
     });
 
     let cors = CorsLayer::new()
@@ -703,8 +729,28 @@ pub async fn run_server(
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Metrics handler without state
-    let metrics_handler = move || async move { metrics_handle.render() };
+    // Metrics, reachable only from inside the deployment.
+    //
+    // This was served to the whole internet: `https://public.obelisk.ar/metrics`
+    // answered unauthenticated with connection and subscription counts, database
+    // size and a group census by privacy. No pubkeys, so not a disclosure of user
+    // data -- but it is free reconnaissance, and a live oracle for whether a
+    // targeted publish landed.
+    //
+    // Gated on the forwarded-for header rather than the peer address, because the
+    // peer address cannot distinguish anything here: every request arrives from
+    // the Docker gateway, tunnelled and local alike. `CF-Connecting-IP` is added
+    // by cloudflared, so its presence means "came from the internet" and its
+    // absence means "came from this host" -- which is what a local Prometheus
+    // scrape or `docker exec … curl` looks like. Same trust assumption as
+    // `connection_limits::client_ip`: sound only while the relay is bound to
+    // loopback and reachable solely through the tunnel.
+    let metrics_handler = move |headers: HeaderMap| async move {
+        if headers.contains_key("cf-connecting-ip") {
+            return (StatusCode::NOT_FOUND, "Not Found").into_response();
+        }
+        metrics_handle.render().into_response()
+    };
 
     // Create a unified handler that supports both WebSocket and HTTP on the same route
     let root_handler = {
@@ -717,13 +763,40 @@ pub async fn run_server(
             let relay_info = relay_info.clone();
             let obelisk_capability = obelisk_capability.clone();
             let retention_advertisement = retention_advertisement.clone();
+            let connection_config = connection_config.clone();
+            let connection_limiter = Arc::clone(&connection_limiter);
 
             async move {
                 match ws {
                     Some(ws) => {
+                        // Claim a slot before upgrading. This is the only limit that
+                        // applies to an unauthenticated client: rate limiting is
+                        // per-connection and per-pubkey, and both need an AUTH an
+                        // attacker never has to complete.
+                        let ip = client_ip(&headers, addr.ip());
+                        let permit = match connection_limiter.try_acquire(ip) {
+                            Ok(permit) => permit,
+                            Err(reason) => {
+                                connection_limiter.log_rejection(ip, reason);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "connection limit reached",
+                                )
+                                    .into_response();
+                            }
+                        };
+
                         // Handle WebSocket upgrade
                         let handler = handler_factory.create(&headers);
-                        handle_upgrade(ws, addr, handler).await
+                        // The permit rides into the connection task and is released
+                        // when the socket closes.
+                        handle_upgrade_with_config(
+                            ws,
+                            addr,
+                            PermitHolder { handler, permit },
+                            connection_config,
+                        )
+                        .await
                     }
                     None => {
                         // Check for NIP-11 JSON request
@@ -757,7 +830,7 @@ pub async fn run_server(
                     get(obelisk_api::handle_messages),
                 ),
         )
-        .nest("/api/admin", admin::admin_routes())
+        .nest("/api/admin", admin::admin_routes(Arc::clone(&app_state)))
         .nest("/api", admin::public_api_routes())
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(app_state);

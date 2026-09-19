@@ -1,6 +1,13 @@
-import "preact/debug"
-import "preact/devtools"
+// Dev-only. These were unconditional imports, so every production bundle shipped
+// preact/debug -- ~33KB, but more importantly it wraps vnode creation with
+// per-render validation, which is a cost paid on every render by every user.
+// A static `import` cannot be conditional, hence the dynamic one.
+if (import.meta.env.DEV) {
+  await import("preact/debug")
+  await import("preact/devtools")
+}
 import "@nostr-wot/ui/styles.css"
+import { ErrorBoundary } from "./components/ErrorBoundary"
 import { render } from "preact"
 import { useEffect, useRef, useState } from "preact/hooks"
 import Router from "preact-router"
@@ -40,17 +47,50 @@ interface InitializationProps {
   onComplete: (client: NostrClient) => void
 }
 
+/**
+ * Turn a connection failure into something worth reading.
+ *
+ * The rule here is: never discard a reason the relay took the trouble to send.
+ * This used to match on "auth failed" and replace the whole message with
+ * "Please check your key and try again" -- so a pubkey that simply isn't
+ * admitted to the relay was told the one thing that *wasn't* wrong, and the
+ * relay's actual explanation ("this relay only accepts whitelisted pubkeys")
+ * never reached the screen. The "timeout" branch had the same problem in
+ * reverse: "Connection timeout waiting for main relay authentication" contains
+ * the word "timeout", so an auth stall was reported as a network fault.
+ *
+ * So check the specific cases before the generic ones, and pass the relay's own
+ * words through.
+ */
+const AUTH_FAILED_PREFIX = "Main relay auth failed: "
+
 const toConnectionMessage = (e: unknown): string => {
   if (!(e instanceof Error)) return "Failed to connect"
+
+  if (e.message.startsWith(AUTH_FAILED_PREFIX)) {
+    const reason = e.message.slice(AUTH_FAILED_PREFIX.length).trim()
+    return reason
+      ? `The relay refused this account: ${reason}`
+      : "The relay refused this account."
+  }
+
+  // Specifically an auth stall, not a network one -- say so.
+  if (e.message.includes("timeout waiting for main relay authentication")) {
+    return "The relay accepted the connection but never completed authentication. It may be busy; try again."
+  }
+
   if (e.message.includes("timeout")) {
     return "Connection timed out. Please check your network and try again."
   }
-  if (e.message.includes("auth failed")) {
-    return "Authentication failed. Please check your key and try again."
+
+  if (e.message.includes("disconnected")) {
+    return `Lost the connection to ${wsUrl}. Reconnecting…`
   }
+
   if (e.message.includes("Main relay")) {
     return `Cannot connect to the groups relay at ${wsUrl}. Please try again.`
   }
+
   return e.message
 }
 
@@ -197,14 +237,18 @@ const ChatApp = (_props: { path?: string }) => {
 
 const Root = () => {
   return (
-    <NostrSessionProvider theme="la-crypta" autoRestore>
-      <Router>
-        <LandingPage path="/" />
-        <DocsPage path="/docs" />
-        <ChatApp path="/app" />
-        <AdminPanel path="/admin" />
-      </Router>
-    </NostrSessionProvider>
+    // Outermost boundary: whatever throws, the user gets a message and a retry
+    // instead of a blank page.
+    <ErrorBoundary label="The app hit an unexpected error.">
+      <NostrSessionProvider theme="la-crypta" autoRestore>
+        <Router>
+          <LandingPage path="/" />
+          <DocsPage path="/docs" />
+          <ChatApp path="/app" />
+          <AdminPanel path="/admin" />
+        </Router>
+      </NostrSessionProvider>
+    </ErrorBoundary>
   )
 }
 

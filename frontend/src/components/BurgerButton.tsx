@@ -7,7 +7,7 @@ export function BurgerButton({ isOpen, onClick }: BurgerButtonProps) {
   return (
     <button
       onClick={onClick}
-      class="w-8 h-8 flex-shrink-0 flex items-center justify-center focus:outline-none"
+      class="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       aria-label={isOpen ? "Close menu" : "Open menu"}
     >
       <div class="relative w-5 h-4">

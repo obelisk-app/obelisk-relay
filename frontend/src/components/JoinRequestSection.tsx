@@ -1,7 +1,6 @@
 import { Component } from 'preact'
 import { NostrClient, NostrGroupError } from '../api/nostr_client'
 import type { Group } from '../types'
-import { JoinRequestForm } from './JoinRequestForm'
 import { UserDisplay } from './UserDisplay'
 import type { Proof } from '@cashu/cashu-ts'
 
@@ -18,13 +17,19 @@ interface JoinRequestSectionState {
   showJoinForm: boolean
   inviteCode: string
   isSubmitting: boolean
+  /** Pubkey currently being accepted, so its row can't be double-submitted. */
+  accepting: string | null
+  /** Pubkey currently being rejected. */
+  rejecting: string | null
 }
 
 export class JoinRequestSection extends Component<JoinRequestSectionProps, JoinRequestSectionState> {
-  state = {
+  state: JoinRequestSectionState = {
     showJoinForm: false,
     inviteCode: '',
-    isSubmitting: false
+    isSubmitting: false,
+    accepting: null,
+    rejecting: null
   }
 
   getCurrentUserPubkey = (): string | null => {
@@ -46,20 +51,38 @@ export class JoinRequestSection extends Component<JoinRequestSectionProps, JoinR
   }
 
   handleAcceptRequest = async (pubkey: string) => {
+    if (this.state.accepting) return
+    this.setState({ accepting: pubkey })
     try {
       await this.props.client.acceptJoinRequest(this.props.group.id, pubkey)
       this.props.showMessage('Join request accepted successfully', 'success')
     } catch (error) {
       this.showError('Failed to accept join request', error)
+    } finally {
+      this.setState({ accepting: null })
     }
   }
 
+  /**
+   * Reject by sending kind 9001 (remove user), which is what actually clears the
+   * pending request: the relay drops the pubkey from `join_requests` whenever it
+   * removes them from the group.
+   *
+   * This previously called `deleteEvent(groupId, pubkey)`, which publishes a
+   * 9005 with the *pubkey* sitting in the `e` (event id) tag. The relay found no
+   * event with that id, deleted nothing, and the UI reported success anyway. It
+   * was also never wired to a button, so admins had no reject path at all.
+   */
   handleRejectRequest = async (pubkey: string) => {
+    if (this.state.rejecting) return
+    this.setState({ rejecting: pubkey })
     try {
-      await this.props.client.deleteEvent(this.props.group.id, pubkey)
-      this.props.showMessage('Join request rejected successfully', 'success')
+      await this.props.client.removeMember(this.props.group.id, pubkey)
+      this.props.showMessage('Join request rejected', 'success')
     } catch (error) {
       this.showError('Failed to reject join request', error)
+    } finally {
+      this.setState({ rejecting: null })
     }
   }
 
@@ -88,14 +111,6 @@ export class JoinRequestSection extends Component<JoinRequestSectionProps, JoinR
 
     return (
       <div class="space-y-4">
-        <div class="p-4 bg-[var(--color-bg-primary)] rounded-lg border border-[var(--color-border)]">
-          <JoinRequestForm
-            groupId={group.id}
-            relayUrl={client.config.relayUrl}
-            client={client}
-          />
-        </div>
-
         {group.joinRequests.length > 0 ? (
           <div class="space-y-2">
             {group.joinRequests.map(pubkey => (
@@ -120,10 +135,22 @@ export class JoinRequestSection extends Component<JoinRequestSectionProps, JoinR
                   />
                   <button
                     onClick={() => this.handleAcceptRequest(pubkey)}
+                    disabled={this.state.accepting === pubkey || this.state.rejecting === pubkey}
                     class="shrink-0 px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium
-                           hover:bg-accent/90 transition-colors flex items-center gap-2"
+                           hover:bg-accent/90 transition-colors flex items-center gap-2
+                           disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Accept
+                    {this.state.accepting === pubkey ? 'Accepting…' : 'Accept'}
+                  </button>
+                  <button
+                    onClick={() => this.handleRejectRequest(pubkey)}
+                    disabled={this.state.accepting === pubkey || this.state.rejecting === pubkey}
+                    class="shrink-0 px-4 py-2 rounded-lg text-sm font-medium border
+                           border-[var(--color-border)] text-[var(--color-text-secondary)]
+                           hover:border-[var(--color-border-hover)] hover:text-[var(--color-text-primary)]
+                           transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {this.state.rejecting === pubkey ? 'Rejecting…' : 'Reject'}
                   </button>
                 </div>
               </div>

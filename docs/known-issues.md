@@ -246,7 +246,10 @@ with a real `relay_secret_key` in it. The file is gitignored now, but this
 repository is public, so the key is permanently readable by anyone who clones it:
 
 ```bash
-git log --all -S"3ab7d45a8843e45946cdd5eea06d565976e7f70397983f518783cdc704180500"
+# Prefix only, deliberately. `-S` is a substring search, so this still finds
+# the commits -- and a document that exists to say "never reuse this key"
+# should not be the most convenient place in the repo to copy it from.
+git log --all -S"3ab7d45a8843e459"
 ```
 
 **The live relay does not use it.** `public-config/settings.local.yml` holds a

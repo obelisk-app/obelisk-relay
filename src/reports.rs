@@ -334,7 +334,19 @@ pub struct ReportCase {
     /// The reported event's content, when the target is an event and it is still
     /// stored. An admin cannot judge a report without seeing what was reported.
     pub reported_content: Option<String>,
+    /// The account the actions apply to, and **only** ever a verified one: the
+    /// author of the stored event, or the pubkey when the report names a person
+    /// directly. `None` when the reported event is gone, because then the relay
+    /// genuinely does not know whose it was.
+    ///
+    /// Kept apart from `claimed_pubkey` deliberately. A report's `p` tag is the
+    /// accuser's assertion, and a report naming some event id alongside an
+    /// innocent party's pubkey would otherwise render as "Reported: <victim>"
+    /// with a working Block button next to it. Bans must rest on what the relay
+    /// can confirm, not on what the accuser wrote.
     pub reported_pubkey: Option<String>,
+    /// Who the reporter *said* was responsible. Display only.
+    pub claimed_pubkey: Option<String>,
     /// Group the reported event belongs to, derived from its `h` tag. Drives
     /// which actions apply: without it, "remove from group" is meaningless.
     pub group_id: Option<String>,
@@ -370,7 +382,13 @@ pub fn group_into_cases(reports: Vec<Report>, state: &ReportsState) -> Vec<Repor
             types.dedup();
 
             let last_reported_at = reports.iter().map(|r| r.created_at).max().unwrap_or(0);
-            let reported_pubkey = reports.iter().find_map(|r| r.reported_pubkey.clone());
+            let claimed_pubkey = reports.iter().find_map(|r| r.reported_pubkey.clone());
+            // A pubkey target is self-verifying -- the target *is* the account.
+            // An event target stays unverified until its author is looked up.
+            let reported_pubkey = match &target {
+                ReportTarget::Pubkey { hex } => Some(hex.clone()),
+                ReportTarget::Event { .. } => None,
+            };
 
             ReportCase {
                 resolution: state.get(&target),
@@ -382,6 +400,7 @@ pub fn group_into_cases(reports: Vec<Report>, state: &ReportsState) -> Vec<Repor
                 reports,
                 reported_content: None,
                 reported_pubkey,
+                claimed_pubkey,
                 group_id: None,
             }
         })
@@ -522,6 +541,52 @@ mod tests {
         assert_eq!(
             cases[0].reporter_count, 1,
             "four reports from one pubkey is one reporter"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accusers_p_tag_never_becomes_the_ban_target() {
+        // The attack this forecloses: file a report naming some event id the
+        // relay does not have, alongside an innocent party's pubkey. If the
+        // queue treated that `p` tag as "the reported account", an admin
+        // clicking Block would ban whoever the accuser named.
+        let victim = Keys::generate().public_key();
+        let event = report_event(
+            vec![
+                Tag::parse(["e", &EventId::all_zeros().to_hex(), "spam"]).unwrap(),
+                Tag::parse(["p", &victim.to_hex()]).unwrap(),
+            ],
+            "it was them, honest",
+        )
+        .await;
+
+        let cases = group_into_cases(Report::parse(&event), &ReportsState::default());
+        assert_eq!(cases.len(), 1);
+        assert_eq!(
+            cases[0].reported_pubkey, None,
+            "an unverified event target must expose no account to act on"
+        );
+        assert_eq!(
+            cases[0].claimed_pubkey,
+            Some(victim.to_hex()),
+            "the accusation is still shown, just never acted on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pubkey_target_is_its_own_verification() {
+        let subject = Keys::generate().public_key();
+        let event = report_event(
+            vec![Tag::parse(["p", &subject.to_hex(), "impersonation"]).unwrap()],
+            "",
+        )
+        .await;
+
+        let cases = group_into_cases(Report::parse(&event), &ReportsState::default());
+        assert_eq!(
+            cases[0].reported_pubkey,
+            Some(subject.to_hex()),
+            "when the report names a person, that person is the target"
         );
     }
 

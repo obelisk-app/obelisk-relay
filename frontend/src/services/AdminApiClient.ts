@@ -1020,7 +1020,14 @@ export interface ReportCase {
   } | null
   /** What was actually reported, so it can be judged without a second lookup. */
   reported_content: string | null
+  /**
+   * The account actions apply to, and only ever a verified one: the author of
+   * the stored event, or the pubkey when the report names a person. Null when
+   * the reported message is gone -- the relay then does not know whose it was.
+   */
   reported_pubkey: string | null
+  /** Who the reporter *said* was responsible. Display only, never actionable. */
+  claimed_pubkey: string | null
   /** Present only when the reported event belongs to a group. */
   group_id: string | null
 }

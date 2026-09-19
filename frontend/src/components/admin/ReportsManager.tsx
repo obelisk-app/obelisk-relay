@@ -1,10 +1,27 @@
 import { useEffect, useState } from 'preact/hooks'
+import { nip19 } from 'nostr-tools'
 import { adminApi, type ReportCase } from '../../services/AdminApiClient'
+import { fetchProfiles, type NostrProfile } from '../../services/ProfileFetcher'
 import { AdminEmptyState } from './AdminEmptyState'
+import { ProfileCard } from './ProfileCard'
 
 type StatusFilter = 'open' | 'resolved' | 'all'
 
 const shortHex = (hex: string) => `${hex.slice(0, 8)}…${hex.slice(-4)}`
+
+/** Hex -> npub, tolerating anything that is not a valid key. */
+const toNpub = (hex: string) => {
+  try {
+    return nip19.npubEncode(hex)
+  } catch {
+    return ''
+  }
+}
+
+const displayName = (hex: string, profiles: Map<string, NostrProfile>) => {
+  const p = profiles.get(hex)
+  return p?.display_name || p?.name || p?.nip05 || null
+}
 
 const when = (unix: number) => {
   const seconds = Math.floor(Date.now() / 1000) - unix
@@ -31,6 +48,51 @@ const when = (unix: number) => {
  * delete when a report names a person rather than a message, and nothing to
  * remove someone from when the reported event is not in a group.
  */
+/**
+ * A pubkey you can actually act on: a name when we have one, the npub when we
+ * don't, and a click to see the rest.
+ *
+ * The queue previously printed eight hex characters with no affordance. That is
+ * not enough to tell a person apart, and there was nothing to click.
+ */
+const IdentityChip = ({
+  hex,
+  label,
+  profiles,
+  onInspect,
+}: {
+  hex: string
+  /** Stated explicitly, because a report always involves two parties. */
+  label: string
+  profiles: Map<string, NostrProfile>
+  onInspect: (v: { hex: string; npub: string }) => void
+}) => {
+  const npub = toNpub(hex)
+  const name = displayName(hex, profiles)
+  return (
+    <span class="inline-flex items-center gap-1.5 flex-wrap">
+      <span class="text-[var(--color-text-tertiary)]">{label}</span>
+      <button
+        onClick={() => onInspect({ hex, npub })}
+        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs
+               border border-[var(--color-border)] hover:border-[var(--color-border-hover)]
+               hover:text-[var(--color-text-primary)] transition-colors"
+        title={npub || hex}
+      >
+        {profiles.get(hex)?.picture && (
+          <img
+            src={profiles.get(hex)!.picture}
+            alt=""
+            referrerpolicy="no-referrer"
+            class="w-4 h-4 rounded-full object-cover"
+          />
+        )}
+        <span>{name ?? (npub ? `${npub.slice(0, 12)}…` : shortHex(hex))}</span>
+      </button>
+    </span>
+  )
+}
+
 export const ReportsManager = () => {
   const [cases, setCases] = useState<ReportCase[]>([])
   const [resolvedTotal, setResolvedTotal] = useState(0)
@@ -40,6 +102,30 @@ export const ReportsManager = () => {
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<{ key: string; action: string } | null>(null)
   const [notes, setNotes] = useState<Record<string, string>>({})
+  const [profiles, setProfiles] = useState<Map<string, NostrProfile>>(new Map())
+  /** Pubkey whose profile card is open. */
+  const [inspecting, setInspecting] = useState<{ hex: string; npub: string } | null>(null)
+
+  /**
+   * Look up everyone involved -- reporters and reported alike.
+   *
+   * A truncated hex is not an identity you can act on. Deciding whether a report
+   * is a real problem or a grudge usually means knowing who is on each side, and
+   * the console was showing eight characters and no way to see more.
+   */
+  const loadProfiles = (list: ReportCase[]) => {
+    const hexes = new Set<string>()
+    for (const c of list) {
+      if (c.reported_pubkey) hexes.add(c.reported_pubkey)
+      if (c.target.kind === 'pubkey') hexes.add(c.target.hex)
+      for (const r of c.reports) hexes.add(r.reporter)
+    }
+    if (hexes.size === 0) return
+    fetchProfiles([...hexes])
+      .then(found => setProfiles(prev => new Map([...prev, ...found])))
+      // Decoration: a slow profile relay must not blank the queue.
+      .catch(() => undefined)
+  }
 
   const load = async (next: StatusFilter) => {
     setLoading(true)
@@ -48,6 +134,7 @@ export const ReportsManager = () => {
       const data = await adminApi.getReports(next)
       setCases(data.cases)
       setResolvedTotal(data.resolved_total)
+      loadProfiles(data.cases)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load reports')
     } finally {
@@ -66,6 +153,7 @@ export const ReportsManager = () => {
         if (cancelled) return
         setCases(data.cases)
         setResolvedTotal(data.resolved_total)
+        loadProfiles(data.cases)
       } catch (e) {
         if (cancelled) return
         setError(e instanceof Error ? e.message : 'Failed to load reports')
@@ -126,6 +214,15 @@ export const ReportsManager = () => {
         <p class="admin-access-hint" role="alert">{error}</p>
       )}
 
+      {inspecting && (
+        <ProfileCard
+          profile={profiles.get(inspecting.hex)}
+          hex={inspecting.hex}
+          npub={inspecting.npub}
+          onClose={() => setInspecting(null)}
+        />
+      )}
+
       {loading ? (
         <p class="admin-access-hint">Loading reports…</p>
       ) : cases.length === 0 ? (
@@ -142,6 +239,11 @@ export const ReportsManager = () => {
           {cases.map(c => {
             const isEvent = c.target.kind === 'event'
             const busy = busyKey === c.key
+            // The account the actions apply to: the reported event's author, or
+            // the pubkey itself when the report names a person.
+            const subjectHex =
+              c.target.kind === 'pubkey' ? c.target.hex : c.reported_pubkey
+            const reporters = [...new Set(c.reports.map(r => r.reporter))]
             return (
               <section
                 key={c.key}
@@ -162,12 +264,53 @@ export const ReportsManager = () => {
                         {' · '}{when(c.last_reported_at)}
                       </span>
                     </div>
-                    <p class="text-xs text-[var(--color-text-tertiary)] mt-1 break-all">
-                      {isEvent && c.target.kind === 'event' ? `event ${shortHex(c.target.id)}` : null}
-                      {!isEvent && c.target.kind === 'pubkey' ? `pubkey ${shortHex(c.target.hex)}` : null}
-                      {c.reported_pubkey && isEvent && ` · by ${shortHex(c.reported_pubkey)}`}
-                      {c.group_id && ` · in ${c.group_id}`}
-                    </p>
+                    {/* Who is who, stated rather than implied. Every action
+                        below acts on the reported account, never the reporter,
+                        and that has to be legible before anyone clicks. */}
+                    <div class="text-xs text-[var(--color-text-secondary)] mt-2 space-y-1">
+                      {subjectHex ? (
+                        <div>
+                          <IdentityChip
+                            hex={subjectHex}
+                            label="Reported:"
+                            profiles={profiles}
+                            onInspect={setInspecting}
+                          />
+                        </div>
+                      ) : c.claimed_pubkey ? (
+                        // Shown as the accusation it is. The relay could not
+                        // confirm it -- the message is gone -- so nothing here
+                        // acts on this key.
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                          <span class="text-[var(--color-text-tertiary)]">
+                            Reporter claims it was:
+                          </span>
+                          <IdentityChip
+                            hex={c.claimed_pubkey}
+                            label=""
+                            profiles={profiles}
+                            onInspect={setInspecting}
+                          />
+                          <span class="text-yellow-300/80">unverified</span>
+                        </div>
+                      ) : null}
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="text-[var(--color-text-tertiary)]">Reported by:</span>
+                        {reporters.map(r => (
+                          <IdentityChip
+                            key={r}
+                            hex={r}
+                            label=""
+                            profiles={profiles}
+                            onInspect={setInspecting}
+                          />
+                        ))}
+                      </div>
+                      <div class="text-[var(--color-text-tertiary)] break-all">
+                        {isEvent && c.target.kind === 'event' ? `message ${shortHex(c.target.id)}` : null}
+                        {c.group_id && ` · in group ${c.group_id}`}
+                      </div>
+                    </div>
                   </div>
                   {c.resolution && (
                     <span class="admin-status-badge admin-status-badge-ok">
@@ -185,7 +328,9 @@ export const ReportsManager = () => {
                 )}
                 {isEvent && c.reported_content === null && (
                   <p class="admin-access-hint mt-2">
-                    The reported message is no longer stored — it may already have been deleted.
+                    The reported message is no longer stored, so the relay cannot confirm who
+                    wrote it. Blocking is unavailable for that reason — only the reporter's
+                    unverified claim remains, and a ban should not rest on that.
                   </p>
                 )}
 
@@ -253,7 +398,7 @@ export const ReportsManager = () => {
                           class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-border)]
                                  hover:border-[var(--color-border-hover)] disabled:opacity-50"
                         >
-                          Remove from group
+                          Remove reported account from group
                         </button>
                       )}
 
@@ -261,7 +406,13 @@ export const ReportsManager = () => {
                       {confirming?.key === c.key && confirming.action === 'blacklist' ? (
                         <>
                           <span class="text-xs text-yellow-300">
-                            Block this account from the whole relay?
+                            Block{' '}
+                            <strong>
+                              {subjectHex
+                                ? (displayName(subjectHex, profiles) ?? shortHex(subjectHex))
+                                : 'this account'}
+                            </strong>{' '}
+                            from the whole relay? This is the reported account, not the reporter.
                           </span>
                           <button
                             onClick={() => void resolve(c, 'blacklist')}
@@ -280,11 +431,19 @@ export const ReportsManager = () => {
                       ) : (
                         <button
                           onClick={() => setConfirming({ key: c.key, action: 'blacklist' })}
-                          disabled={busy}
+                          // Without a subject there is nobody to block: the
+                          // reported message is gone, so its author is unknown.
+                          disabled={busy || !subjectHex}
+                          title={
+                            subjectHex
+                              ? `Blocks ${toNpub(subjectHex) || subjectHex}`
+                              : 'The reported message is gone, so its author cannot be determined'
+                          }
                           class="px-3 py-1.5 rounded text-xs font-medium text-red-400
-                                 border border-red-500/30 hover:border-red-500/60 disabled:opacity-50"
+                                 border border-red-500/30 hover:border-red-500/60
+                                 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
-                          Block account
+                          Block reported account
                         </button>
                       )}
                     </div>

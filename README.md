@@ -1,9 +1,11 @@
 # Obelisk Relay
 
-NIP-29 Nostr Groups Relay for the Obelisk ecosystem. Whitelisted, role-based, with a built-in admin UI.
+NIP-29 Nostr Groups Relay for the Obelisk ecosystem. Role-based, moderated, with a built-in admin console.
 
-Production: `wss://relay.obelisk.ar`
+Live instance: `wss://public.obelisk.ar`
 Forked from [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay).
+
+![The relay's landing page](docs/images/landing.png)
 
 <p>
   <a href="https://github.com/obelisk-app/obelisk-relay/stargazers"><img src="https://img.shields.io/github/stars/obelisk-app/obelisk-relay?style=flat&logo=github&color=b4f953&labelColor=0a0a0a" alt="GitHub stars" /></a>
@@ -14,12 +16,35 @@ Forked from [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay).
 
 A NIP-29 relay manages **group chats at the relay level** — unlike a vanilla Nostr relay that only stores and forwards events, this one:
 
-- 🔐 **Pubkey whitelist** — only approved npubs can connect (NIP-42 authenticated)
+- 🔐 **Layered admission** — a manual allowlist, everyone your reference accounts follow, or web-of-trust distance in the follow graph. NIP-42 authenticated, and a blacklist that overrides all of it.
 - 👥 **Role-based permissions** — admin / mod / member, enforced server-side
 - 🔒 **Private groups** — content visible only to members
-- 🎫 **Invite codes** — time-limited, usage-capped
-- 🌐 **Built-in web UI** — Preact frontend at the relay URL
+- 🎫 **Invite codes** — expiring, usage-capped, minimum length enforced
+- 🚩 **Moderation queue** — NIP-56 reports, grouped by what was reported, with the reported message kept even if it is later deleted
+- 🌐 **Built-in admin console** — everything below is a screen in it, no SSH required
 - ⚡ **Cashu wallet** — NIP-60/61 micropayments
+
+## The admin console
+
+Sign in with your Nostr identity — browser extension, remote signer, or a pasted key.
+
+![Admin sign-in](docs/images/admin-login.png)
+
+**Access** — every rule that decides who can connect, and who each one lets in. Rate limits are per-pubkey, per-connection and relay-wide, and the budget falls off with distance in the follow graph.
+
+![Access control and rate limits](docs/images/admin-access.png)
+
+**Groups** — browse groups, metadata, members and stored events.
+
+![Groups overview](docs/images/admin-groups.png)
+
+**Reports** — NIP-56 moderation reports, one row per reported thing however many people reported it. Only relay admins can read these. The reported message is shown inline, and is captured when the report arrives so deleting it is not a way out.
+
+![Moderation reports queue](docs/images/admin-reports.png)
+
+**Storage** — what the relay has stored, what it is spending disk on, and whether anything is being pruned.
+
+![Storage and pruning](docs/images/admin-storage.png)
 
 ## The Obelisk family
 
@@ -78,6 +103,18 @@ cd obelisk-relay
 5. Backs up any existing config, writes a fresh one, and brings up `groups_relay`
 
 By default `setup.sh` pulls a prebuilt multi-arch image from `ghcr.io/obelisk-app/obelisk-relay:latest` (first install ≈ 30 seconds). Pass `./setup.sh --build` if you're hacking on the relay code and want to compile from source instead.
+
+> **`:latest` is currently behind.** The newest builds are published as dated
+> tags (`v2026.09.19-reports-4-arm64` at the time of writing) and `:latest` has
+> not been moved to them, because those builds are arm64-only and `:latest` is
+> multi-arch — repointing it would break every amd64 install with
+> `no matching manifest for linux/amd64`. Until an amd64 leg is built in CI and
+> the two are joined with `docker buildx imagetools create`, pin the dated tag
+> explicitly if you want the current relay:
+>
+> ```bash
+> RELAY_IMAGE_TAG=v2026.09.19-reports-4-arm64 ./setup.sh
+> ```
 
 `expose.sh`:
 1. Confirms the relay is healthy locally

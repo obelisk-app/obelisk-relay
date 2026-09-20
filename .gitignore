@@ -28,6 +28,17 @@ config/whitelist_runtime.json
 config/whitelist_follows.json
 config/reference_accounts.json
 
+# Moderation state. reports_evidence.json holds copies of reported messages and
+# the pubkeys that wrote them; reports_state.json holds who decided what about
+# whom. Both are the relay's record of other people's conduct -- never source,
+# and publishing either would expose reported content and reporters in a public
+# repository. Ignored on both deployments.
+config/reports_state.json
+config/reports_evidence.json
+config/relay_owner_pubkey.json
+public-config/reports_state.json
+public-config/reports_evidence.json
+
 # The same state for the public instance. Previously only the `config/` copies
 # were ignored, so these sat untracked-but-committable in a public repo: they
 # hold the owner and admin pubkeys, and whitelist_follows.json is a 16KB list of

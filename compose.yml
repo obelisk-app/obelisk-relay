@@ -36,7 +36,7 @@ services:
   # Automatic event retention pruning is disabled unless explicitly enabled in
   # public-config/settings.local.yml.
   public_relay:
-    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-v2026.09.22-access-polish-arm64}
+    image: ghcr.io/obelisk-app/obelisk-relay:${RELAY_IMAGE_TAG:-v2026.09.22-access-polish2-arm64}
     build:
       context: .
       dockerfile: Dockerfile
@@ -57,14 +57,14 @@ services:
       # A UI-driven update does this for you: scripts/relay-updater.sh runs
       # retint.sh against the new image and rewrites this line before recreating
       # the container, and fails the update rather than shipping a green theme.
-      - ./public-config/branding/assets/index-QIwTMmsW.css:/app/frontend/dist/assets/index-QIwTMmsW.css:ro
+      - ./public-config/branding/assets/index-DAuZHqE-.css:/app/frontend/dist/assets/index-DAuZHqE-.css:ro
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
       NIP29__relay__relay_url: "wss://public.obelisk.ar"
       TOKIO_BLOCKING_THREADS: "2048"
       # See the note on the same line in groups_relay: the console reports the
       # running version from this, because the container cannot discover it.
-      RELAY_IMAGE_TAG: "${RELAY_IMAGE_TAG:-v2026.09.22-access-polish-arm64}"
+      RELAY_IMAGE_TAG: "${RELAY_IMAGE_TAG:-v2026.09.22-access-polish2-arm64}"
     ports:
       - "127.0.0.1:8081:8080"
     # The relay process still runs as uid 0 inside the container, because the

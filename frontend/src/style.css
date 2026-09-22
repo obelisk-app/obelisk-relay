@@ -992,6 +992,41 @@ body {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 10px;
+  /* Never give up width to the prose beside it in a card header. Without this
+     a long description squeezes the actions until the button wraps mid-label
+     and overlaps the text it sits next to. */
+  flex-shrink: 0;
+}
+
+/* `.admin-row-actions button` below is more specific than `.admin-action-btn`,
+   so it wins on specificity no matter which is declared later -- which left
+   every pill button inside a card header rendering with the secondary text
+   colour instead of its own. Restated here so the pill keeps its own styling
+   wherever it is used. */
+.admin-row-actions .admin-action-btn {
+  color: #0a0a0a;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-row-actions .admin-action-btn:hover:not(:disabled) {
+  color: #0a0a0a;
+}
+
+.admin-row-actions .admin-action-btn-secondary,
+.admin-row-actions .admin-action-btn-secondary:hover:not(:disabled) {
+  color: var(--color-text-primary);
+}
+
+.admin-row-actions .admin-action-btn-danger,
+.admin-row-actions .admin-action-btn-danger:hover:not(:disabled) {
+  color: #fff;
+}
+
+.admin-row-actions .admin-action-btn-danger-outline,
+.admin-row-actions .admin-action-btn-danger-outline:hover:not(:disabled) {
+  color: #fca5a5;
 }
 
 .admin-row-actions button,
@@ -2214,6 +2249,10 @@ body {
 
 .admin-bulk-bar .admin-row-actions {
   margin-left: auto;
+}
+
+.admin-action-btn {
+  white-space: nowrap;
 }
 
 .admin-bulk-select-all {

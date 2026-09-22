@@ -247,7 +247,7 @@ export const ReportsManager = () => {
             return (
               <section
                 key={c.key}
-                class="p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)]"
+                class="admin-case-card"
               >
                 <div class="flex items-start justify-between gap-3 flex-wrap">
                   <div class="min-w-0">
@@ -372,7 +372,7 @@ export const ReportsManager = () => {
                           }))
                         }
                         placeholder="Optional note — recorded with your decision"
-                        class="w-full text-sm"
+                        class="admin-search-input"
                       />
                     </label>
 
@@ -380,8 +380,7 @@ export const ReportsManager = () => {
                       <button
                         onClick={() => void resolve(c, 'dismiss')}
                         disabled={busy}
-                        class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-border)]
-                               hover:border-[var(--color-border-hover)] disabled:opacity-50"
+                        class="admin-action-btn admin-action-btn-secondary"
                       >
                         Not a problem
                       </button>
@@ -391,8 +390,7 @@ export const ReportsManager = () => {
                         <button
                           onClick={() => void resolve(c, 'delete_event')}
                           disabled={busy}
-                          class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-border)]
-                                 hover:border-[var(--color-border-hover)] disabled:opacity-50"
+                          class="admin-action-btn admin-action-btn-secondary"
                         >
                           Delete message
                         </button>
@@ -403,8 +401,7 @@ export const ReportsManager = () => {
                         <button
                           onClick={() => void resolve(c, 'remove_from_group')}
                           disabled={busy}
-                          class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-border)]
-                                 hover:border-[var(--color-border-hover)] disabled:opacity-50"
+                          class="admin-action-btn admin-action-btn-secondary"
                         >
                           Remove reported account from group
                         </button>
@@ -425,13 +422,13 @@ export const ReportsManager = () => {
                           <button
                             onClick={() => void resolve(c, 'blacklist')}
                             disabled={busy}
-                            class="px-3 py-1.5 rounded text-xs font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                            class="admin-action-btn admin-action-btn-danger"
                           >
                             {busy ? 'Blocking…' : 'Confirm block'}
                           </button>
                           <button
                             onClick={() => setConfirming(null)}
-                            class="px-3 py-1.5 rounded text-xs text-[var(--color-text-secondary)]"
+                            class="admin-action-btn admin-action-btn-secondary"
                           >
                             Cancel
                           </button>
@@ -447,9 +444,7 @@ export const ReportsManager = () => {
                               ? `Blocks ${toNpub(subjectHex) || subjectHex}`
                               : 'The reported message is gone, so its author cannot be determined'
                           }
-                          class="px-3 py-1.5 rounded text-xs font-medium text-red-400
-                                 border border-red-500/30 hover:border-red-500/60
-                                 disabled:opacity-40 disabled:cursor-not-allowed"
+                          class="admin-action-btn admin-action-btn-danger-outline"
                         >
                           Block reported account
                         </button>

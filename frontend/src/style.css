@@ -1190,10 +1190,23 @@ body {
   line-height: 1.45;
 }
 
+/*
+ * The docs page, on the admin console's metrics.
+ *
+ * It was built independently and drifted: a 280px rail against the console's
+ * 288px, a brand with no header bar at all so the sidebar's first rule and the
+ * content's first rule sat at different heights and read as two misaligned
+ * panels, 22px rail padding against the console's 12/20, and a hero whose
+ * heading was a different size from every other page heading in the product.
+ * All of the numbers below now come from the admin shell rather than being
+ * chosen again: the rail is w-72, the brand block is --admin-header-height, and
+ * the hero matches the console's page header, so the two bottom rules meet as
+ * one line exactly as they do in the console.
+ */
 .docs-page {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 288px minmax(0, 1fr);
   background: var(--color-bg-primary);
   color: var(--color-text-primary);
 }
@@ -1202,90 +1215,156 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
-  padding: 22px;
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--color-border);
   background: var(--color-bg-secondary);
 }
 
+/* Same height and bottom rule as the console's sidebar brand block. */
 .docs-brand {
-  display: block;
-  color: #b4f953;
+  display: flex;
+  align-items: center;
+  min-height: var(--admin-header-height, 112px);
+  padding: 0 20px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-accent);
   font-size: 18px;
-  font-weight: 800;
+  font-weight: 700;
   text-decoration: none;
 }
 
 .docs-sidebar nav {
   display: grid;
-  gap: 6px;
-  margin-top: 26px;
+  align-content: start;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
 }
 
-.docs-sidebar nav a,
-.docs-sidebar-actions a {
+.docs-sidebar nav a {
   display: block;
-  padding: 9px 10px;
+  padding: 12px;
+  border: 1px solid transparent;
   border-radius: 8px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .docs-sidebar nav a:hover,
-.docs-sidebar-actions a:hover {
-  background: rgba(180, 249, 83, 0.08);
-  color: var(--color-text-primary);
+.docs-sidebar nav a:target {
+  background: rgba(var(--color-accent-rgb), 0.09);
+  border-color: rgba(var(--color-accent-rgb), 0.26);
+  color: var(--color-accent);
 }
 
+/* The same footer block as the console's Open Chat / Open Docs / Sign out. */
 .docs-sidebar-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-  margin-top: 28px;
-  padding-top: 18px;
+  padding: 16px;
   border-top: 1px solid var(--color-border);
 }
 
 .docs-sidebar-actions a {
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 10px 12px;
   border: 1px solid var(--color-border);
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.docs-sidebar-actions a:hover {
+  border-color: rgba(var(--color-accent-rgb), 0.35);
+  background: rgba(var(--color-accent-rgb), 0.08);
+  color: var(--color-text-primary);
 }
 
 .docs-main {
   width: 100%;
   max-width: 1120px;
-  padding: 38px 28px 70px;
+  padding: 0 32px 70px;
 }
 
-.docs-hero,
+/* The banner is the console's page header: same height, same bottom rule, same
+   32px gutter, so crossing from /admin to /docs does not move the content.
+   Not a landing-page hero -- this is a page header for a page you are working
+   in, and the 44px heading it used to carry was twice the size of the heading
+   on every console screen it sits beside. */
+.docs-hero {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--admin-header-height, 112px);
+  padding: 20px 0;
+  margin: 0 0 28px;
+  border-bottom: 1px solid var(--color-border);
+  scroll-margin-top: 0;
+}
+
+.docs-facts {
+  margin-bottom: 28px;
+}
+
+/* The grid's own margin-top is for when it follows prose; directly under the
+   banner rule it would double the gap. */
+.docs-facts .docs-hero-grid {
+  margin-top: 0;
+}
+
 .docs-section {
   scroll-margin-top: 24px;
   border-bottom: 1px solid var(--color-border);
-  padding-bottom: 34px;
-  margin-bottom: 34px;
+  padding-bottom: 28px;
+  margin-bottom: 28px;
 }
 
 .docs-kicker {
-  color: #b4f953;
-  font-size: 13px;
-  font-weight: 800;
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
+/* text-2xl / font-bold: the console's page heading. */
 .docs-hero h1 {
-  margin: 10px 0 0;
-  font-size: 44px;
-  line-height: 1.05;
+  margin: 4px 0 0;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
-.docs-hero p,
+/* The hero's own line is the console's header blurb; body copy in the sections
+   below stays at reading size. */
+.docs-hero p {
+  margin: 4px 0 0;
+  max-width: 72ch;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 19px;
+}
+
 .docs-section p {
   max-width: 780px;
   color: var(--color-text-secondary);
-  font-size: 15px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .docs-hero-grid,
@@ -1327,7 +1406,9 @@ body {
 
 .docs-section h2 {
   margin: 0;
-  font-size: 26px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .docs-card-grid {
@@ -1385,20 +1466,23 @@ body {
 
 .docs-table th,
 .docs-table td {
-  padding: 12px 14px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--color-border);
   text-align: left;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .docs-table th {
   color: var(--color-text-secondary);
   background: var(--color-bg-secondary);
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .docs-table td:first-child {
-  color: #b4f953;
+  color: var(--color-accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
@@ -1463,8 +1547,17 @@ body {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  .docs-brand {
+    min-height: var(--admin-header-height-sm, 84px);
+  }
+
+  .docs-hero {
+    min-height: 0;
+    padding: 24px 0;
+  }
+
   .docs-main {
-    padding: 28px 18px 56px;
+    padding: 0 20px 56px;
   }
 
   .docs-flow {
@@ -1511,7 +1604,7 @@ body {
   }
 
   .docs-hero h1 {
-    font-size: 34px;
+    font-size: 21px;
   }
 
   .nui-open-signer {
@@ -2111,6 +2204,39 @@ body {
   color: var(--color-text-secondary);
 }
 
+/* Idle state: the bar is always present once a list supports selection, so
+   that the checkbox has somewhere to live. Accent-tinted only once something is
+   actually selected -- a permanently highlighted bar reads as a live warning. */
+.admin-bulk-bar.is-idle {
+  border-color: var(--color-border);
+  background: transparent;
+}
+
+.admin-bulk-bar .admin-row-actions {
+  margin-left: auto;
+}
+
+.admin-bulk-select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.admin-bulk-progress {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+/* Reads before the Confirm button it sits beside, because a bulk action over a
+   hundred rows is not something to discover after the fact. */
+.admin-bulk-warning {
+  max-width: 46ch;
+  color: #fcd34d;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .admin-bulk-bar strong {
   color: var(--color-text-primary);
 }
@@ -2548,6 +2674,114 @@ body {
  * to. Without the hover and the caret there is nothing to suggest the row does
  * anything, and the breakdown stays undiscovered.
  */
+/* One table treatment, for the four in the Storage screen that each had their
+   own. They were `w-full text-sm` with a per-header inline colour and ad-hoc
+   padding, so column rhythm, header weight and row separators differed table to
+   table on one screen. Numeric columns get tabular figures, without which a
+   column of sizes will not line up no matter what the alignment says. */
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-primary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.admin-table tbody td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.admin-table th.is-numeric,
+.admin-table td.is-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Bounded so a long table scrolls inside the card instead of pushing the
+   controls below it off the screen -- which is what the kinds table did once a
+   relay held more than a couple of dozen kinds. */
+.admin-table-scroll {
+  max-height: 460px;
+  overflow: auto;
+}
+
+/* Kind chips: the filter as a set of togglable kinds rather than only a text
+   box. Typing "1059" works when you already know the number; these answer
+   "which kinds does this relay even hold", which is the question first. */
+/* A moderation case, styled as the same object as every other panel on the
+   console. It was the screen's one bespoke card -- its own border colour,
+   radius and padding written as utilities -- so the most consequential list in
+   the admin UI was also the one that looked least like the rest of it. Nested
+   inside the reports card, so it sits on the secondary surface rather than
+   repeating the primary one. */
+.admin-case-card {
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+}
+
+.admin-case-card:hover {
+  border-color: rgba(var(--color-accent-rgb), 0.28);
+}
+
+.admin-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.admin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.admin-chip:hover {
+  border-color: rgba(var(--color-accent-rgb), 0.5);
+  color: var(--color-text-primary);
+}
+
+.admin-chip.is-on {
+  border-color: rgba(var(--color-accent-rgb), 0.6);
+  background: rgba(var(--color-accent-rgb), 0.14);
+  color: var(--color-text-primary);
+}
+
+.admin-chip:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.admin-chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
 .admin-kind-row {
   cursor: pointer;
   transition: background 0.15s ease;
@@ -2768,6 +3002,30 @@ body {
   background: transparent;
   border-color: var(--color-border-hover);
 }
+/* Blocking an account relay-wide is the heaviest action in the console, so it
+   gets a filled destructive button once confirmed, and an outlined one before
+   -- visible as dangerous without being the loudest thing on the screen. */
+.admin-action-btn-danger {
+  border-color: rgba(239, 68, 68, 0.6);
+  background: #dc2626;
+  color: #fff;
+}
+
+.admin-action-btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.admin-action-btn-danger-outline {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: transparent;
+  color: #fca5a5;
+}
+
+.admin-action-btn-danger-outline:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #fecaca;
+}
+
 
 /* ── Chart hover ── */
 

@@ -313,6 +313,19 @@ export const AdminPanel = (_props: { path?: string }) => {
           >
             Open Chat
           </a>
+          {/* The relay serves its own documentation at /docs and the console
+              never linked to it, so the reference for everything on these
+              screens was reachable only by typing the path. Same-origin, so it
+              follows this deployment rather than a canonical copy that may
+              describe a different version. */}
+          <a
+            href="/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="admin-sidebar-action"
+          >
+            Open Docs
+          </a>
           <button
             type="button"
             onClick={handleLogout}

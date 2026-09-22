@@ -4,6 +4,7 @@ import {
   type AccessSources,
   type PublicRelayInfo,
   type StorageSettings,
+  type StorageSample,
   type StorageStats,
 } from '../../services/AdminApiClient'
 import {
@@ -13,6 +14,7 @@ import {
   RelayIcon,
   StorageIcon,
 } from './icons'
+import { TimeSeriesChart } from './TimeSeriesChart'
 
 interface Stats {
   active_connections: number
@@ -129,6 +131,10 @@ export const Dashboard = () => {
   // Admission is several tiers, not one list. Without this the Access card can
   // only see the explicit allowlist and reports it as the whole rule.
   const [access, setAccess] = useState<AccessSources | null>(null)
+  // The hourly self-samples behind both charts. The Overview had no trend at
+  // all -- every number on it was an instant, so "is this growing, and how
+  // fast" could only be answered by opening the Storage screen.
+  const [history, setHistory] = useState<StorageSample[]>([])
   const [iconBroken, setIconBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -147,6 +153,8 @@ export const Dashboard = () => {
     adminApi.getStorageSettings().then(setStorage).catch(() => undefined)
     adminApi.getStorageStats().then(r => setStorageStats(r.stats)).catch(() => undefined)
     adminApi.getAccessSources().then(setAccess).catch(() => undefined)
+    // Advisory: a relay with no history file yet still has a usable Overview.
+    adminApi.getStorageHistory().then(r => setHistory(r.samples)).catch(() => undefined)
     return () => clearInterval(interval)
   }, [])
 
@@ -345,6 +353,51 @@ export const Dashboard = () => {
             <div class="text-3xl font-bold">
               {storageStats?.newest_event_unix ? relativeAge(storageStats.newest_event_unix) : '—'}
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Trends, between the live numbers and the standing totals: the same two
+          series the Storage screen charts, because "how much disk, and how busy"
+          is the pair of questions an operator opens the console with. Hovering
+          either reads out the value and the timestamp of the nearest sample. */}
+      <section>
+        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+          Trends
+        </h3>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="lc-card p-5">
+            <div class="admin-storage-chart-head">
+              <h4>Active connections</h4>
+              <p>
+                Sampled hourly, so this is the shape of the day rather than a live
+                gauge — the figure above is live. Hover for a value and a time.
+              </p>
+            </div>
+            <TimeSeriesChart
+              points={history
+                .filter(h => h.connections != null)
+                .map(h => ({ at: h.at, value: h.connections as number }))}
+              format={n => `${formatNumber(n)} ${n === 1 ? 'connection' : 'connections'}`}
+              label="Connections"
+              zeroBased={false}
+              emptyHint="Collecting — connection counts appear over the next few hours."
+            />
+          </div>
+          <div class="lc-card p-5">
+            <div class="admin-storage-chart-head">
+              <h4>Disk used</h4>
+              <p>
+                The database file, sampled hourly. It never shrinks on its own:
+                LMDB reuses freed pages internally, so deleting events flattens
+                this line rather than lowering it.
+              </p>
+            </div>
+            <TimeSeriesChart
+              points={history.map(h => ({ at: h.at, value: h.db_bytes }))}
+              format={formatBytes}
+              label="Database size"
+            />
           </div>
         </div>
       </section>

@@ -386,10 +386,10 @@ const AuthorTable = (props: {
   kind?: number
 }) => (
   <div class="overflow-x-auto">
-    <table class="w-full text-sm">
+    <table class="admin-table">
       <thead>
-        <tr style={{ color: 'var(--color-text-secondary)' }}>
-          <th class="p-2 w-8">
+        <tr>
+          <th style={{ width: '32px' }}>
             <input
               type="checkbox"
               aria-label="Select all rows"
@@ -397,11 +397,11 @@ const AuthorTable = (props: {
               onChange={props.onToggleSelectAll}
             />
           </th>
-          <th class="text-left font-medium p-2">Pubkey</th>
-          <th class="text-right font-medium p-2">Events</th>
-          <th class="text-right font-medium p-2">Est. size</th>
-          <th class="text-right font-medium p-2">Share</th>
-          <th class="p-2" />
+          <th>Pubkey</th>
+          <th class="is-numeric">Events</th>
+          <th class="is-numeric">Est. size</th>
+          <th class="is-numeric">Share</th>
+          <th />
         </tr>
       </thead>
       <tbody>
@@ -418,7 +418,7 @@ const AuthorTable = (props: {
                   : undefined,
               }}
             >
-              <td class="p-2">
+              <td>
                 <input
                   type="checkbox"
                   aria-label={`Select ${row.npub || row.pubkey}`}
@@ -426,7 +426,7 @@ const AuthorTable = (props: {
                   onChange={() => props.onToggleSelect(row.pubkey)}
                 />
               </td>
-              <td class="p-2">
+              <td>
                 <div class="flex items-center gap-2.5">
                   {/* Identity is clickable: a raw npub answers "which key" but
                       never "who". Opening the profile is how an operator
@@ -475,15 +475,15 @@ const AuthorTable = (props: {
                   )}
                 </div>
               </td>
-              <td class="p-2 text-right font-mono">{formatNumber(row.count)}</td>
-              <td class="p-2 text-right font-mono">
+              <td class="is-numeric">{formatNumber(row.count)}</td>
+              <td class="is-numeric">
                 {props.approximate ? '≈' : ''}
                 {formatBytes(row.sampled_bytes)}
               </td>
-              <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+              <td class="is-numeric" style={{ color: 'var(--color-text-secondary)' }}>
                 {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
               </td>
-              <td class="p-2 text-right whitespace-nowrap">
+              <td class="is-numeric whitespace-nowrap">
                 {/* Blocking stops them connecting; it reclaims no disk. Delete
                     is the other half, so both live here. */}
                 <button
@@ -731,6 +731,10 @@ export const StorageManager = () => {
    * label, so both "1059" and "gift" get you there.
    */
   const [kindFilter, setKindFilter] = useState('')
+  // Chosen kinds, as a set rather than one selection: "show me gift wraps and
+  // group messages" is a normal question and a single-select cannot ask it.
+  // Empty means no kind restriction, which is how the table starts.
+  const [pickedKinds, setPickedKinds] = useState<Set<number>>(new Set())
   const [counting, setCounting] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1104,11 +1108,28 @@ export const StorageManager = () => {
   const visibleKinds = (() => {
     const q = kindFilter.trim().toLowerCase()
     const all = stats?.kinds ?? []
-    if (!q) return all
-    return all.filter(
-      k => String(k.kind).includes(q) || kindLabel(k.kind).toLowerCase().includes(q),
-    )
+    return all.filter(k => {
+      if (pickedKinds.size > 0 && !pickedKinds.has(k.kind)) return false
+      if (!q) return true
+      return String(k.kind).includes(q) || kindLabel(k.kind).toLowerCase().includes(q)
+    })
   })()
+
+  const togglePickedKind = (kind: number) =>
+    setPickedKinds(prev => {
+      const next = new Set(prev)
+      if (!next.delete(kind)) next.add(kind)
+      return next
+    })
+
+  // What the current filter actually covers. Without this the table shows a
+  // subset and every total on the screen still describes the whole database,
+  // so "how much of my disk is this kind" needs arithmetic by hand.
+  const filteredTotals = visibleKinds.reduce(
+    (acc, k) => ({ events: acc.events + k.count, bytes: acc.bytes + k.sampled_bytes }),
+    { events: 0, bytes: 0 },
+  )
+  const kindsFiltered = pickedKinds.size > 0 || kindFilter.trim() !== ''
 
   return (
     <div>
@@ -1268,20 +1289,65 @@ export const StorageManager = () => {
                     aria-label="Filter stored events by kind"
                   />
                 </div>
-                {visibleKinds.length === 0 && (
-                  <p class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                    No kind matches “{kindFilter}”.
+
+                {/* Every kind this relay actually holds, heaviest first, as
+                    toggles. The text box needs you to already know what you are
+                    looking for; these show you what there is. */}
+                <div class="admin-chip-row">
+                  {[...stats.kinds]
+                    .sort((a, b) => b.count - a.count)
+                    .map(k => (
+                      <button
+                        key={k.kind}
+                        type="button"
+                        class={`admin-chip ${pickedKinds.has(k.kind) ? 'is-on' : ''}`}
+                        aria-pressed={pickedKinds.has(k.kind)}
+                        onClick={() => togglePickedKind(k.kind)}
+                        title={`${kindLabel(k.kind)} · kind ${k.kind}`}
+                      >
+                        <span>{kindLabel(k.kind)}</span>
+                        <span class="admin-chip-count">{formatNumber(k.count)}</span>
+                      </button>
+                    ))}
+                  {pickedKinds.size > 0 && (
+                    <button
+                      type="button"
+                      class="admin-chip"
+                      onClick={() => setPickedKinds(new Set())}
+                    >
+                      Clear {pickedKinds.size} selected
+                    </button>
+                  )}
+                </div>
+
+                {kindsFiltered && visibleKinds.length > 0 && (
+                  <p class="text-xs mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+                    {visibleKinds.length} of {stats.kinds.length} kinds ·{' '}
+                    <strong style={{ color: 'var(--color-text-primary)' }}>
+                      {formatNumber(filteredTotals.events)}
+                    </strong>{' '}
+                    events · {formatBytes(filteredTotals.bytes)} estimated ·{' '}
+                    {stats.sampled_events > 0
+                      ? `${((filteredTotals.events / stats.sampled_events) * 100).toFixed(1)}%`
+                      : '0%'}{' '}
+                    of what was {stats.sample_is_complete ? 'stored' : 'sampled'}
                   </p>
                 )}
-                <div class="overflow-x-auto">
-                <table class="w-full text-sm">
+
+                {visibleKinds.length === 0 && (
+                  <p class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                    No kind matches{kindFilter ? ` “${kindFilter}”` : ' the selected kinds'}.
+                  </p>
+                )}
+                <div class="overflow-x-auto admin-table-scroll">
+                <table class="admin-table">
                   <thead>
-                    <tr style={{ color: 'var(--color-text-secondary)' }}>
-                      <th class="text-left font-medium p-2">Kind</th>
-                      <th class="text-left font-medium p-2">Type</th>
-                      <th class="text-right font-medium p-2">Events</th>
-                      <th class="text-right font-medium p-2">Est. size</th>
-                      <th class="text-right font-medium p-2">Share</th>
+                    <tr>
+                      <th>Kind</th>
+                      <th>Type</th>
+                      <th class="is-numeric">Events</th>
+                      <th class="is-numeric">Est. size</th>
+                      <th class="is-numeric">Share</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1310,13 +1376,13 @@ export const StorageManager = () => {
                               }
                             }}
                           >
-                            <td class="p-2 font-mono">
+                            <td style={{ fontFamily: 'var(--font-mono, monospace)' }}>
                               <span class={`admin-disclosure ${open ? 'is-open' : ''}`} aria-hidden="true">
                                 ▸
                               </span>
                               {k.kind}
                             </td>
-                            <td class="p-2">
+                            <td>
                               {kindLabel(k.kind)}
                               {protectedKind && (
                                 <span class="admin-status-badge ml-2" title="Never pruned">
@@ -1324,14 +1390,14 @@ export const StorageManager = () => {
                                 </span>
                               )}
                             </td>
-                            <td class="p-2 text-right font-mono">{formatNumber(k.count)}</td>
+                            <td class="is-numeric">{formatNumber(k.count)}</td>
                             <td
-                              class="p-2 text-right font-mono"
+                              class="is-numeric"
                               title={`${formatBytes(k.avg_bytes)} average per event across the sample. Content and tags only — index overhead is not counted, so these do not sum to the file on disk.`}
                             >
                               {stats.sample_is_complete ? '' : '≈'}{formatBytes(k.sampled_bytes)}
                             </td>
-                            <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                            <td class="is-numeric" style={{ color: 'var(--color-text-secondary)' }}>
                               {pct < 0.1 && pct > 0 ? '<0.1' : pct.toFixed(1)}%
                             </td>
                           </tr>
@@ -1472,14 +1538,14 @@ export const StorageManager = () => {
                     conversations.
                   </p>
                   <div class="overflow-x-auto">
-                    <table class="w-full text-sm">
+                    <table class="admin-table">
                       <thead>
-                        <tr style={{ color: 'var(--color-text-secondary)' }}>
-                          <th class="text-left font-medium p-2">Kind</th>
-                          <th class="text-left font-medium p-2">Type</th>
-                          <th class="text-right font-medium p-2">Stored</th>
-                          <th class="text-left font-medium p-2">Delete after (days)</th>
-                          <th class="text-right font-medium p-2">Would delete now</th>
+                        <tr>
+                          <th>Kind</th>
+                          <th>Type</th>
+                          <th class="is-numeric">Stored</th>
+                          <th>Delete after (days)</th>
+                          <th class="is-numeric">Would delete now</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1489,8 +1555,8 @@ export const StorageManager = () => {
                           const deletedSoFar = settings.deleted_by_kind?.[k.kind]
                           return (
                             <tr key={k.kind} style={{ borderTop: '1px solid var(--color-border)' }}>
-                              <td class="p-2 font-mono">{k.kind}</td>
-                              <td class="p-2">
+                              <td style={{ fontFamily: 'var(--font-mono, monospace)' }}>{k.kind}</td>
+                              <td>
                                 {k.label}
                                 {k.hint && (
                                   <span class="block text-xs" style={{ color: 'var(--color-text-secondary)' }}>
@@ -1503,7 +1569,7 @@ export const StorageManager = () => {
                                   </span>
                                 ) : null}
                               </td>
-                              <td class="p-2 text-right font-mono">
+                              <td class="is-numeric">
                                 {ex ? (
                                   <span title="Exact count">{formatNumber(ex.total)}</span>
                                 ) : sampled ? (
@@ -1523,7 +1589,7 @@ export const StorageManager = () => {
                                   {countingKind === k.kind ? 'counting… (minutes)' : 'count exactly'}
                                 </button>
                               </td>
-                              <td class="p-2">
+                              <td>
                                 <input
                                   type="number"
                                   min="1"
@@ -1541,7 +1607,7 @@ export const StorageManager = () => {
                                   }}
                                 />
                               </td>
-                              <td class="p-2 text-right font-mono">
+                              <td class="is-numeric">
                                 {ex?.olderThan !== undefined ? (
                                   <span style={{ color: ex.olderThan > 0 ? '#fca5a5' : undefined }}>
                                     {formatNumber(ex.olderThan)}
@@ -1659,13 +1725,13 @@ export const StorageManager = () => {
               </div>
 
               <div class="mt-4 overflow-x-auto">
-                <table class="w-full text-sm">
+                <table class="admin-table">
                   <thead>
-                    <tr style={{ color: 'var(--color-text-secondary)' }}>
-                      <th class="text-left font-medium p-2">Recipient</th>
-                      <th class="text-right font-medium p-2">Wraps</th>
-                      <th class="text-right font-medium p-2">Share</th>
-                      <th class="p-2" />
+                    <tr>
+                      <th>Recipient</th>
+                      <th class="is-numeric">Wraps</th>
+                      <th class="is-numeric">Share</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -1674,14 +1740,14 @@ export const StorageManager = () => {
                       const pct = wraps > 0 ? (r.count / wraps) * 100 : 0
                       return (
                         <tr key={r.pubkey} style={{ borderTop: '1px solid var(--color-border)' }}>
-                          <td class="p-2 font-mono text-xs" title={r.pubkey}>
+                          <td class="text-xs" style={{ fontFamily: 'var(--font-mono, monospace)' }} title={r.pubkey}>
                             {r.pubkey.slice(0, 16)}…
                           </td>
-                          <td class="p-2 text-right font-mono">{formatNumber(r.count)}</td>
-                          <td class="p-2 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                          <td class="is-numeric">{formatNumber(r.count)}</td>
+                          <td class="is-numeric" style={{ color: 'var(--color-text-secondary)' }}>
                             {pct.toFixed(1)}%
                           </td>
-                          <td class="p-2 text-right">
+                          <td class="is-numeric">
                             {recipientTarget === r.pubkey ? (
                               <span class="flex items-center justify-end gap-2">
                                 <input

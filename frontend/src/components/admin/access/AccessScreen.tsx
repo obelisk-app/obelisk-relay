@@ -5,12 +5,15 @@ import { fetchProfiles, type NostrProfile } from '../../../services/ProfileFetch
 import { AccessSearch } from './AccessSearch'
 import { TierPanel } from './TierPanel'
 import { BlockedPanel } from './BlockedPanel'
-// The access mode, rate-limit ladder and web-of-trust configuration still live
-// here. Only its listing sections moved out -- those are what the tier panels
-// replaced, and keeping both would show the same accounts twice in two shapes.
-import { WhitelistManager } from '../WhitelistManager'
+// The rules only: access mode, the rate ladder and the web-of-trust settings.
+// Its listing sections are gone -- the tier panels and the search bar say the
+// same thing, and two shapes for one fact is the confusion being removed here.
+import { PoliciesPanel } from './PoliciesPanel'
+// Reference accounts seed Tier 1, so they are configured inside it rather than
+// on a screen of their own.
+import { ReferenceAccountsManager } from '../ReferenceAccountsManager'
 
-type Section = 'tier1' | 'tier2' | 'tier3' | 'blocked' | 'policy'
+type Section = 'tier1' | 'tier2' | 'tier3' | 'blocked' | 'policies'
 
 /**
  * Everything that decides who can connect, in one place.
@@ -54,6 +57,48 @@ export const AccessScreen = () => {
 
   const changed = () => setReloadKey(k => k + 1)
 
+  /**
+   * The bulk actions, defined once and shared by the tiers that can offer them.
+   *
+   * "Change tier" is only ever a promotion to Tier 1 or a block: Tier 2 and 3
+   * membership is the follow graph's answer, not a field, so there is no way to
+   * move someone from 3 to 2 and pretending otherwise would be a control that
+   * silently does nothing. Adding to Tier 1 does work — it is the hand-added
+   * list — and blocking overrides every tier.
+   */
+  const promoteSelected = {
+    label: 'Add to Tier 1',
+    busyLabel: 'Adding',
+    danger: false,
+    run: async (entry: { hex: string }) => {
+      await adminApi.addToWhitelist(entry.hex)
+    },
+    describe: (n: number) =>
+      `Adds ${n} account${n === 1 ? '' : 's'} to the hand-added Tier 1 list, giving them the full rate budget.`,
+  }
+
+  const blockSelected = {
+    label: 'Block',
+    busyLabel: 'Blocking',
+    danger: true,
+    run: async (entry: { hex: string }) => {
+      await adminApi.addToBlacklist(entry.hex)
+    },
+    describe: (n: number) =>
+      `Refuses ${n} account${n === 1 ? '' : 's'} everywhere. This overrides every tier, including Tier 1.`,
+  }
+
+  const removeSelected = {
+    label: 'Remove from Tier 1',
+    busyLabel: 'Removing',
+    danger: false,
+    run: async (entry: { hex: string }) => {
+      await adminApi.removeFromWhitelist(entry.hex)
+    },
+    describe: (n: number) =>
+      `Removes ${n} account${n === 1 ? '' : 's'} from the hand-added list. Anyone a reference account follows comes back on the next sync — block them instead to make it stick.`,
+  }
+
   const hopCount = (hops: number) =>
     summary?.wot.per_hop.find(h => h.hops === hops)?.count ?? 0
 
@@ -83,8 +128,8 @@ export const AccessScreen = () => {
       hint: 'Refused regardless of any tier. The blacklist overrides everything above.',
     },
     {
-      id: 'policy',
-      label: 'Policy',
+      id: 'policies',
+      label: 'Policies',
       count: null,
       hint: 'Whether admission is enforced at all, the rate budget each tier gets, and how the follow graph is built.',
     },
@@ -131,17 +176,27 @@ export const AccessScreen = () => {
 
       <div class="mt-4">
         {section === 'tier1' && (
-          <TierPanel
-            key={`t1-${reloadKey}`}
-            tier={1}
-            title="Tier 1"
-            blurb="Added by hand, the reference accounts, and everyone they follow. These publish at the full rate budget."
-            onInspect={setInspecting}
-            onRemove={async entry => {
-              await adminApi.removeFromWhitelist(entry.hex)
-              changed()
-            }}
-          />
+          <>
+            {/* Above the list, because this is what fills it. Reference
+                accounts had their own tab, which put the control that decides
+                the whole graph on a screen you had no reason to open. */}
+            <ReferenceAccountsManager />
+            <div class="mt-5">
+              <TierPanel
+                key={`t1-${reloadKey}`}
+                tier={1}
+                title="Tier 1"
+                blurb="Added by hand, the reference accounts, and everyone they follow. These publish at the full rate budget."
+                onInspect={setInspecting}
+                onRemove={async entry => {
+                  await adminApi.removeFromWhitelist(entry.hex)
+                  changed()
+                }}
+                bulkActions={[blockSelected, removeSelected]}
+                onBulkComplete={changed}
+              />
+            </div>
+          </>
         )}
 
         {section === 'tier2' && (
@@ -149,8 +204,10 @@ export const AccessScreen = () => {
             key={`t2-${reloadKey}`}
             tier={2}
             title="Tier 2"
-            blurb="Two hops away in the follow graph — followed by someone a reference account follows. Half the rate budget. Membership follows the graph, so there is nothing to remove here; block an account to refuse it."
+            blurb="Two hops away in the follow graph — followed by someone a reference account follows. Half the rate budget. Membership follows the graph, so there is nothing to remove here; promote an account to Tier 1 or block it."
             onInspect={setInspecting}
+            bulkActions={[promoteSelected, blockSelected]}
+            onBulkComplete={changed}
           />
         )}
 
@@ -161,6 +218,8 @@ export const AccessScreen = () => {
             title="Tier 3"
             blurb="Three hops away. A quarter of the rate budget. This is the outermost tier, so it is the one the graph's fetch budget truncates first — a count here can be a floor rather than a total."
             onInspect={setInspecting}
+            bulkActions={[promoteSelected, blockSelected]}
+            onBulkComplete={changed}
           />
         )}
 
@@ -168,7 +227,7 @@ export const AccessScreen = () => {
           <BlockedPanel key={`b-${reloadKey}`} onInspect={setInspecting} onChanged={changed} />
         )}
 
-        {section === 'policy' && <WhitelistManager />}
+        {section === 'policies' && <PoliciesPanel />}
       </div>
 
       {inspecting && (

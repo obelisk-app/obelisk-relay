@@ -3,6 +3,7 @@ import { adminApi } from '../../services/AdminApiClient'
 import { fetchProfiles, getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
 import { ProfileCard, CopyNpubButton } from './ProfileCard'
 import { resolvePubkeyInput } from '../../services/nip05'
+import { AdminEmptyState } from './AdminEmptyState'
 
 interface RefAccount {
   hex: string
@@ -122,40 +123,43 @@ export const ReferenceAccountsManager = () => {
   }
 
   return (
-    <div>
-      <div class="flex items-center justify-between mb-6">
-        <div>
-        </div>
-        <button
-          onClick={handleSync}
-          disabled={syncing || accounts.length === 0}
-          class="lc-pill-primary text-sm flex items-center gap-2"
-          style={{ padding: '8px 20px' }}
-        >
-          {syncing ? (
-            <>
-              <span class="lc-spinner" style={{ width: '14px', height: '14px', borderTopColor: '#0a0a0a', borderWidth: '2px' }} />
-              Syncing...
-            </>
-          ) : (
-            'Sync Follows'
-          )}
-        </button>
-      </div>
+    <section class="admin-settings-card">
+      {/* A named card with its own header, because this is no longer a screen.
+          It had neither: the heading lived in the tab chrome of the References
+          tab, so once these controls moved inside Tier 1 the most important
+          setting on the relay rendered as an unlabelled button and a paragraph
+          — you could not tell what it configured, or that it was here at all.
 
-      {/* These accounts do two jobs, and the second is easy to miss: they are
-          the follow-sync sources AND the roots of the Web-of-Trust graph.
-          Saying so here is what connects this screen to Access, where the
-          admission rules themselves live. */}
-      <div class="admin-empty-state mb-5">
-        <div class="admin-empty-state-body">
-          <p class="admin-empty-state-headline">These accounts are the roots of access</p>
-          <p class="admin-empty-state-copy">
-            Their follows are auto-whitelisted by follow sync, and they are the
-            starting points of the Web-of-Trust graph. Adding one here widens
-            both. The rules that use them — enforcement mode, hop limit, rate
-            limits — live on the Access screen.
+          These accounts do two jobs, and the second is easy to miss: they are
+          the follow-sync sources AND the roots of the Web-of-Trust graph, so
+          adding one here widens Tier 1, Tier 2 and Tier 3 at once. */}
+      <div class="admin-settings-card-header">
+        <div>
+          <h3>Reference accounts</h3>
+          <p>
+            The accounts every tier is measured from. Everyone they follow lands in
+            Tier 1, and the follow graph is walked outward from here to fill Tier 2
+            and Tier 3 — so adding one widens all three. The rules that use them,
+            the hop limit and the rate budget, are under Policies.
           </p>
+        </div>
+        <div class="admin-row-actions">
+          <span class="admin-status-badge">{accounts.length}</span>
+          <button
+            onClick={handleSync}
+            disabled={syncing || accounts.length === 0}
+            class="admin-action-btn"
+            title="Re-reads each reference account's follow list and refreshes the follow-derived part of Tier 1."
+          >
+            {syncing ? (
+              <>
+                <span class="lc-spinner" style={{ width: '14px', height: '14px', borderTopColor: '#0a0a0a', borderWidth: '2px' }} />
+                Syncing…
+              </>
+            ) : (
+              'Sync follows'
+            )}
+          </button>
         </div>
       </div>
 
@@ -185,22 +189,19 @@ export const ReferenceAccountsManager = () => {
       )}
 
       {/* Add form */}
-      <div class="flex gap-2 mb-6">
-        <input
-          type="text"
-          value={newPubkey}
-          onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
-          placeholder="npub1..., hex, or name@domain.com"
-          class="flex-1 px-4 py-2 rounded-lg text-sm"
-          style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)' }}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-        />
-        <button
-          onClick={handleAdd}
-          disabled={!newPubkey.trim()}
-          class="lc-pill-primary text-sm"
-          style={{ padding: '8px 20px', borderRadius: '10px' }}
-        >
+      <div class="admin-search-row mb-4">
+        <div class="admin-search-field">
+          <input
+            type="text"
+            value={newPubkey}
+            onInput={(e) => setNewPubkey((e.target as HTMLInputElement).value)}
+            placeholder="npub1…, hex, or name@domain.com"
+            class="admin-search-input"
+            aria-label="Reference account to add"
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          />
+        </div>
+        <button onClick={handleAdd} disabled={!newPubkey.trim()} class="admin-action-btn">
           Add
         </button>
       </div>
@@ -213,12 +214,11 @@ export const ReferenceAccountsManager = () => {
           ))}
         </div>
       ) : accounts.length === 0 ? (
-        <div class="lc-card p-8 text-center" style={{ borderStyle: 'dashed' }}>
-          <div class="text-lg mb-2" style={{ color: 'var(--color-text-secondary)' }}>No reference accounts</div>
-          <div class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-            Add Nostr accounts above. Their follows will be auto-whitelisted when you sync.
-          </div>
-        </div>
+        <AdminEmptyState headline="No reference accounts">
+          Nothing seeds the tiers yet: with no roots, follow sync has nobody to read
+          and the follow graph has nowhere to start, so Tier 2 and Tier 3 are empty
+          however the Policies are set. Add an account above and sync.
+        </AdminEmptyState>
       ) : (
         <div class="space-y-2">
           {accounts.map(account => {
@@ -278,10 +278,6 @@ export const ReferenceAccountsManager = () => {
         </div>
       )}
 
-      <div class="mt-4 text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-        {accounts.length} reference account{accounts.length !== 1 ? 's' : ''}
-      </div>
-
       {/* Profile Card Modal */}
       {selectedProfile && (
         <ProfileCard
@@ -291,6 +287,6 @@ export const ReferenceAccountsManager = () => {
           onClose={() => setSelectedProfile(null)}
         />
       )}
-    </div>
+    </section>
   )
 }

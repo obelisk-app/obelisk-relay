@@ -4,6 +4,7 @@ import { fetchProfiles, type NostrProfile } from '../../../services/ProfileFetch
 import { AdminEmptyState } from '../AdminEmptyState'
 import { AccountRow } from '../AccountRow'
 import { SearchIcon } from '../SearchIcon'
+import { useRowSelection } from '../useRowSelection'
 
 const PAGE = 100
 
@@ -26,6 +27,21 @@ interface TierPanelProps {
   /** Offered per row when the tier supports removal. */
   onRemove?: (entry: TierEntry) => Promise<void>
   removeLabel?: string
+  /**
+   * Actions offered over a multi-row selection. Each runs once per selected
+   * entry; the panel reloads the window and clears the selection afterwards.
+   */
+  bulkActions?: {
+    label: string
+    /** Present-tense progress label, e.g. "Blocking". */
+    busyLabel: string
+    run: (entry: TierEntry) => Promise<void>
+    /** Spelled out before anything happens, because these hit many accounts. */
+    describe: (count: number) => string
+    danger?: boolean
+  }[]
+  /** Called once a bulk run finishes, so the tier counts above can refresh. */
+  onBulkComplete?: () => void
 }
 
 /**
@@ -45,6 +61,8 @@ export const TierPanel = ({
   controls,
   onRemove,
   removeLabel = 'Remove',
+  bulkActions,
+  onBulkComplete,
 }: TierPanelProps) => {
   const [page, setPage] = useState<TierPage | null>(null)
   const [offset, setOffset] = useState(0)
@@ -54,6 +72,12 @@ export const TierPanel = ({
   const [profiles, setProfiles] = useState<Map<string, NostrProfile>>(new Map())
   const [confirming, setConfirming] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  // Which bulk action is awaiting confirmation, and how far through it we are.
+  const [pendingBulk, setPendingBulk] = useState<string | null>(null)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+
+  const rowIds = page?.entries.map(e => e.hex) ?? []
+  const { selected, toggle, selectAll, clear } = useRowSelection(rowIds)
 
   useEffect(() => {
     let cancelled = false
@@ -99,6 +123,41 @@ export const TierPanel = ({
     } finally {
       setBusy(null)
     }
+  }
+
+  const runBulk = async (action: NonNullable<TierPanelProps['bulkActions']>[number]) => {
+    const targets = (page?.entries ?? []).filter(e => selected.has(e.hex))
+    if (targets.length === 0) return
+    setError(null)
+    setBulkProgress({ done: 0, total: targets.length })
+    // Sequential, not Promise.all: these are writes to one JSON-backed list on
+    // the relay, and a hundred concurrent mutations of the same file is how you
+    // get a partially-applied list. Slower, and the progress count is honest.
+    const failed: string[] = []
+    for (const [i, entry] of targets.entries()) {
+      try {
+        await action.run(entry)
+      } catch {
+        failed.push(entry.npub || entry.hex)
+      }
+      setBulkProgress({ done: i + 1, total: targets.length })
+    }
+    setBulkProgress(null)
+    setPendingBulk(null)
+    clear()
+    if (failed.length > 0) {
+      setError(
+        `${action.label} failed for ${failed.length} of ${targets.length}: ${failed
+          .slice(0, 3)
+          .join(', ')}${failed.length > 3 ? '…' : ''}`,
+      )
+    }
+    try {
+      setPage(await adminApi.getAccessTier(tier, { limit: PAGE, offset, q: query }))
+    } catch {
+      // The actions themselves succeeded; a failed refresh is cosmetic.
+    }
+    onBulkComplete?.()
   }
 
   const total = page?.total ?? 0
@@ -164,12 +223,91 @@ export const TierPanel = ({
         </div>
       )}
 
+      {page && page.entries.length > 0 && bulkActions && bulkActions.length > 0 && (
+        <div class={`admin-bulk-bar mt-3 ${selected.size === 0 ? 'is-idle' : ''}`}>
+          <label class="admin-bulk-select-all">
+            <input
+              type="checkbox"
+              checked={selected.size > 0 && selected.size === rowIds.length}
+              // Indeterminate is the honest state for a partial selection, and
+              // without it "select all" reads as "nothing selected" whenever a
+              // few rows are ticked.
+              ref={el => {
+                if (el) el.indeterminate = selected.size > 0 && selected.size < rowIds.length
+              }}
+              onChange={() => (selected.size === rowIds.length ? clear() : selectAll())}
+              aria-label={`Select all ${shown} accounts on this page`}
+            />
+            <span>
+              {selected.size > 0
+                ? `${selected.size} selected`
+                : `Select accounts on this page`}
+            </span>
+          </label>
+
+          {selected.size > 0 && (
+            <div class="admin-row-actions">
+              {bulkProgress ? (
+                <span class="admin-bulk-progress">
+                  {bulkProgress.done} of {bulkProgress.total}…
+                </span>
+              ) : pendingBulk ? (
+                <>
+                  <span class="admin-bulk-warning">
+                    {bulkActions.find(a => a.label === pendingBulk)?.describe(selected.size)}
+                  </span>
+                  <button
+                    class="admin-action-btn"
+                    onClick={() => {
+                      const action = bulkActions.find(a => a.label === pendingBulk)
+                      if (action) void runBulk(action)
+                    }}
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    class="admin-action-btn admin-action-btn-secondary"
+                    onClick={() => setPendingBulk(null)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  {bulkActions.map(action => (
+                    <button
+                      key={action.label}
+                      class={`admin-action-btn ${action.danger ? '' : 'admin-action-btn-secondary'}`}
+                      onClick={() => setPendingBulk(action.label)}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                  <button class="admin-action-btn admin-action-btn-secondary" onClick={clear}>
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {page && page.entries.length > 0 && (
         <>
           <div class="admin-account-list mt-3">
-            {page.entries.map(entry => (
+            {page.entries.map((entry, index) => (
               <AccountRow
                 key={entry.hex}
+                selection={
+                  bulkActions && bulkActions.length > 0
+                    ? {
+                        checked: selected.has(entry.hex),
+                        onToggle: shiftKey => toggle(entry.hex, index, shiftKey),
+                        label: `Select ${entry.npub || entry.hex}`,
+                      }
+                    : undefined
+                }
                 hex={entry.hex}
                 npub={entry.npub}
                 profile={profiles.get(entry.hex)}

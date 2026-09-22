@@ -59,10 +59,18 @@ export const DocsPage = (_props: { path?: string }) => {
       </aside>
 
       <main class="docs-main">
+        {/* The banner is title and blurb only, so it is the same height as the
+            console's page header and the two rules line up when you cross from
+            /admin. The relay's facts were inside it, which made the band twice
+            that height; they are content, so they sit below the rule with the
+            rest of the content. */}
         <section id="overview" class="docs-hero">
           <div class="docs-kicker">Relay documentation</div>
           <h1>{info?.name || 'Obelisk Groups Relay'}</h1>
           <p>{info?.description || 'NIP-29 relay with server-side groups, whitelist access, admin tooling, and LMDB storage.'}</p>
+        </section>
+
+        <div class="docs-facts">
           <div class="docs-hero-grid">
             <div>
               <span>WebSocket URL</span>
@@ -77,7 +85,7 @@ export const DocsPage = (_props: { path?: string }) => {
               <strong>{info?.supported_nips?.join(', ') || '1, 9, 11, 29, 40, 42, 70'}</strong>
             </div>
           </div>
-        </section>
+        </div>
 
         <section id="architecture" class="docs-section">
           <h2>Architecture</h2>

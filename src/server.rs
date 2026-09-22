@@ -42,7 +42,6 @@ use relay_builder::{websocket::ConnectionConfig, HandlerFactory, WebSocketUpgrad
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -61,7 +60,6 @@ pub struct ServerState {
     pub http_state: Arc<HttpServerState>,
     pub cancellation_token: CancellationToken,
     pub metrics_handle: metrics::PrometheusHandle,
-    pub connection_counter: Arc<AtomicUsize>,
     pub relay_url: String,
     pub relay_pubkey: String,
     pub relay_public_key: PublicKey,
@@ -499,7 +497,6 @@ pub async fn run_server(
 
     // Create cancellation token and connection counter
     let cancellation_token = CancellationToken::new();
-    let connection_counter = Arc::new(AtomicUsize::new(0));
 
     // Background event retention is destructive. It stays disabled unless
     // enable_event_pruner is explicitly true AND a usable policy exists, so stale
@@ -689,7 +686,6 @@ pub async fn run_server(
     let handler_factory = Arc::new(
         RelayBuilder::<(), GroupsRelayProcessor>::new(relay_config)
             .cancellation_token(cancellation_token.clone())
-            .connection_counter(connection_counter.clone())
             .metrics(SampledMetricsHandler::new(10))
             .subscription_metrics(PrometheusSubscriptionMetricsHandler)
             .event_processor(groups_processor)
@@ -711,7 +707,6 @@ pub async fn run_server(
         http_state: http_state.clone(),
         cancellation_token: cancellation_token.clone(),
         metrics_handle: metrics_handle.clone(),
-        connection_counter: connection_counter.clone(),
         relay_url: settings.relay_url.clone(),
         relay_pubkey: relay_keys.public_key.to_hex(),
         relay_public_key: relay_keys.public_key,

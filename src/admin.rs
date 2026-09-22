@@ -4191,7 +4191,17 @@ async fn handle_stats(
     }
 
     Ok(Json(StatsResponse {
-        active_connections: state.connection_counter.load(Ordering::Relaxed),
+        // The connection limiter, which is what actually holds a permit for
+        // the lifetime of each socket. This used to read `connection_counter`,
+        // an AtomicUsize handed to `RelayBuilder::connection_counter` -- but
+        // the only place relay_builder increments it is a type-erased root
+        // handler whose own comment says it cannot serve WebSocket upgrades,
+        // and this relay serves its sockets through its own handler. Nothing
+        // ever touched the counter, so the Overview reported nought
+        // connections on a relay carrying a dozen, and said it with the
+        // confidence of a real measurement. `/metrics` was right the whole
+        // time because its gauge is fed from the limiter, as this now is.
+        active_connections: state.connection_limiter.active(),
         total_groups,
         total_members,
         whitelisted_count: state.whitelist.len(),

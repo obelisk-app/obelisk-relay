@@ -232,6 +232,33 @@ mod tests {
     }
 
     #[test]
+    fn active_counts_every_live_connection() {
+        // `active()` is what the admin console reports as "active connections"
+        // and what the Prometheus gauge publishes. The console used to read a
+        // different counter that nothing incremented, so it showed nought on a
+        // busy relay; this pins the surviving source to the permits actually
+        // held, across several addresses and after some have gone away.
+        let limiter = ConnectionLimiter::new(Some(100), 100);
+        assert_eq!(limiter.active(), 0, "a fresh relay has no connections");
+
+        let a = limiter.try_acquire(ip(1)).unwrap();
+        let b = limiter.try_acquire(ip(1)).unwrap();
+        let c = limiter.try_acquire(ip(2)).unwrap();
+        assert_eq!(
+            limiter.active(),
+            3,
+            "two sockets from one address and one from another are three connections"
+        );
+
+        drop(b);
+        assert_eq!(limiter.active(), 2, "a closed socket stops counting");
+
+        drop(a);
+        drop(c);
+        assert_eq!(limiter.active(), 0);
+    }
+
+    #[test]
     fn one_address_cannot_exhaust_the_relay() {
         // The regression this module exists for: without a per-IP cap, a single
         // host takes every slot and every other client is refused.

@@ -283,6 +283,22 @@ export class AdminApiClient {
     })
   }
 
+  async getAccessTiers(): Promise<AccessTierSummary> {
+    return this.request('/api/admin/access/tiers')
+  }
+
+  async getAccessTier(
+    tier: number,
+    opts: { limit?: number; offset?: number; q?: string } = {},
+  ): Promise<TierPage> {
+    const p = new URLSearchParams()
+    if (opts.limit != null) p.set('limit', String(opts.limit))
+    if (opts.offset != null) p.set('offset', String(opts.offset))
+    if (opts.q) p.set('q', opts.q)
+    const qs = p.toString()
+    return this.request(`/api/admin/access/tier/${tier}${qs ? `?${qs}` : ''}`)
+  }
+
   async getReferenceAccounts(): Promise<Array<{ hex: string; npub: string }>> {
     return this.request('/api/admin/reference-accounts')
   }
@@ -1054,6 +1070,48 @@ export interface ResolveReportRequest {
   action: 'dismiss' | 'delete_event' | 'remove_from_group' | 'blacklist'
   note?: string
   group_id?: string
+}
+
+/** One account in a tier listing. */
+export interface TierEntry {
+  hex: string
+  npub: string
+  /** Hops from a reference account. Null for Tier 1, which is not a distance. */
+  hops: number | null
+  /**
+   * Why this account is in this tier. Tier 1 is several things at once and they
+   * behave differently: remove a `follow_sync` entry and it returns on the next
+   * sync, whereas `manual` stays removed.
+   */
+  source: 'manual' | 'follow_sync' | 'reference' | 'follows_reference' | 'web_of_trust'
+}
+
+export interface TierPage {
+  tier: number
+  /** Total in this tier after any search filter — not the page length. */
+  total: number
+  /**
+   * The graph ran out of fetch budget, so this tier is a floor rather than a
+   * count. Render it as "at least N".
+   */
+  truncated: boolean
+  complete_to_hop: number
+  entries: TierEntry[]
+}
+
+export interface AccessTierSummary {
+  tier1: { manual: number; follow_sync: number; near_graph: number; total: number }
+  wot: {
+    enabled: boolean
+    total: number
+    per_hop: { hops: number; count: number }[]
+    max_hops: number
+    truncated: boolean
+    complete_to_hop: number
+  }
+  blocked: number
+  /** Nothing restricts admission: every tier is moot while this is true. */
+  open_relay: boolean
 }
 
 export interface GroupInfo {

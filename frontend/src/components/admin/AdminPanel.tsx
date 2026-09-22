@@ -3,9 +3,8 @@ import { adminApi, type PublicRelayInfo, type SetupStatus } from '../../services
 import { AdminAuth } from './AdminAuth'
 import { AdminSetupWizard } from './AdminSetupWizard'
 import { Dashboard } from './Dashboard'
-import { WhitelistManager } from './WhitelistManager'
+import { AccessScreen } from './access/AccessScreen'
 import { GroupsOverview } from './GroupsOverview'
-import { ReferenceAccountsManager } from './ReferenceAccountsManager'
 import { RelaySettings } from './RelaySettings'
 import { ReportsManager } from './ReportsManager'
 import { StorageManager } from './StorageManager'
@@ -16,14 +15,13 @@ import {
   AccessIcon,
   GroupsIcon,
   OverviewIcon,
-  ReferencesIcon,
   RelayIcon,
   SettingsIcon,
   ReportsIcon,
   StorageIcon,
 } from './icons'
 
-type Tab = 'dashboard' | 'whitelist' | 'reference-accounts' | 'groups' | 'reports' | 'storage' | 'settings'
+type Tab = 'dashboard' | 'whitelist' | 'groups' | 'reports' | 'storage' | 'settings'
 
 type IconComponent = (props: { class?: string }) => preact.JSX.Element
 
@@ -41,7 +39,6 @@ interface NavItem {
 const TAB_ICONS: Record<Tab, IconComponent> = {
   dashboard: OverviewIcon,
   whitelist: AccessIcon,
-  'reference-accounts': ReferencesIcon,
   groups: GroupsIcon,
   reports: ReportsIcon,
   storage: StorageIcon,
@@ -62,10 +59,8 @@ interface SearchTarget {
 const tabs: NavItem[] = [
   { id: 'dashboard', label: 'Overview', description: 'Relay health', icon: OverviewIcon,
     blurb: 'Live health, what is configured, and anything that needs attention.' },
-  { id: 'whitelist', label: 'Access', description: 'Allowlist and blocks', icon: AccessIcon,
+  { id: 'whitelist', label: 'Access', description: 'Tiers, search and blocks', icon: AccessIcon,
     blurb: 'Every rule that decides who can connect, and who each one lets in.' },
-  { id: 'reference-accounts', label: 'References', description: 'Follow sync sources', icon: ReferencesIcon,
-    blurb: 'The accounts that seed follow sync and root the Web-of-Trust graph.' },
   { id: 'groups', label: 'Groups', description: 'Metadata and moderation', icon: GroupsIcon,
     blurb: 'Browse relay groups, metadata, members, and stored events.' },
   { id: 'reports', label: 'Reports', description: 'User moderation reports', icon: ReportsIcon,
@@ -87,13 +82,7 @@ const searchTargets: SearchTarget[] = [
     id: 'whitelist',
     title: 'Access',
     description: 'Open relay, whitelist enforcement, web of trust, hop limits, rate limits, allowed and blocked pubkeys',
-    keywords: ['allowlist', 'whitelist', 'blacklist', 'pubkey', 'blocked', 'access', 'open relay', 'rate limits', 'web of trust', 'wot', 'hops', 'graph'],
-  },
-  {
-    id: 'reference-accounts',
-    title: 'References',
-    description: 'Reference accounts and follow sync sources',
-    keywords: ['follows', 'sync', 'reference accounts', 'auto whitelist'],
+    keywords: ['allowlist', 'whitelist', 'blacklist', 'pubkey', 'blocked', 'access', 'open relay', 'rate limits', 'web of trust', 'wot', 'hops', 'graph', 'tier', 'tier 1', 'tier 2', 'tier 3', 'reference accounts', 'follows', 'follow sync', 'who is allowed', 'search npub'],
   },
   {
     id: 'groups',
@@ -397,8 +386,7 @@ export const AdminPanel = (_props: { path?: string }) => {
         <div class="flex-1 min-h-0 overflow-y-auto">
         <div class="p-5 md:p-8 max-w-7xl">
           {activeTab === 'dashboard' && <Dashboard />}
-          {activeTab === 'whitelist' && <WhitelistManager />}
-          {activeTab === 'reference-accounts' && <ReferenceAccountsManager />}
+          {activeTab === 'whitelist' && <AccessScreen />}
           {activeTab === 'groups' && <GroupsOverview />}
           {activeTab === 'reports' && <ReportsManager />}
           {activeTab === 'storage' && <StorageManager />}

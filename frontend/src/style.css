@@ -2819,3 +2819,228 @@ body {
 .admin-storage-chart {
   cursor: crosshair;
 }
+
+/* ── Account rows ── */
+
+/*
+ * One row shape for every account the console lists. Replaces three
+ * near-identical renderers that each styled the same object differently.
+ */
+.admin-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.admin-account-row:first-child {
+  border-top: none;
+}
+
+.admin-account-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.admin-account-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-account-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.admin-account-avatar-blank {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+}
+
+.admin-account-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.admin-account-name {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-account-sub {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.admin-account-npub {
+  color: var(--color-text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.admin-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Hidden until hover on a pointer device, always visible on touch — the same
+   reachability rule the chat app needed. */
+@media (min-width: 640px) {
+  .admin-account-actions {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .admin-account-row:hover .admin-account-actions,
+  .admin-account-row:focus-within .admin-account-actions {
+    opacity: 1;
+  }
+}
+
+/* ── Access tiers ── */
+
+.admin-tier-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.admin-tier-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.admin-tier-tab:hover {
+  border-color: var(--color-border-hover);
+}
+
+.admin-tier-tab.is-active {
+  border-color: var(--color-accent);
+  background: rgba(var(--color-accent-rgb), 0.08);
+}
+
+.admin-tier-tab-label {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.admin-tier-tab-count {
+  color: var(--color-text-primary);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.admin-account-list {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+  /* Long tiers scroll inside the card rather than pushing the pager off the
+     bottom of the page. */
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.admin-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.admin-pager-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.admin-search-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.admin-search-row .admin-search-field {
+  flex: 1;
+}
+
+/* ── Access check result ── */
+
+.admin-check-result {
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.admin-check-result.is-admitted {
+  border-color: rgba(var(--color-accent-rgb), 0.4);
+  background: rgba(var(--color-accent-rgb), 0.06);
+}
+
+.admin-check-result.is-refused {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.admin-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-check-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.admin-check-tier {
+  margin-top: 6px;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.admin-check-explanation {
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.admin-check-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}

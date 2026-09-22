@@ -1,21 +1,36 @@
 import { useEffect, useState } from 'preact/hooks'
+import {
+  AccessIcon,
+  DeployIcon,
+  FlowIcon,
+  OverviewIcon,
+  RelayIcon,
+  ReportsIcon,
+  SettingsIcon,
+  StorageIcon,
+} from './admin/icons'
 
 interface RelayInfo {
   name: string
   description: string
   group_count: number
   supported_nips: number[]
+  /** NIP-11 icon, when the operator has set one. */
+  icon?: string
 }
 
+/* The console's own glyphs, so a section means the same thing in both places:
+   whatever Access looks like in the sidebar of the admin panel is what Access
+   looks like here. */
 const sections = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'architecture', label: 'Architecture' },
-  { id: 'events', label: 'Event Flow' },
-  { id: 'access', label: 'Access' },
-  { id: 'admin', label: 'Admin' },
-  { id: 'storage', label: 'Storage' },
-  { id: 'deployment', label: 'Deployment' },
-  { id: 'operations', label: 'Operations' },
+  { id: 'overview', label: 'Overview', icon: OverviewIcon },
+  { id: 'architecture', label: 'Architecture', icon: RelayIcon },
+  { id: 'events', label: 'Event Flow', icon: FlowIcon },
+  { id: 'access', label: 'Access', icon: AccessIcon },
+  { id: 'admin', label: 'Admin', icon: SettingsIcon },
+  { id: 'storage', label: 'Storage', icon: StorageIcon },
+  { id: 'deployment', label: 'Deployment', icon: DeployIcon },
+  { id: 'operations', label: 'Operations', icon: ReportsIcon },
 ]
 
 const kindRows = [
@@ -34,6 +49,7 @@ const kindRows = [
 
 export const DocsPage = (_props: { path?: string }) => {
   const [info, setInfo] = useState<RelayInfo | null>(null)
+  const [iconBroken, setIconBroken] = useState(false)
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
 
   useEffect(() => {
@@ -46,31 +62,59 @@ export const DocsPage = (_props: { path?: string }) => {
   return (
     <div class="docs-page">
       <aside class="docs-sidebar">
-        <a href="/" class="docs-brand">Obelisk Relay</a>
+        {/* The same banner as the console's sidebar: the relay's own icon and
+            name, then what this page is. It read "Obelisk Relay" on every
+            deployment regardless of which relay was serving it. */}
+        <a href="/" class="docs-brand">
+          <span class="docs-brand-icon">
+            {info?.icon && !iconBroken ? (
+              <img src={info.icon} alt="" onError={() => setIconBroken(true)} />
+            ) : (
+              <RelayIcon class="w-7 h-7" />
+            )}
+          </span>
+          <span class="docs-brand-text">
+            <strong>{info?.name || 'Obelisk Relay'}</strong>
+            <small>Documentation</small>
+          </span>
+        </a>
         <nav>
           {sections.map(section => (
-            <a href={`#${section.id}`} key={section.id}>{section.label}</a>
+            <a href={`#${section.id}`} key={section.id}>
+              <section.icon class="docs-nav-icon" />
+              <span>{section.label}</span>
+            </a>
           ))}
         </nav>
         <div class="docs-sidebar-actions">
           <a href="/admin">Admin</a>
-          <a href="/app">App</a>
+          {/* The client is obelisk.ar's, with this relay as a parameter --
+              window.location.host so each deployment points at itself. */}
+          <a
+            href={`https://obelisk.ar/app?relay=${encodeURIComponent(window.location.host)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            App
+          </a>
         </div>
       </aside>
 
       <main class="docs-main">
-        {/* The banner is title and blurb only, so it is the same height as the
-            console's page header and the two rules line up when you cross from
-            /admin. The relay's facts were inside it, which made the band twice
-            that height; they are content, so they sit below the rule with the
-            rest of the content. */}
-        <section id="overview" class="docs-hero">
+        {/* Title and blurb only, so this is the same height as the console's
+            page header and the two rules line up when you cross from /admin.
+            It sits outside the scroll region below, which is what stops it
+            riding up the page -- the same arrangement the console uses, and for
+            the same reason: an element can only stick against a scrollport
+            that actually scrolls, and the window was the scrollport here. */}
+        <div class="docs-header">
           <div class="docs-kicker">Relay documentation</div>
           <h1>{info?.name || 'Obelisk Groups Relay'}</h1>
           <p>{info?.description || 'NIP-29 relay with server-side groups, whitelist access, admin tooling, and LMDB storage.'}</p>
-        </section>
+        </div>
 
-        <div class="docs-facts">
+        <div class="docs-scroll">
+        <div id="overview" class="docs-facts">
           <div class="docs-hero-grid">
             <div>
               <span>WebSocket URL</span>
@@ -145,41 +189,46 @@ export const DocsPage = (_props: { path?: string }) => {
 
         <section id="access" class="docs-section">
           <h2>Access and Permissions</h2>
+          <p>Admission is three tiers and a block list, decided in that order. Each tier publishes on a share of the rate budget, because distance from your reference accounts is how much evidence you have that someone should be trusted with your disk.</p>
           <div class="docs-card-grid">
             <div class="docs-card">
-              <h3>Open relay</h3>
-              <p>An empty whitelist means any authenticated pubkey can use the relay. Open mode must use per-pubkey, per-connection, and global rate limits.</p>
+              <h3>Tier 1 — full budget</h3>
+              <p>Pubkeys added by hand, the reference accounts themselves, and everyone those accounts follow. Follow-derived entries are refreshed by follow sync, so removing one without blocking it brings it back on the next run.</p>
             </div>
             <div class="docs-card">
-              <h3>Whitelist enforced</h3>
-              <p>When whitelist entries exist, unauthenticated users receive auth-required errors and non-whitelisted users are denied reads and writes.</p>
+              <h3>Tier 2 and Tier 3 — half and a quarter</h3>
+              <p>Reachable in two or three hops of the follow graph, which is built from the reference accounts outward. Membership is the graph's answer rather than a list, so nothing is added or removed here directly. The outermost hop is the one the graph's fetch budget truncates first, so its count can be a floor rather than a total.</p>
             </div>
             <div class="docs-card">
-              <h3>Blacklist override</h3>
-              <p>Blacklisted pubkeys are denied even if they appear in manual or follow-derived whitelist entries.</p>
+              <h3>Blocked overrides everything</h3>
+              <p>A blocked pubkey is refused however it would otherwise qualify, including Tier 1. It is checked against the event's signature rather than the authenticated session, so declining to authenticate is not a way around it.</p>
             </div>
             <div class="docs-card">
-              <h3>Group permissions</h3>
-              <p>Admins manage groups and roles, moderators manage content, members can post, and non-members can only read public groups or request access.</p>
+              <h3>Enforcement and group roles</h3>
+              <p>With enforcement off, any pubkey can publish and the rate limits are the only brake. With it on, unauthenticated clients get auth-required and unadmitted ones are denied reads and writes. Inside a group: admins manage roles, moderators manage content, members post, and non-members read public groups or request access.</p>
             </div>
           </div>
         </section>
 
         <section id="admin" class="docs-section">
           <h2>Admin Panel</h2>
-          <p>The admin panel is Nostr-authenticated. Admin keys are stored as runtime config and can manage access, reference accounts, groups, storage, relay identity, backups, restart, and recovery.</p>
+          <p>The admin panel is Nostr-authenticated. Admin keys are stored as runtime config and can manage access, groups, moderation reports, storage, relay identity, backups, restart, and recovery.</p>
           <div class="docs-card-grid">
             <div class="docs-card">
               <h3>Access</h3>
-              <p>Choose open relay or whitelist enforcement, configure rate limits, add allowed pubkeys, and block pubkeys.</p>
+              <p>One screen: search any npub, hex key or NIP-05 address to see which tier admits it and why, browse Tier 1, 2 and 3 and the blocked list, and select rows to add or block in bulk. Reference accounts are configured at the top of Tier 1, since seeding it is what they do.</p>
             </div>
             <div class="docs-card">
-              <h3>References</h3>
-              <p>Reference accounts are follow-sync sources. Their follows can populate follow-derived whitelist entries.</p>
+              <h3>Policies</h3>
+              <p>Inside Access: whether admission is enforced at all, the rate budget each tier gets, and how the follow graph is built — locally from contact lists the relay holds, or from an external oracle.</p>
             </div>
             <div class="docs-card">
               <h3>Groups</h3>
               <p>Inspect group metadata, members, event streams, delete groups, delete events, and remove problematic user content.</p>
+            </div>
+            <div class="docs-card">
+              <h3>Reports</h3>
+              <p>NIP-56 kind-1984 reports, grouped by what was reported rather than one row per reporter. Readable by relay admins only — a public moderation queue is a retaliation channel. The relay snapshots reported content when the report arrives, so evidence survives the message being deleted.</p>
             </div>
             <div class="docs-card">
               <h3>Settings</h3>
@@ -228,6 +277,7 @@ export const DocsPage = (_props: { path?: string }) => {
             </div>
           </div>
         </section>
+        </div>
       </main>
     </div>
   )

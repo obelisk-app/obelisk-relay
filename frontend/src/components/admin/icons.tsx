@@ -102,3 +102,19 @@ export const ReportsIcon = ({ class: className = '' }: IconProps) => (
     <path d="M4 21V4h11l-1 3 1 3H4" stroke-linecap="round" stroke-linejoin="round" />
   </svg>
 )
+
+/** Event flow: a signal moving left to right through a step. */
+export const FlowIcon = ({ class: className = '' }: IconProps) => (
+  <svg {...base(className)}>
+    <path d="M2.5 10h4l2.5-4 2.5 8 2-4h4" {...stroke} />
+    <path d="M14 7.5 16.5 10 14 12.5" {...stroke} />
+  </svg>
+)
+
+/** Deployment: a container being shipped. */
+export const DeployIcon = ({ class: className = '' }: IconProps) => (
+  <svg {...base(className)}>
+    <path d="M10 2.5 17 6v8l-7 3.5L3 14V6l7-3.5Z" {...stroke} />
+    <path d="M3 6l7 3.5L17 6M10 9.5V17" {...stroke} />
+  </svg>
+)

@@ -2,7 +2,6 @@ import { useState, useEffect } from 'preact/hooks'
 import {
   adminApi,
   type AccessSources,
-  type PublicRelayInfo,
   type StorageSettings,
   type StorageSample,
   type StorageStats,
@@ -11,7 +10,6 @@ import {
   AccessIcon,
   GroupsIcon,
   OverviewIcon,
-  RelayIcon,
   StorageIcon,
 } from './icons'
 import { TimeSeriesChart } from './TimeSeriesChart'
@@ -125,7 +123,6 @@ const StatCard = ({
 
 export const Dashboard = () => {
   const [stats, setStats] = useState<Stats | null>(null)
-  const [relayInfo, setRelayInfo] = useState<PublicRelayInfo | null>(null)
   const [storage, setStorage] = useState<StorageSettings | null>(null)
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null)
   // Admission is several tiers, not one list. Without this the Access card can
@@ -135,7 +132,6 @@ export const Dashboard = () => {
   // all -- every number on it was an instant, so "is this growing, and how
   // fast" could only be answered by opening the Storage screen.
   const [history, setHistory] = useState<StorageSample[]>([])
-  const [iconBroken, setIconBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const fetchStats = () => {
@@ -149,7 +145,6 @@ export const Dashboard = () => {
     const interval = setInterval(fetchStats, 30000)
     // Identity and storage change rarely; fetch once. The storage call is the
     // cached snapshot, never a fresh scan -- the Storage screen owns recounting.
-    adminApi.getRelayInfo().then(setRelayInfo).catch(() => undefined)
     adminApi.getStorageSettings().then(setStorage).catch(() => undefined)
     adminApi.getStorageStats().then(r => setStorageStats(r.stats)).catch(() => undefined)
     adminApi.getAccessSources().then(setAccess).catch(() => undefined)
@@ -212,35 +207,86 @@ export const Dashboard = () => {
 
   return (
     <div class="space-y-6">
-      {/* Which relay am I looking at? Matters when running several. */}
-      <section class="lc-card p-5">
-        <div class="flex items-start gap-4">
-          <div
-            class="flex-shrink-0 flex items-center justify-center overflow-hidden"
-            style={{
-              width: '48px', height: '48px', borderRadius: '10px',
-              border: '1px solid var(--color-border)', background: 'var(--color-bg-primary)',
-            }}
-          >
-            {relayInfo?.icon && !iconBroken
-              ? <img src={relayInfo.icon} alt="" class="w-full h-full object-cover" onError={() => setIconBroken(true)} />
-              : <RelayIcon class="w-6 h-6" />}
-          </div>
-          <div class="min-w-0 flex-1">
-            <h2 class="text-xl font-bold truncate">{relayInfo?.name || 'Relay'}</h2>
-            {relayInfo?.description && (
-              <p class="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
-                {relayInfo.description}
+      {/* Trends lead: the shape of the last day answers "is anything wrong"
+          faster than any single number can, and the numbers below it are then
+          read as a point on a line rather than on their own. The identity card
+          that used to sit here -- relay name, description, and a retention
+          badge -- is gone: you already know which relay you opened, the name is
+          in the sidebar, and its badge said the same thing as the Retention row
+          a few inches below it. */}
+      <section>
+        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+          Trends
+        </h3>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="lc-card p-5">
+            <div class="admin-storage-chart-head">
+              <h4>Active connections</h4>
+              <p>
+                Sampled hourly, so this is the shape of the day rather than a live
+                gauge — the figure above is live. Hover for a value and a time.
               </p>
-            )}
+            </div>
+            <TimeSeriesChart
+              points={history
+                .filter(h => h.connections != null)
+                .map(h => ({ at: h.at, value: h.connections as number }))}
+              format={n => `${formatNumber(n)} ${n === 1 ? 'connection' : 'connections'}`}
+              label="Connections"
+              zeroBased={false}
+              emptyHint="Collecting — connection counts appear over the next few hours."
+            />
           </div>
-          {/* Was a red "Deleting old events" whenever retention was on. It
-              read as an action stuck in progress rather than a steady state,
-              and coloured the healthy configuration as a danger -- retention
-              being on is what stops the disk filling. */}
-          <span class={`admin-status-badge ${retention.tone}`} title={retention.detail}>
-            {retention.label}
-          </span>
+          <div class="lc-card p-5">
+            <div class="admin-storage-chart-head">
+              <h4>Disk used</h4>
+              <p>
+                The database file, sampled hourly. It never shrinks on its own:
+                LMDB reuses freed pages internally, so deleting events flattens
+                this line rather than lowering it.
+              </p>
+            </div>
+            <TimeSeriesChart
+              points={history.map(h => ({ at: h.at, value: h.db_bytes }))}
+              format={formatBytes}
+              label="Database size"
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* The numbers that change minute to minute, under the curves they are
+          the latest point of. */}
+      <section>
+        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+          Right now
+        </h3>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="lc-card p-5">
+            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+              <OverviewIcon class="w-4 h-4" />
+              <span class="text-xs">Active connections</span>
+            </div>
+            <div class="text-3xl font-bold" style={{ color: 'var(--color-accent)' }}>
+              {formatNumber(stats.active_connections)}
+            </div>
+          </div>
+          <div class="lc-card p-5">
+            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+              <OverviewIcon class="w-4 h-4" />
+              <span class="text-xs">Uptime</span>
+            </div>
+            <div class="text-3xl font-bold">{formatUptime(stats.uptime_seconds)}</div>
+          </div>
+          <div class="lc-card p-5">
+            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+              <StorageIcon class="w-4 h-4" />
+              <span class="text-xs">Last event received</span>
+            </div>
+            <div class="text-3xl font-bold">
+              {storageStats?.newest_event_unix ? relativeAge(storageStats.newest_event_unix) : '—'}
+            </div>
+          </div>
         </div>
       </section>
 
@@ -319,85 +365,6 @@ export const Dashboard = () => {
                   : access.wot_enabled ? 'Allowlist + trust' : 'Allowlist'
                 : stats.whitelisted_count > 0 ? 'Restricted' : 'Open relay'}
             </span>
-          </div>
-        </div>
-      </section>
-
-      {/* Live health first -- the numbers that change minute to minute. */}
-      <section>
-        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
-          Right now
-        </h3>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div class="lc-card p-5">
-            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-              <OverviewIcon class="w-4 h-4" />
-              <span class="text-xs">Active connections</span>
-            </div>
-            <div class="text-3xl font-bold" style={{ color: 'var(--color-accent)' }}>
-              {formatNumber(stats.active_connections)}
-            </div>
-          </div>
-          <div class="lc-card p-5">
-            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-              <OverviewIcon class="w-4 h-4" />
-              <span class="text-xs">Uptime</span>
-            </div>
-            <div class="text-3xl font-bold">{formatUptime(stats.uptime_seconds)}</div>
-          </div>
-          <div class="lc-card p-5">
-            <div class="flex items-center gap-2 mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-              <StorageIcon class="w-4 h-4" />
-              <span class="text-xs">Last event received</span>
-            </div>
-            <div class="text-3xl font-bold">
-              {storageStats?.newest_event_unix ? relativeAge(storageStats.newest_event_unix) : '—'}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Trends, between the live numbers and the standing totals: the same two
-          series the Storage screen charts, because "how much disk, and how busy"
-          is the pair of questions an operator opens the console with. Hovering
-          either reads out the value and the timestamp of the nearest sample. */}
-      <section>
-        <h3 class="text-sm font-semibold mb-3" style={{ color: 'var(--color-text-secondary)' }}>
-          Trends
-        </h3>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div class="lc-card p-5">
-            <div class="admin-storage-chart-head">
-              <h4>Active connections</h4>
-              <p>
-                Sampled hourly, so this is the shape of the day rather than a live
-                gauge — the figure above is live. Hover for a value and a time.
-              </p>
-            </div>
-            <TimeSeriesChart
-              points={history
-                .filter(h => h.connections != null)
-                .map(h => ({ at: h.at, value: h.connections as number }))}
-              format={n => `${formatNumber(n)} ${n === 1 ? 'connection' : 'connections'}`}
-              label="Connections"
-              zeroBased={false}
-              emptyHint="Collecting — connection counts appear over the next few hours."
-            />
-          </div>
-          <div class="lc-card p-5">
-            <div class="admin-storage-chart-head">
-              <h4>Disk used</h4>
-              <p>
-                The database file, sampled hourly. It never shrinks on its own:
-                LMDB reuses freed pages internally, so deleting events flattens
-                this line rather than lowering it.
-              </p>
-            </div>
-            <TimeSeriesChart
-              points={history.map(h => ({ at: h.at, value: h.db_bytes }))}
-              format={formatBytes}
-              label="Database size"
-            />
           </div>
         </div>
       </section>

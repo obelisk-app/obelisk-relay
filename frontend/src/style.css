@@ -1225,6 +1225,22 @@ body {
   line-height: 1.45;
 }
 
+/* The only thing /app renders now: a line of text while the browser leaves. */
+.lc-page-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+.lc-page-center a {
+  color: var(--color-accent);
+}
+
 /*
  * The docs page, on the admin console's metrics.
  *
@@ -1239,7 +1255,10 @@ body {
  * one line exactly as they do in the console.
  */
 .docs-page {
-  min-height: 100vh;
+  /* Fixed viewport with an inner scroll region, exactly like the console: the
+     window itself must not scroll, or the banner rides up with the content. */
+  height: 100vh;
+  overflow: hidden;
   display: grid;
   grid-template-columns: 288px minmax(0, 1fr);
   background: var(--color-bg-primary);
@@ -1256,17 +1275,55 @@ body {
   background: var(--color-bg-secondary);
 }
 
-/* Same height and bottom rule as the console's sidebar brand block. */
+/* Same height, gutter and bottom rule as the console's sidebar brand block,
+   and the same contents: the relay's icon, its name, and what you are looking
+   at. */
 .docs-brand {
   display: flex;
   align-items: center;
+  gap: 10px;
   min-height: var(--admin-header-height, 112px);
   padding: 0 20px;
   border-bottom: 1px solid var(--color-border);
+  text-decoration: none;
+}
+
+.docs-brand-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  color: var(--color-accent);
+}
+
+.docs-brand-icon img {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.docs-brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.docs-brand-text strong {
   color: var(--color-accent);
   font-size: 18px;
   font-weight: 700;
-  text-decoration: none;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.docs-brand-text small {
+  color: var(--color-text-secondary);
+  font-size: 12px;
 }
 
 .docs-sidebar nav {
@@ -1280,7 +1337,9 @@ body {
 }
 
 .docs-sidebar nav a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 12px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -1331,9 +1390,30 @@ body {
 }
 
 .docs-main {
-  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Flex children refuse to shrink below their content height unless told to,
+     and without this the scroll region grows instead of scrolling. */
+  min-height: 0;
+}
+
+.docs-nav-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  opacity: 0.8;
+}
+
+.docs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 32px 70px;
+}
+
+.docs-scroll > * {
   max-width: 1120px;
-  padding: 0 32px 70px;
 }
 
 /* The banner is the console's page header: same height, same bottom rule, same
@@ -1341,15 +1421,17 @@ body {
    Not a landing-page hero -- this is a page header for a page you are working
    in, and the 44px heading it used to carry was twice the size of the heading
    on every console screen it sits beside. */
-.docs-hero {
+.docs-header {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  flex-shrink: 0;
   min-height: var(--admin-header-height, 112px);
-  padding: 20px 0;
-  margin: 0 0 28px;
+  padding: 20px 32px;
   border-bottom: 1px solid var(--color-border);
-  scroll-margin-top: 0;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0.015)),
+    var(--color-bg-primary);
 }
 
 .docs-facts {
@@ -1358,7 +1440,8 @@ body {
 
 /* The grid's own margin-top is for when it follows prose; directly under the
    banner rule it would double the gap. */
-.docs-facts .docs-hero-grid {
+.docs-facts .docs-hero-grid,
+.docs-facts > .docs-hero-grid {
   margin-top: 0;
 }
 
@@ -1378,7 +1461,7 @@ body {
 }
 
 /* text-2xl / font-bold: the console's page heading. */
-.docs-hero h1 {
+.docs-header h1 {
   margin: 4px 0 0;
   font-size: 24px;
   font-weight: 700;
@@ -1387,7 +1470,7 @@ body {
 
 /* The hero's own line is the console's header blurb; body copy in the sections
    below stays at reading size. */
-.docs-hero p {
+.docs-header p {
   margin: 4px 0 0;
   max-width: 72ch;
   color: var(--color-text-secondary);
@@ -1567,8 +1650,18 @@ body {
     grid-template-columns: 1fr;
   }
 
+  /* One column: the rail becomes a horizontal strip above the content, so the
+     fixed-viewport arrangement above would trap the content in a scroll region
+     shorter than the strip. Hand scrolling back to the window here. */
   .docs-page {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .docs-scroll {
+    overflow-y: visible;
   }
 
   .docs-sidebar {
@@ -1586,13 +1679,13 @@ body {
     min-height: var(--admin-header-height-sm, 84px);
   }
 
-  .docs-hero {
+  .docs-header {
     min-height: 0;
-    padding: 24px 0;
+    padding: 20px;
   }
 
-  .docs-main {
-    padding: 0 20px 56px;
+  .docs-scroll {
+    padding: 20px 20px 56px;
   }
 
   .docs-flow {
@@ -1638,7 +1731,7 @@ body {
     justify-content: flex-start;
   }
 
-  .docs-hero h1 {
+  .docs-header h1 {
     font-size: 21px;
   }
 

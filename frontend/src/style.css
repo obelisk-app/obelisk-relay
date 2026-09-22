@@ -1336,6 +1336,10 @@ body {
   padding: 12px;
 }
 
+/* The console's nav item, to the pixel: same padding, radius, icon size and
+   two-line label, and the same accent-tinted selected state. It was a single
+   bold word on a transparent row, so the same menu looked like a different
+   control on each side of the /admin — /docs boundary. */
 .docs-sidebar nav a {
   display: flex;
   align-items: center;
@@ -1344,17 +1348,40 @@ body {
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--color-text-primary);
-  font-size: 14px;
-  font-weight: 600;
   text-decoration: none;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.docs-sidebar nav a:hover,
-.docs-sidebar nav a:target {
+.docs-nav-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.docs-nav-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.docs-nav-text small {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.docs-sidebar nav a:hover {
+  background: rgba(var(--color-accent-rgb), 0.05);
+}
+
+.docs-sidebar nav a.is-current {
   background: rgba(var(--color-accent-rgb), 0.09);
   border-color: rgba(var(--color-accent-rgb), 0.26);
   color: var(--color-accent);
+}
+
+.docs-sidebar nav a.is-current .docs-nav-text small {
+  color: rgba(var(--color-accent-rgb), 0.78);
 }
 
 /* The same footer block as the console's Open Chat / Open Docs / Sign out. */
@@ -1372,21 +1399,39 @@ body {
   justify-content: center;
   min-height: 40px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border);
+  border: 1px solid transparent;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--color-text-secondary);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1;
   text-decoration: none;
   transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
 }
 
-.docs-sidebar-actions a:hover {
-  border-color: rgba(var(--color-accent-rgb), 0.35);
-  background: rgba(var(--color-accent-rgb), 0.08);
-  color: var(--color-text-primary);
+/* These are the two ways out of the documentation, and they were rendered as
+   the same muted grey as the page chrome around them -- which reads as
+   disabled rather than as the primary thing to click. Carry the accent, as the
+   console's own action buttons do. */
+.docs-sidebar-actions .docs-action-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #0a0a0a;
+}
+
+.docs-sidebar-actions .docs-action-primary:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.docs-sidebar-actions .docs-action-accent {
+  background: rgba(var(--color-accent-rgb), 0.12);
+  border-color: rgba(var(--color-accent-rgb), 0.55);
+  color: var(--color-accent);
+}
+
+.docs-sidebar-actions .docs-action-accent:hover {
+  background: rgba(var(--color-accent-rgb), 0.2);
+  border-color: var(--color-accent);
 }
 
 .docs-main {

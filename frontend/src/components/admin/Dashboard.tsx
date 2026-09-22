@@ -132,26 +132,86 @@ export const Dashboard = () => {
   // all -- every number on it was an instant, so "is this growing, and how
   // fast" could only be answered by opening the Storage screen.
   const [history, setHistory] = useState<StorageSample[]>([])
+  // Points taken while this screen is open, appended after the persisted ones.
+  //
+  // The relay samples itself once an hour, which is the right cadence for a
+  // file that has to stay bounded for a month -- but it means a chart drawn
+  // from that file alone does not move while you watch it, and "active
+  // connections" that updates hourly is not a reading of anything. The stats
+  // poll below already carries the live figure every 30 seconds, so the chart
+  // shows the hourly record with a live tail on the end of it.
+  const [live, setLive] = useState<{ at: number; connections: number; dbBytes: number | null }[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const fetchStats = () => {
     adminApi.getStats()
-      .then(setStats)
+      .then(next => {
+        setStats(next)
+        // Paired with the disk figure taken on the same tick, so both series
+        // advance together rather than one lagging the other by half a poll.
+        adminApi
+          .getStorageSettings()
+          .then(settings => {
+            setStorage(settings)
+            appendLive(next.active_connections, settings.db_size_bytes)
+          })
+          .catch(() => appendLive(next.active_connections, null))
+      })
       .catch(e => setError(e.message))
+  }
+
+  const appendLive = (connections: number, dbBytes: number | null) => {
+    setLive(prev => {
+      const next = [...prev, { at: Math.floor(Date.now() / 1000), connections, dbBytes }]
+      // Two hours at a 30s poll. Past that the persisted hourly samples are the
+      // better record anyway, and an unbounded array in a screen left open
+      // overnight is a leak.
+      return next.length > 240 ? next.slice(next.length - 240) : next
+    })
   }
 
   useEffect(() => {
     fetchStats()
     const interval = setInterval(fetchStats, 30000)
+    // Picks up each new hourly sample without needing a reload.
+    const historyTimer = setInterval(
+      () => adminApi.getStorageHistory().then(r => setHistory(r.samples)).catch(() => undefined),
+      300000,
+    )
     // Identity and storage change rarely; fetch once. The storage call is the
     // cached snapshot, never a fresh scan -- the Storage screen owns recounting.
-    adminApi.getStorageSettings().then(setStorage).catch(() => undefined)
     adminApi.getStorageStats().then(r => setStorageStats(r.stats)).catch(() => undefined)
     adminApi.getAccessSources().then(setAccess).catch(() => undefined)
     // Advisory: a relay with no history file yet still has a usable Overview.
     adminApi.getStorageHistory().then(r => setHistory(r.samples)).catch(() => undefined)
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      clearInterval(historyTimer)
+    }
   }, [])
+
+  /**
+   * Persisted samples, then the live tail.
+   *
+   * Persisted points at or after the first live one are dropped: the relay's
+   * hourly tick can land while this screen is open, which would otherwise put
+   * two points at nearly the same instant and draw a spike that never happened.
+   */
+  const series = (pick: (s: StorageSample) => number | null | undefined,
+                  livePick: (l: { connections: number; dbBytes: number | null }) => number | null) => {
+    const livePoints = live
+      .map(l => ({ at: l.at, value: livePick(l) }))
+      .filter((p): p is { at: number; value: number } => p.value != null)
+    const cutoff = livePoints.length > 0 ? livePoints[0].at : Infinity
+    const past = history
+      .filter(h => h.at < cutoff)
+      .map(h => ({ at: h.at, value: pick(h) }))
+      .filter((p): p is { at: number; value: number } => p.value != null)
+    return [...past, ...livePoints]
+  }
+
+  const connectionSeries = series(h => h.connections, l => l.connections)
+  const diskSeries = series(h => h.db_bytes, l => l.dbBytes)
 
   if (error) {
     return <div class="p-4 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20">{error}</div>
@@ -223,31 +283,30 @@ export const Dashboard = () => {
             <div class="admin-storage-chart-head">
               <h4>Active connections</h4>
               <p>
-                Sampled hourly, so this is the shape of the day rather than a live
-                gauge — the figure above is live. Hover for a value and a time.
+                Hourly history, extended live while this screen is open — a new
+                point every 30 seconds. Hover for a value and a time.
               </p>
             </div>
             <TimeSeriesChart
-              points={history
-                .filter(h => h.connections != null)
-                .map(h => ({ at: h.at, value: h.connections as number }))}
+              points={connectionSeries}
               format={n => `${formatNumber(n)} ${n === 1 ? 'connection' : 'connections'}`}
               label="Connections"
               zeroBased={false}
-              emptyHint="Collecting — connection counts appear over the next few hours."
+              emptyHint="Collecting — the first points appear within a minute."
             />
           </div>
           <div class="lc-card p-5">
             <div class="admin-storage-chart-head">
               <h4>Disk used</h4>
               <p>
-                The database file, sampled hourly. It never shrinks on its own:
-                LMDB reuses freed pages internally, so deleting events flattens
-                this line rather than lowering it.
+                The database file: hourly history, then live while this screen is
+                open. It never shrinks on its own — LMDB reuses freed pages
+                internally, so deleting events flattens this line rather than
+                lowering it.
               </p>
             </div>
             <TimeSeriesChart
-              points={history.map(h => ({ at: h.at, value: h.db_bytes }))}
+              points={diskSeries}
               format={formatBytes}
               label="Database size"
             />

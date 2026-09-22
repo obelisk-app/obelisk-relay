@@ -23,14 +23,15 @@ interface RelayInfo {
    whatever Access looks like in the sidebar of the admin panel is what Access
    looks like here. */
 const sections = [
-  { id: 'overview', label: 'Overview', icon: OverviewIcon },
-  { id: 'architecture', label: 'Architecture', icon: RelayIcon },
-  { id: 'events', label: 'Event Flow', icon: FlowIcon },
-  { id: 'access', label: 'Access', icon: AccessIcon },
-  { id: 'admin', label: 'Admin', icon: SettingsIcon },
-  { id: 'storage', label: 'Storage', icon: StorageIcon },
-  { id: 'deployment', label: 'Deployment', icon: DeployIcon },
-  { id: 'operations', label: 'Operations', icon: ReportsIcon },
+  { id: 'overview', label: 'Overview', icon: OverviewIcon, description: 'Endpoint and NIPs' },
+  { id: 'architecture', label: 'Architecture', icon: RelayIcon, description: 'How it fits together' },
+  { id: 'events', label: 'Event Flow', icon: FlowIcon, description: 'Kinds and routing' },
+  // Same words as the console's own tab, where the section describes that tab.
+  { id: 'access', label: 'Access', icon: AccessIcon, description: 'Tiers, search and blocks' },
+  { id: 'admin', label: 'Admin', icon: SettingsIcon, description: 'What the console does' },
+  { id: 'storage', label: 'Storage', icon: StorageIcon, description: 'Database and pruning' },
+  { id: 'deployment', label: 'Deployment', icon: DeployIcon, description: 'Building and shipping' },
+  { id: 'operations', label: 'Operations', icon: ReportsIcon, description: 'Day-to-day checks' },
 ]
 
 const kindRows = [
@@ -50,6 +51,11 @@ const kindRows = [
 export const DocsPage = (_props: { path?: string }) => {
   const [info, setInfo] = useState<RelayInfo | null>(null)
   const [iconBroken, setIconBroken] = useState(false)
+  // Which section is on screen, so the menu carries the same selected state as
+  // the console's. A docs menu has no click-to-select -- the anchor moves the
+  // page -- so the selection has to come from where you have scrolled to, or
+  // the highlight would be a lie as soon as you scrolled away from it.
+  const [current, setCurrent] = useState(sections[0].id)
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
 
   useEffect(() => {
@@ -57,6 +63,29 @@ export const DocsPage = (_props: { path?: string }) => {
       .then(res => res.json())
       .then(setInfo)
       .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    const scroller = document.querySelector('.docs-scroll')
+    if (!scroller) return
+
+    const onScroll = () => {
+      // The section whose heading is nearest the top of the scrollport without
+      // having passed it. Cheaper and steadier than an IntersectionObserver
+      // here, where several short sections can be visible at once and the
+      // observer would flip the highlight between them mid-scroll.
+      const top = scroller.getBoundingClientRect().top
+      let found = sections[0].id
+      for (const section of sections) {
+        const el = document.getElementById(section.id)
+        if (el && el.getBoundingClientRect().top - top <= 80) found = section.id
+      }
+      setCurrent(found)
+    }
+
+    onScroll()
+    scroller.addEventListener('scroll', onScroll, { passive: true })
+    return () => scroller.removeEventListener('scroll', onScroll)
   }, [])
 
   return (
@@ -80,20 +109,29 @@ export const DocsPage = (_props: { path?: string }) => {
         </a>
         <nav>
           {sections.map(section => (
-            <a href={`#${section.id}`} key={section.id}>
+            <a
+              href={`#${section.id}`}
+              key={section.id}
+              class={current === section.id ? 'is-current' : ''}
+              aria-current={current === section.id ? 'true' : undefined}
+            >
               <section.icon class="docs-nav-icon" />
-              <span>{section.label}</span>
+              <span class="docs-nav-text">
+                <strong>{section.label}</strong>
+                <small>{section.description}</small>
+              </span>
             </a>
           ))}
         </nav>
         <div class="docs-sidebar-actions">
-          <a href="/admin">Admin</a>
+          <a href="/admin" class="docs-action-primary">Admin</a>
           {/* The client is obelisk.ar's, with this relay as a parameter --
               window.location.host so each deployment points at itself. */}
           <a
             href={`https://obelisk.ar/app?relay=${encodeURIComponent(window.location.host)}`}
             target="_blank"
             rel="noopener noreferrer"
+            class="docs-action-accent"
           >
             App
           </a>
@@ -108,7 +146,12 @@ export const DocsPage = (_props: { path?: string }) => {
             the same reason: an element can only stick against a scrollport
             that actually scrolls, and the window was the scrollport here. */}
         <div class="docs-header">
-          <div class="docs-kicker">Relay documentation</div>
+          {/* No kicker line. "Relay documentation" is what the sidebar's
+              sub-line under the relay name already says, and carrying it here
+              too made this a three-line block against the sidebar's two: the
+              title sat lower than the brand beside it, and the extra 1.3px
+              pushed the banner past the 112px header height so its bottom rule
+              missed the sidebar's by a hair. */}
           <h1>{info?.name || 'Obelisk Groups Relay'}</h1>
           <p>{info?.description || 'NIP-29 relay with server-side groups, whitelist access, admin tooling, and LMDB storage.'}</p>
         </div>

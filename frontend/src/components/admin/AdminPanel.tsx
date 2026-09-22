@@ -309,7 +309,7 @@ export const AdminPanel = (_props: { path?: string }) => {
             href={`https://obelisk.ar/app?relay=${encodeURIComponent(window.location.host)}`}
             target="_blank"
             rel="noopener noreferrer"
-            class="admin-sidebar-action"
+            class="admin-sidebar-action admin-sidebar-action-primary"
           >
             Open Chat
           </a>
@@ -322,7 +322,7 @@ export const AdminPanel = (_props: { path?: string }) => {
             href="/docs"
             target="_blank"
             rel="noopener noreferrer"
-            class="admin-sidebar-action"
+            class="admin-sidebar-action admin-sidebar-action-accent"
           >
             Open Docs
           </a>

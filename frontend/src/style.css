@@ -348,19 +348,50 @@ body {
 }
 
 .admin-sidebar-action:hover {
-  border-color: rgba(180, 249, 83, 0.35);
-  background: rgba(180, 249, 83, 0.08);
+  border-color: rgba(var(--color-accent-rgb), 0.35);
+  background: rgba(var(--color-accent-rgb), 0.08);
   color: var(--color-text-primary);
 }
 
+/* These three were the same muted grey as the chrome they sat on, which reads
+   as disabled rather than as the ways out of the console. Same treatment as
+   the docs sidebar, so the pair of screens agree: one filled primary, one
+   accent outline, and the destructive one carrying its own colour rather than
+   only its text. */
+.admin-sidebar-action-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #0a0a0a;
+}
+
+.admin-sidebar-action-primary:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: #0a0a0a;
+}
+
+.admin-sidebar-action-accent {
+  background: rgba(var(--color-accent-rgb), 0.12);
+  border-color: rgba(var(--color-accent-rgb), 0.55);
+  color: var(--color-accent);
+}
+
+.admin-sidebar-action-accent:hover {
+  background: rgba(var(--color-accent-rgb), 0.2);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .admin-sidebar-action-danger {
-  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
 }
 
 .admin-sidebar-action-danger:hover {
-  border-color: rgba(248, 113, 113, 0.35);
-  background: rgba(248, 113, 113, 0.08);
-  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.8);
+  background: rgba(248, 113, 113, 0.18);
+  color: #fecaca;
 }
 
 .admin-settings-card,

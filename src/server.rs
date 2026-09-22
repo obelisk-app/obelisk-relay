@@ -307,6 +307,9 @@ pub async fn run_server(
             .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_IP),
     );
 
+    // Cloned before the router closure takes ownership of the limiter.
+    let connection_limiter_for_history = Arc::clone(&connection_limiter);
+
     let _crypto_helper = CryptoHelper::new(Arc::new(relay_keys.clone()));
     // Keep a handle to the database for the background pruner before moving it into RelayConfig.
     let database_for_pruner = Arc::clone(&database);
@@ -926,7 +929,11 @@ pub async fn run_server(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                crate::storage_history::record(&config_dir, bytes, now);
+                // Same tick as the file size, so one series carries both and
+                // the console can chart them with one component.
+                let live = connection_limiter_for_history.active() as u32;
+                metrics::active_connections().set(live as f64);
+                crate::storage_history::record(&config_dir, bytes, Some(live), now);
             }
         });
     }

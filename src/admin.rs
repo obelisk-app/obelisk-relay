@@ -3313,6 +3313,7 @@ async fn handle_storage_history(
         .unwrap_or(0);
     if now_bytes > 0 {
         history.samples.push(crate::storage_history::StorageSample {
+            connections: None,
             at: now,
             db_bytes: now_bytes,
         });

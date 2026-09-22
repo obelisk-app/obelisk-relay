@@ -35,6 +35,16 @@ pub struct StorageSample {
     pub at: i64,
     /// Size of the LMDB data file, including free-list slack.
     pub db_bytes: u64,
+    /// Live WebSocket connections at the moment of sampling.
+    ///
+    /// Optional, and defaulted, because every sample written before this field
+    /// existed has to keep loading -- a history that reset itself on upgrade
+    /// would lose the disk trend that is the whole point of keeping it.
+    ///
+    /// Sampled on the same hourly tick as the file size, so this is a
+    /// shape-of-the-day trend and not a live gauge. `/metrics` is the live one.
+    #[serde(default)]
+    pub connections: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -63,9 +73,13 @@ pub fn load(config_dir: &str) -> StorageHistory {
 ///
 /// Writes through a temporary file and renames, so a crash mid-write cannot
 /// leave a half-written series behind.
-pub fn record(config_dir: &str, db_bytes: u64, at: i64) {
+pub fn record(config_dir: &str, db_bytes: u64, connections: Option<u32>, at: i64) {
     let mut history = load(config_dir);
-    history.samples.push(StorageSample { at, db_bytes });
+    history.samples.push(StorageSample {
+        at,
+        db_bytes,
+        connections,
+    });
 
     if history.samples.len() > MAX_SAMPLES {
         let excess = history.samples.len() - MAX_SAMPLES;
@@ -133,8 +147,8 @@ mod tests {
     #[test]
     fn samples_round_trip_and_keep_their_order() {
         let dir = temp_dir("roundtrip");
-        record(&dir, 100, 1_000);
-        record(&dir, 200, 2_000);
+        record(&dir, 100, Some(3), 1_000);
+        record(&dir, 200, Some(3), 2_000);
         let got = load(&dir);
         assert_eq!(got.samples.len(), 2);
         assert_eq!(got.samples[0].db_bytes, 100);
@@ -145,7 +159,7 @@ mod tests {
     fn the_series_is_bounded_and_drops_the_oldest() {
         let dir = temp_dir("bounded");
         for i in 0..(MAX_SAMPLES + 25) {
-            record(&dir, i as u64, i as i64);
+            record(&dir, i as u64, Some(i as u32), i as i64);
         }
         let got = load(&dir);
         assert_eq!(
@@ -167,7 +181,7 @@ mod tests {
         std::fs::write(path_in(&dir), "{ this is not json").unwrap();
         assert!(load(&dir).samples.is_empty());
         // And it recovers: the next record starts a clean series.
-        record(&dir, 42, 1);
+        record(&dir, 42, Some(3), 1);
         assert_eq!(load(&dir).samples.len(), 1);
     }
 

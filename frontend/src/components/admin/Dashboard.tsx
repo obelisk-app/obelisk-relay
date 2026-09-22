@@ -167,13 +167,20 @@ export const Dashboard = () => {
   // matters: armed in the config but not yet live, because policies are only
   // read at startup. That is the state this relay sat in while its database
   // grew to 5.2GB -- the config said pruning was on and nothing was running.
-  const retention: { tone: string; label: string; detail: string } = (() => {
-    if (!storage) return { tone: '', label: 'Retention unknown', detail: 'Could not read storage settings.' }
+  const retention: { tone: string; label: string; detail: string; summary: string } = (() => {
+    if (!storage)
+      return {
+        tone: '',
+        label: 'Retention unknown',
+        detail: 'Could not read storage settings.',
+        summary: 'Unavailable',
+      }
     if (storage.restart_required) {
       return {
         tone: 'admin-status-badge-warn',
         label: 'Restart to apply',
         detail: 'Retention is configured but not running. Policies are read only at startup.',
+        summary: 'Configured, not yet running',
       }
     }
     if (!storage.configured_pruning_enabled) {
@@ -181,6 +188,7 @@ export const Dashboard = () => {
         tone: '',
         label: 'Keeping everything',
         detail: 'Nothing is deleted automatically. Storage grows until you act.',
+        summary: 'Nothing deleted automatically',
       }
     }
     const windows = Object.entries(storage.policies_secs ?? {})
@@ -190,6 +198,7 @@ export const Dashboard = () => {
       tone: 'admin-status-badge-ok',
       label: 'Retention on',
       detail: windows ? `Deleting ${windows}.` : 'Retention is enforced.',
+      summary: `${Object.keys(storage.policies_secs ?? {}).length} kind(s) on a timer`,
     }
   })()
 
@@ -240,28 +249,33 @@ export const Dashboard = () => {
           Configured
         </h3>
         <div class="admin-status-list">
-          <div class="admin-status-item">
+          {/* The explanation moved into `title`. These rows carried a
+              paragraph each, so the four verdicts an operator scans for were
+              separated by prose they had already read. Summary on the row,
+              detail on hover. */}
+          <div class="admin-status-item" title={retention.detail}>
             <div>
               <strong>Retention</strong>
-              <p>{retention.detail}</p>
+              <p class="admin-status-summary">{retention.summary}</p>
             </div>
             <span class={`admin-status-badge ${retention.tone}`}>{retention.label}</span>
           </div>
 
-          <div class="admin-status-item">
+          <div
+            class="admin-status-item"
+            title={
+              'Deleting events frees space inside the LMDB file but never returns it to the '
+              + 'filesystem, so a file that stays large after a big delete is expected. '
+              + 'Storage → Reclaim disk space hands it back.'
+            }
+          >
             <div>
               <strong>Database</strong>
-              <p>
+              <p class="admin-status-summary">
                 {storage ? formatBytes(storage.db_size_bytes) : '—'} on disk
                 {storage && storage.runs > 0 && (
-                  <> · {formatNumber(storage.total_pruned)} events deleted since start</>
+                  <> · {formatNumber(storage.total_pruned)} deleted</>
                 )}
-                {/* LMDB reuses freed pages internally and never returns them,
-                    so a file that stays large after a big delete is expected.
-                    Reclaiming it is now a button on the Storage screen rather
-                    than an export/import rebuild. */}
-                . Deleting events frees space inside the file; Storage → Reclaim
-                disk space hands it back to the filesystem.
               </p>
             </div>
             <span class="admin-status-badge">
@@ -269,15 +283,26 @@ export const Dashboard = () => {
             </span>
           </div>
 
-          <div class="admin-status-item">
+          {/* Admission is a ladder: an explicit allowlist, keys from follow
+              sync, and the web of trust. Reporting only the first understated
+              this relay by two orders of magnitude -- 234 listed keys next to
+              ~140,000 admitted by trust -- and read as "everyone else is
+              refused", which was untrue. The full sentence is the hover; the
+              row shows the tier counts. */}
+          <div class="admin-status-item" title={accessSummary(access, stats.whitelisted_count)}>
             <div>
               <strong>Access</strong>
-              {/* Admission is a ladder: an explicit allowlist, keys pulled from
-                  follow sync, and the web of trust. Reporting only the first
-                  understated this relay by two orders of magnitude -- 234
-                  listed keys next to ~140,000 admitted by trust -- and read as
-                  "everyone else is refused", which was simply untrue. */}
-              <p>{accessSummary(access, stats.whitelisted_count)}</p>
+              <p class="admin-status-summary">
+                {access
+                  ? [
+                      `Tier 1 · ${formatNumber(access.manual + access.follow_derived)}`,
+                      access.wot_enabled ? `trust · ${formatNumber(access.wot_admitted)}` : null,
+                      access.blacklisted > 0 ? `blocked · ${formatNumber(access.blacklisted)}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join('   ')
+                  : `${formatNumber(stats.whitelisted_count)} allowed`}
+              </p>
             </div>
             <span class={`admin-status-badge ${access?.open_relay === false || stats.whitelisted_count > 0 ? 'admin-status-badge-ok' : ''}`}>
               {access

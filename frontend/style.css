@@ -1,0 +1,15 @@
+
+/*
+ * The one-line version of a status row. The prose that used to sit here moved
+ * into the row's `title`, so four verdicts can be scanned without reading four
+ * paragraphs first.
+ */
+.admin-status-summary {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.admin-status-item[title] {
+  cursor: help;
+}

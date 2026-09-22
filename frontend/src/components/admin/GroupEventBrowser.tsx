@@ -48,6 +48,14 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [eventsError, setEventsError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [authorFilter, setAuthorFilter] = useState<string | null>(null)
+  /**
+   * Filter for the members table.
+   *
+   * Picking whose events to look at meant scrolling a list that is as long as
+   * the group. Matches display name, NIP-05, npub and hex, because an operator
+   * arrives with whichever of those the complaint mentioned.
+   */
+  const [memberFilter, setMemberFilter] = useState('')
   // Multi-select for bulk moderation. lastIndex anchors shift-click ranges.
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [confirmBulk, setConfirmBulk] = useState(false)
@@ -74,7 +82,23 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
   const [removingMember, setRemovingMember] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   // Bulk member moderation. Same selection mechanics as the events tab.
-  const memberIds = members.map(m => m.pubkey)
+  const visibleMembers = (() => {
+    const q = memberFilter.trim().toLowerCase()
+    if (!q) return members
+    return members.filter(m => {
+      const profile = memberProfiles.get(m.pubkey)
+      return (
+        m.pubkey.toLowerCase().includes(q) ||
+        toNpub(m.pubkey).toLowerCase().includes(q) ||
+        (profile?.display_name ?? '').toLowerCase().includes(q) ||
+        (profile?.name ?? '').toLowerCase().includes(q) ||
+        (profile?.nip05 ?? '').toLowerCase().includes(q)
+      )
+    })
+  })()
+  // Selection tracks what is on screen: shift-click ranges are relative to the
+  // rendered order, so filtering has to narrow the ids too.
+  const memberIds = visibleMembers.map(m => m.pubkey)
   const memberSel = useRowSelection(memberIds)
   const [memberAction, setMemberAction] = useState<'remove' | 'wipe' | null>(null)
   const [memberConfirmText, setMemberConfirmText] = useState('')
@@ -514,6 +538,23 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
               ) : members.length === 0 ? (
                 <div class="p-4" style={{ color: 'var(--color-text-secondary)' }}>No members.</div>
               ) : (
+                <>
+                <div class="admin-search-field mb-2">
+                  <SearchIcon class="admin-search-icon" />
+                  <input
+                    class="admin-search-input"
+                    type="text"
+                    value={memberFilter}
+                    onInput={e => setMemberFilter((e.target as HTMLInputElement).value)}
+                    placeholder="Filter members by name, NIP-05, npub or hex…"
+                    aria-label="Filter members"
+                  />
+                </div>
+                {visibleMembers.length === 0 && (
+                  <p class="text-sm px-3 py-2" style={{ color: 'var(--color-text-secondary)' }}>
+                    No member matches “{memberFilter}”.
+                  </p>
+                )}
                 <table class="w-full text-sm">
                   <thead style={{ position: 'sticky', top: 0, background: 'var(--color-bg-secondary)', zIndex: 1 }}>
                     <tr>
@@ -521,7 +562,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                         <input
                           type="checkbox"
                           aria-label="Select all members"
-                          checked={memberSel.selected.size > 0 && memberSel.selected.size === members.length}
+                          checked={memberSel.selected.size > 0 && memberSel.selected.size === visibleMembers.length}
                           onChange={() => (
                             memberSel.selected.size === members.length
                               ? memberSel.clear()
@@ -535,7 +576,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                     </tr>
                   </thead>
                   <tbody>
-                    {members.map((m, i) => (
+                    {visibleMembers.map((m, i) => (
                       <tr
                         key={m.pubkey}
                         style={{
@@ -641,6 +682,7 @@ export const GroupEventBrowser = ({ group, onClose }: Props) => {
                     ))}
                   </tbody>
                 </table>
+                </>
               )}
             </div>
 

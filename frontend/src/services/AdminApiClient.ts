@@ -734,6 +734,12 @@ export interface StorageSample {
   at: number
   /** LMDB files on disk, including free-list slack. */
   db_bytes: number
+  /**
+   * Live connections when the sample was taken. Absent on samples written
+   * before the relay recorded it, so treat null as "not measured" rather than
+   * as zero — charting it as zero would invent a dip that never happened.
+   */
+  connections?: number | null
 }
 
 export interface StorageStats {

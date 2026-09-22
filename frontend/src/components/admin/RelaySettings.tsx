@@ -839,7 +839,7 @@ export const RelaySettings = ({ onResetToSetup, onNavigate }: RelaySettingsProps
                     {identityForm.relay_icon && (
                       <button
                         type="button"
-                        class="lc-pill text-xs"
+                        class="admin-action-btn"
                         style={{ borderRadius: '6px', padding: '4px 10px' }}
                         onClick={() => { setIconError(null); setIdentityForm(prev => ({ ...prev, relay_icon: '' })) }}
                       >

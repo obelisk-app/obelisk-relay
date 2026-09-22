@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'preact/hooks'
+import { SearchIcon } from './SearchIcon'
+import { TimeSeriesChart } from './TimeSeriesChart'
 import {
   adminApi,
   type Attribution,
@@ -94,87 +96,6 @@ const formatBytes = (bytes: number) => {
 }
 
 const formatNumber = (n: number) => n.toLocaleString()
-
-/**
- * Disk usage over time, as an inline SVG area chart.
- *
- * Hand-drawn rather than pulled from a charting library: the relay serves its
- * frontend under a strict CSP with no external origins, the bundle is already
- * 1.1MB, and this is one series of at most 720 points. An SVG path is a few
- * lines and has no supply chain.
- *
- * Reads the LMDB file size, so it includes reclaimable free-list slack. A flat
- * event count beside a rising line is a database that wants compacting rather
- * than pruning -- which is exactly what happened here, and what event counts
- * alone could never have shown.
- */
-const StorageChart = ({ samples }: { samples: StorageSample[] }) => {
-  if (samples.length < 2) {
-    return (
-      <p class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-        Collecting — the relay samples its own size hourly, so the first points
-        appear over the next few hours.
-      </p>
-    )
-  }
-
-  const W = 640
-  const H = 140
-  const PAD_L = 8
-  const PAD_B = 18
-
-  const values = samples.map(s => s.db_bytes)
-  const peak = Math.max(...values)
-  const floor = 0 // anchor at zero: a truncated axis exaggerates growth
-  const span = peak - floor || 1
-
-  const first = samples[0].at
-  const last = samples[samples.length - 1].at
-  const timeSpan = last - first || 1
-
-  const x = (at: number) => PAD_L + ((at - first) / timeSpan) * (W - PAD_L * 2)
-  const y = (b: number) => (H - PAD_B) - ((b - floor) / span) * (H - PAD_B - 8)
-
-  const line = samples.map((s, i) => `${i === 0 ? 'M' : 'L'}${x(s.at).toFixed(1)},${y(s.db_bytes).toFixed(1)}`).join(' ')
-  const area = `${line} L${x(last).toFixed(1)},${H - PAD_B} L${x(first).toFixed(1)},${H - PAD_B} Z`
-
-  const current = values[values.length - 1]
-  const earliest = values[0]
-  const delta = current - earliest
-
-  return (
-    <div>
-      <svg
-        class="admin-storage-chart"
-        viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`Database size over time, currently ${formatBytes(current)}`}
-      >
-        <defs>
-          <linearGradient id="storageFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="var(--color-accent)" stop-opacity="0.22" />
-            <stop offset="100%" stop-color="var(--color-accent)" stop-opacity="0" />
-          </linearGradient>
-        </defs>
-        <line x1={PAD_L} y1={H - PAD_B} x2={W - PAD_L} y2={H - PAD_B} class="admin-storage-chart-axis" />
-        <path d={area} fill="url(#storageFill)" />
-        <path d={line} class="admin-storage-chart-line" />
-      </svg>
-      <div class="admin-storage-chart-legend">
-        <span>{formatUnix(first)}</span>
-        <span>
-          {formatBytes(current)} now
-          {delta !== 0 && (
-            <span style={{ color: delta > 0 ? '#eab308' : 'var(--color-accent)' }}>
-              {' '}({delta > 0 ? '+' : '−'}{formatBytes(Math.abs(delta))} over this window)
-            </span>
-          )}
-        </span>
-      </div>
-    </div>
-  )
-}
 
 const formatUnix = (unix: number) => {
   if (!unix) return 'Never'
@@ -377,7 +298,7 @@ const CompactionCard = () => {
                   type="button"
                   onClick={compact}
                   disabled={!status.can_compact || !ready || busy}
-                  class="lc-pill text-sm"
+                  class="admin-action-btn"
                   style={{ borderRadius: '8px', padding: '7px 14px' }}
                 >
                   {busy ? 'Starting...' : 'Compact and restart'}
@@ -802,6 +723,14 @@ const PruneDialog = ({
 export const StorageManager = () => {
   const [settings, setSettings] = useState<StorageSettings | null>(null)
   const [stats, setStats] = useState<StorageStats | null>(null)
+  /**
+   * Filter for the stored-by-kind table.
+   *
+   * The table lists every kind the relay holds, which on a busy relay is long
+   * enough that finding one means scrolling. Matches the kind number and its
+   * label, so both "1059" and "gift" get you there.
+   */
+  const [kindFilter, setKindFilter] = useState('')
   const [counting, setCounting] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1167,6 +1096,20 @@ export const StorageManager = () => {
     },
   )
 
+  /**
+   * Kinds after the filter. Matches both the numeric kind and the human label,
+   * so "gift" finds 1059 and "1059" finds it too -- an operator hunting for a
+   * kind knows one or the other, rarely both.
+   */
+  const visibleKinds = (() => {
+    const q = kindFilter.trim().toLowerCase()
+    const all = stats?.kinds ?? []
+    if (!q) return all
+    return all.filter(
+      k => String(k.kind).includes(q) || kindLabel(k.kind).toLowerCase().includes(q),
+    )
+  })()
+
   return (
     <div>
       <p class="text-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
@@ -1211,8 +1154,7 @@ export const StorageManager = () => {
                 type="button"
                 onClick={() => loadStats(true)}
                 disabled={counting}
-                class="lc-pill text-sm"
-                style={{ borderRadius: '8px', padding: '7px 14px' }}
+                class="admin-action-btn"
               >
                 {counting ? 'Counting...' : 'Recount'}
               </button>
@@ -1253,6 +1195,31 @@ export const StorageManager = () => {
               </div>
             </div>
 
+            {/* Connections share the disk series' hourly tick, so they are a
+                shape-of-the-day trend rather than a live gauge. Rendered only
+                once enough samples carry the field -- older samples predate it
+                and charting their absence as zero would invent an outage. */}
+            {history.filter(h => h.connections != null).length >= 2 && (
+              <div class="admin-storage-chart-block">
+                <div class="admin-storage-chart-head">
+                  <h4>Connections over time</h4>
+                  <p>
+                    Live WebSocket connections, sampled on the same hourly tick as the
+                    file size. For the current figure see the Overview.
+                  </p>
+                </div>
+                <TimeSeriesChart
+                  points={history
+                    .filter(h => h.connections != null)
+                    .map(h => ({ at: h.at, value: h.connections as number }))}
+                  format={n => `${formatNumber(n)} ${n === 1 ? 'connection' : 'connections'}`}
+                  label="Connections"
+                  zeroBased={false}
+                  emptyHint="Collecting — connection counts appear over the next few hours."
+                />
+              </div>
+            )}
+
             <div class="admin-storage-chart-block">
               <div class="admin-storage-chart-head">
                 <h4>Disk used over time</h4>
@@ -1271,7 +1238,11 @@ export const StorageManager = () => {
                   than pruning.
                 </p>
               </div>
-              <StorageChart samples={history} />
+              <TimeSeriesChart
+                  points={history.map(h => ({ at: h.at, value: h.db_bytes }))}
+                  format={formatBytes}
+                  label="Database size"
+                />
             </div>
 
             <CompactionCard />
@@ -1285,7 +1256,24 @@ export const StorageManager = () => {
             {counting && !stats && <div class="lc-skeleton h-40 w-full mt-4" />}
 
             {stats && stats.kinds.length > 0 && (
-              <div class="mt-4 overflow-x-auto">
+              <div class="mt-4">
+                <div class="admin-search-field mb-2">
+                  <SearchIcon class="admin-search-icon" />
+                  <input
+                    class="admin-search-input"
+                    type="text"
+                    value={kindFilter}
+                    onInput={e => setKindFilter((e.target as HTMLInputElement).value)}
+                    placeholder="Filter by kind number or name — 1059, gift wrap, report…"
+                    aria-label="Filter stored events by kind"
+                  />
+                </div>
+                {visibleKinds.length === 0 && (
+                  <p class="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                    No kind matches “{kindFilter}”.
+                  </p>
+                )}
+                <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead>
                     <tr style={{ color: 'var(--color-text-secondary)' }}>
@@ -1297,7 +1285,7 @@ export const StorageManager = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {stats.kinds.map(k => {
+                    {visibleKinds.map(k => {
                       const pct = stats.sampled_events > 0
                         ? (k.count / stats.sampled_events) * 100
                         : 0
@@ -1409,6 +1397,7 @@ export const StorageManager = () => {
                     disk: index entries and reclaimable free space are excluded.
                   </p>
                 )}
+              </div>
               </div>
             )}
           </section>

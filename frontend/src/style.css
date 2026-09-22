@@ -506,7 +506,12 @@ body {
 }
 
 .admin-storage-stats {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* auto-fit rather than a fixed count: the "What is stored" row has five
+     cards and a fixed repeat(4) wrapped the fifth onto its own line, which
+     read as a layout bug. auto-fit keeps them on one row where there is space
+     and collapses gracefully on a narrow viewport instead of at a hardcoded
+     breakpoint. */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 }
 
 .admin-settings-link-grid {
@@ -2707,4 +2712,110 @@ body {
     flex-direction: column;
     gap: 8px;
   }
+}
+
+
+/* ── Admin action buttons ── */
+
+/*
+ * An in-card action -- Recount, Sync, Check -- needs to look pressable.
+ * `lc-pill` on its own is a hairline outline that disappears against the card
+ * it sits on, so operators were not finding the controls. This is the same
+ * accent fill as `lc-pill-primary` at a size that fits inside a card header.
+ *
+ * The accent is read from the custom property rather than hardcoded so the
+ * purple deployment picks it up through the variable as well as through
+ * retint-branding.sh's literal rewrite.
+ */
+.admin-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--color-accent);
+  color: #0a0a0a;
+  border: 1px solid var(--color-accent);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.admin-action-btn:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.admin-action-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.admin-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The quieter sibling, for actions that sit next to a primary one. */
+.admin-action-btn-secondary {
+  background: transparent;
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.admin-action-btn-secondary:hover:not(:disabled) {
+  background: transparent;
+  border-color: var(--color-border-hover);
+}
+
+/* ── Chart hover ── */
+
+/*
+ * The disk graph showed a shape but never a number, so reading it meant
+ * estimating against an axis that has no labels. These are the hover readout.
+ */
+.admin-chart-cursor {
+  stroke: var(--color-text-tertiary);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  pointer-events: none;
+}
+
+.admin-chart-dot {
+  fill: var(--color-accent);
+  stroke: var(--color-bg-primary);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.admin-chart-tooltip {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  /* The pointer is over the svg beneath; a tooltip that ate the events would
+     flicker as the cursor crossed it. */
+  pointer-events: none;
+}
+
+.admin-chart-tooltip strong {
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
+.admin-chart-tooltip span {
+  color: var(--color-text-tertiary);
+}
+
+.admin-storage-chart {
+  cursor: crosshair;
 }

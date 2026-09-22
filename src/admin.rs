@@ -2101,6 +2101,280 @@ async fn report_subject_pubkey(
     }
 }
 
+// --- Access tiers ---
+
+/// One account in a tier listing.
+#[derive(Serialize)]
+struct TierEntry {
+    hex: String,
+    npub: String,
+    /// Hops from a reference account. `None` for Tier 1, which is not a distance.
+    hops: Option<u8>,
+    /// Why this account is in this tier: `manual`, `follow_sync`, or
+    /// `web_of_trust`. Tier 1 is two different things and an operator removing
+    /// an entry needs to know which -- a hand-added key is removed by hand, a
+    /// follow-derived one comes back on the next sync.
+    source: &'static str,
+}
+
+#[derive(Serialize)]
+struct TierPageResponse {
+    tier: u8,
+    /// Total in this tier after any search filter, not the page length.
+    total: usize,
+    /// The graph ran out of fetch budget, so this tier is a floor rather than a
+    /// count. The UI must say "at least N".
+    truncated: bool,
+    /// Deepest hop the graph can answer for with confidence.
+    complete_to_hop: u8,
+    entries: Vec<TierEntry>,
+}
+
+#[derive(Deserialize)]
+struct TierQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+    /// Substring match on hex or npub. Name search stays in the browser, which
+    /// is where the profile cache lives.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+/// One page of the accounts in an access tier.
+///
+/// Tier 1 is hand-added plus follow-derived -- the two backend tiers whose
+/// budget is identical and which an operator thinks of as "people I vouch for".
+/// Tier 2 and 3 are web-of-trust hop counts, served from the distance map the
+/// graph retains at rebuild; see `wot_graph::FollowGraph::admitted`. Nothing
+/// here re-runs the breadth-first search.
+async fn handle_access_tier(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(tier): Path<u8>,
+    Query(params): Query<TierQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let limit = params
+        .limit
+        .unwrap_or(100)
+        .min(crate::wot_graph::ADMITTED_PAGE_MAX);
+    let offset = params.offset.unwrap_or(0);
+    let needle = params
+        .q
+        .as_deref()
+        .map(|q| q.trim().to_ascii_lowercase())
+        .filter(|q| !q.is_empty());
+
+    let blacklist = state.whitelist.blacklist();
+
+    if tier == 1 {
+        // Tier 1 is everyone the relay trusts at full budget: hand-added, plus
+        // the reference accounts themselves, plus anyone they follow.
+        //
+        // The graph hops 0 and 1 belong here and not in a tier of their own.
+        // `budget_percent` already says so -- `Manual`, `FollowSync` and
+        // `WebOfTrust(0..=1)` all sit at 100% with a comment that follow sync
+        // *is* the one-hop set. Leaving them out made the tiers fail to
+        // partition the admitted set: on a relay whose roots are pinned
+        // directly rather than via reference accounts, follow sync never runs,
+        // so the root and everyone it follows appeared in no tier at all.
+        let mut rows: Vec<(PublicKey, &'static str)> = state
+            .whitelist
+            .list_manual()
+            .into_iter()
+            .map(|pk| (pk, "manual"))
+            .collect();
+        for pk in state.whitelist.list_follow_derived() {
+            if !rows.iter().any(|(existing, _)| *existing == pk) {
+                rows.push((pk, "follow_sync"));
+            }
+        }
+        if let Some(graph) = state.whitelist.wot().and_then(|o| o.graph().cloned()) {
+            for hops in [0u8, 1u8] {
+                // Whole-tier pages: this is bounded by the root set and its
+                // follows, not by the six-figure outer hops.
+                let (_, page) =
+                    graph.admitted_page(hops, 0, crate::wot_graph::ADMITTED_PAGE_MAX, None);
+                for (pk, h) in page {
+                    debug_assert_eq!(crate::whitelist::AccessTier::tier_for_hops(h), 1);
+                    if !rows.iter().any(|(existing, _)| *existing == pk) {
+                        rows.push((
+                            pk,
+                            if h == 0 {
+                                "reference"
+                            } else {
+                                "follows_reference"
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        // The blacklist overrides every tier, so a blocked key is not "in"
+        // Tier 1 however it got there.
+        rows.retain(|(pk, _)| !blacklist.contains(pk));
+
+        if let Some(n) = &needle {
+            rows.retain(|(pk, _)| {
+                pk.to_hex().contains(n)
+                    || pk
+                        .to_bech32()
+                        .map(|npub: String| npub.to_ascii_lowercase().contains(n))
+                        .unwrap_or(false)
+            });
+        }
+
+        let total = rows.len();
+        let entries = rows
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(pk, source)| TierEntry {
+                hex: pk.to_hex(),
+                npub: pk.to_bech32().unwrap_or_default(),
+                hops: None,
+                source,
+            })
+            .collect();
+
+        return Ok(Json(TierPageResponse {
+            tier: 1,
+            total,
+            truncated: false,
+            complete_to_hop: u8::MAX,
+            entries,
+        }));
+    }
+
+    // Tier 2 and up are hop counts in the follow graph.
+    let Some(oracle) = state.whitelist.wot() else {
+        return Ok(Json(TierPageResponse {
+            tier,
+            total: 0,
+            truncated: false,
+            complete_to_hop: 0,
+            entries: Vec::new(),
+        }));
+    };
+    let Some(graph) = oracle.graph() else {
+        // Oracle mode: distances come from a remote service and there is no
+        // local set to enumerate. The tier is testable, not listable.
+        return Ok(Json(TierPageResponse {
+            tier,
+            total: 0,
+            truncated: true,
+            complete_to_hop: 0,
+            entries: Vec::new(),
+        }));
+    };
+
+    let coverage = graph.coverage();
+    let (total, page) = graph.admitted_page(tier, offset, limit, needle.as_deref());
+
+    let entries = page
+        .into_iter()
+        .filter(|(pk, _)| !blacklist.contains(pk))
+        .map(|(pk, hops)| TierEntry {
+            hex: pk.to_hex(),
+            npub: pk.to_bech32().unwrap_or_default(),
+            hops: Some(hops),
+            source: "web_of_trust",
+        })
+        .collect();
+
+    Ok(Json(TierPageResponse {
+        tier,
+        // Only the outermost hop is affected by the fetch budget running out;
+        // an inner hop is complete regardless.
+        truncated: coverage.truncated && tier >= coverage.complete_to_hop,
+        complete_to_hop: coverage.complete_to_hop,
+        total,
+        entries,
+    }))
+}
+
+/// Tier sizes in one call, for the Access screen header and the Overview.
+///
+/// Exists so the console does not have to fetch four pages just to render four
+/// counts, and so every surface showing "who can connect" is reading the same
+/// numbers from the same place.
+async fn handle_access_tier_summary(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let admin_state = get_admin_state(&state);
+    if validate_session(&admin_state, &headers).is_none() {
+        return Err(unauthorized());
+    }
+
+    let blacklist = state.whitelist.blacklist();
+    let manual = state.whitelist.list_manual().len();
+    let follow_derived = state
+        .whitelist
+        .list_follow_derived()
+        .into_iter()
+        .filter(|pk| !blacklist.contains(pk))
+        .count();
+
+    #[allow(clippy::type_complexity)]
+    let (wot_total, per_hop, truncated, complete_to_hop, max_hops) = match state.whitelist.wot() {
+        Some(oracle) => match oracle.graph() {
+            Some(graph) => {
+                let (total, per_hop) = graph.admitted_totals();
+                let c = graph.coverage();
+                (
+                    total,
+                    per_hop,
+                    c.truncated,
+                    c.complete_to_hop,
+                    oracle.max_hops(),
+                )
+            }
+            None => (0, Vec::new(), true, 0, oracle.max_hops()),
+        },
+        None => (0, Vec::new(), false, 0, 0),
+    };
+
+    // Hops 0 and 1 count toward Tier 1, matching `handle_access_tier`. Counted
+    // from the graph rather than added blindly, because a key can be both
+    // hand-added and one hop away and must not be counted twice.
+    let near_graph = per_hop
+        .iter()
+        .filter(|(h, _)| *h <= 1)
+        .map(|(_, n)| *n)
+        .sum::<usize>();
+
+    Ok(Json(serde_json::json!({
+        "tier1": {
+            "manual": manual,
+            "follow_sync": follow_derived,
+            "near_graph": near_graph,
+            // Not a sum: the same key can appear in more than one source, so
+            // the authoritative figure is what the tier page reports.
+            "total": std::cmp::max(manual + follow_derived, near_graph),
+        },
+        "wot": {
+            "enabled": state.whitelist.wot().is_some(),
+            "total": wot_total,
+            "per_hop": per_hop.iter().map(|(h, n)| serde_json::json!({ "hops": h, "count": n })).collect::<Vec<_>>(),
+            "max_hops": max_hops,
+            "truncated": truncated,
+            "complete_to_hop": complete_to_hop,
+        },
+        "blocked": blacklist.list().len(),
+        // Whether admission is enforced at all. An empty Tier 1 with no WoT
+        // means everyone is in, which is a different screen entirely.
+        "open_relay": state.whitelist.is_empty(),
+    })))
+}
+
 // --- Routes ---
 
 /// Reject anything without a valid admin session, before the handler runs.
@@ -2178,6 +2452,8 @@ pub fn admin_routes(state: Arc<ServerState>) -> Router<Arc<ServerState>> {
         .route("/whitelist", get(handle_whitelist_list))
         .route("/whitelist/sources", get(handle_access_sources))
         .route("/whitelist/check", get(handle_access_check))
+        .route("/access/tiers", get(handle_access_tier_summary))
+        .route("/access/tier/{tier}", get(handle_access_tier))
         .route("/whitelist", post(handle_whitelist_add))
         .route("/whitelist/{hex}", delete(handle_whitelist_remove))
         .route("/retention", get(handle_retention_status))
@@ -5311,8 +5587,11 @@ async fn handle_wot_status(
     // and reads as a broken tier.
     let blacklist = state.whitelist.blacklist();
     let admitted: Vec<WotAdmittedEntry> = match oracle.graph() {
+        // A bounded, nearest-first window across every hop -- purely the
+        // "who is in" preview for this card. The tier screens page the full
+        // set through /access/tier/{n} instead.
         Some(graph) => graph
-            .admitted_sample()
+            .admitted_preview(crate::wot_graph::ADMITTED_PAGE_MAX)
             .into_iter()
             .filter(|(pk, _)| !blacklist.contains(pk))
             .map(|(pk, hops)| WotAdmittedEntry {

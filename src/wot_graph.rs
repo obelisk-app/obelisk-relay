@@ -52,9 +52,9 @@ pub const DEFAULT_MAX_REMOTE_FETCHES: usize = 25_000;
 /// How many pubkeys to ask for in a single `REQ`.
 const FETCH_BATCH: usize = 200;
 
-/// Admitted accounts kept for display. The full set runs to tens of thousands;
-/// this is enough to see who is in without shipping a phone book to the browser.
-pub const ADMITTED_SAMPLE: usize = 500;
+/// Page size ceiling for `admitted_page`. The full admitted set runs to six
+/// figures, so the console asks for a window rather than the phone book.
+pub const ADMITTED_PAGE_MAX: usize = 500;
 
 /// How completely each hop was covered on the last rebuild.
 #[derive(Debug, Clone, Default)]
@@ -81,9 +81,19 @@ pub struct FollowGraph {
     edges: RwLock<HashMap<PublicKey, HashSet<PublicKey>>>,
     built_at: RwLock<Option<Instant>>,
     coverage: RwLock<Coverage>,
-    /// A bounded, nearest-first sample of who the graph admits, so the console
-    /// can show real names instead of only a count.
-    sample: RwLock<Vec<(PublicKey, u8)>>,
+    /// Everyone the graph admits, with their exact hop count, sorted
+    /// nearest-first.
+    ///
+    /// `reachable()` already computes this on every rebuild and it used to be
+    /// thrown away -- only the length survived, plus a 500-entry sample -- which
+    /// meant the console could show a number for the web-of-trust tiers but
+    /// never a list. Keeping it costs roughly 33 bytes per entry (~5MB at 150k
+    /// accounts) against a relay whose resident set is already near 1GB, and it
+    /// is what lets the tier screens page and search without re-running a
+    /// breadth-first search over millions of edges on every UI click.
+    ///
+    /// Sorted once here rather than per request, so paging is a slice.
+    admitted: RwLock<Vec<(PublicKey, u8)>>,
 }
 
 impl FollowGraph {
@@ -169,13 +179,87 @@ impl FollowGraph {
         self.coverage.read().clone()
     }
 
-    /// Nearest-first sample of admitted accounts, capped at [`ADMITTED_SAMPLE`].
-    pub fn admitted_sample(&self) -> Vec<(PublicKey, u8)> {
-        self.sample.read().clone()
+    /// How many accounts the graph admits, and how many sit at each hop.
+    ///
+    /// Returned together because a caller showing tier counts needs both, and
+    /// should not take the lock twice for an answer that has to be consistent.
+    pub fn admitted_totals(&self) -> (usize, Vec<(u8, usize)>) {
+        let admitted = self.admitted.read();
+        let mut per_hop: Vec<(u8, usize)> = Vec::new();
+        for (_, hops) in admitted.iter() {
+            match per_hop.iter_mut().find(|(h, _)| h == hops) {
+                Some((_, count)) => *count += 1,
+                None => per_hop.push((*hops, 1)),
+            }
+        }
+        per_hop.sort_by_key(|(h, _)| *h);
+        (admitted.len(), per_hop)
     }
 
-    pub fn set_sample(&self, sample: Vec<(PublicKey, u8)>) {
-        *self.sample.write() = sample;
+    /// One page of the accounts admitted at exactly `hops`.
+    ///
+    /// `matches` filters on the hex or npub encoding *before* paging, so a
+    /// search narrows the whole result set rather than just the visible window.
+    /// Filtering after paging would mean "find this key" only ever looked at
+    /// the first 500 rows.
+    ///
+    /// Returns `(total at this hop after filtering, the page)`.
+    pub fn admitted_page(
+        &self,
+        hops: u8,
+        offset: usize,
+        limit: usize,
+        matches: Option<&str>,
+    ) -> (usize, Vec<(PublicKey, u8)>) {
+        let admitted = self.admitted.read();
+        let needle = matches
+            .map(|m| m.trim().to_ascii_lowercase())
+            .filter(|m| !m.is_empty());
+
+        let filtered: Vec<(PublicKey, u8)> = admitted
+            .iter()
+            .filter(|(_, h)| *h == hops)
+            .filter(|(pk, _)| match &needle {
+                None => true,
+                Some(n) => {
+                    pk.to_hex().contains(n)
+                        || pk
+                            .to_bech32()
+                            .map(|npub: String| npub.to_ascii_lowercase().contains(n))
+                            .unwrap_or(false)
+                }
+            })
+            .copied()
+            .collect();
+
+        let total = filtered.len();
+        let page = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit.min(ADMITTED_PAGE_MAX))
+            .collect();
+        (total, page)
+    }
+
+    /// Nearest-first preview across *all* hops, for the "who is in" card.
+    ///
+    /// Distinct from `admitted_page`, which is scoped to one hop because the
+    /// tier screens each show a single tier. This one deliberately mixes hops:
+    /// the card's job is "here are the closest accounts the graph admits".
+    pub fn admitted_preview(&self, limit: usize) -> Vec<(PublicKey, u8)> {
+        self.admitted
+            .read()
+            .iter()
+            .take(limit.min(ADMITTED_PAGE_MAX))
+            .copied()
+            .collect()
+    }
+
+    pub fn set_admitted(&self, mut admitted: Vec<(PublicKey, u8)>) {
+        // Nearest-first, so one hop's accounts are a contiguous slice and the
+        // closest are what an operator sees first.
+        admitted.sort_by_key(|(_, hops)| *hops);
+        *self.admitted.write() = admitted;
     }
 
     /// `(accounts with a known follow list, total edges)`.
@@ -390,10 +474,10 @@ pub async fn rebuild(
     let reachable = graph.reachable(roots, max_hops);
     let reachable_total = reachable.len();
 
-    let mut sample: Vec<(PublicKey, u8)> = reachable.into_iter().collect();
-    sample.sort_by_key(|(_, hops)| *hops);
-    sample.truncate(ADMITTED_SAMPLE);
-    graph.set_sample(sample);
+    // Kept in full rather than truncated to 500: this is what the tier screens
+    // page and search over, and recomputing it per request would put a
+    // breadth-first search across millions of edges behind a UI click.
+    graph.set_admitted(reachable.into_iter().collect());
 
     coverage.reachable_total = reachable_total;
     *graph.coverage.write() = coverage;
@@ -422,6 +506,128 @@ pub async fn rebuild(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everyone the graph admits, bucketed and paged.
+    ///
+    /// These exist because the admitted set used to be truncated to 500 for
+    /// display, so the web-of-trust tiers could show a count but never a list.
+    #[test]
+    fn admitted_totals_bucket_by_hop() {
+        let graph = FollowGraph::new();
+        let k = keys(6);
+        graph.set_admitted(vec![
+            (k[0], 1),
+            (k[1], 2),
+            (k[2], 2),
+            (k[3], 3),
+            (k[4], 3),
+            (k[5], 3),
+        ]);
+
+        let (total, per_hop) = graph.admitted_totals();
+        assert_eq!(total, 6);
+        assert_eq!(per_hop, vec![(1, 1), (2, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn a_page_is_scoped_to_one_hop() {
+        let graph = FollowGraph::new();
+        let k = keys(5);
+        graph.set_admitted(vec![(k[0], 1), (k[1], 2), (k[2], 2), (k[3], 3), (k[4], 3)]);
+
+        let (total, page) = graph.admitted_page(2, 0, 50, None);
+        assert_eq!(total, 2, "only hop-2 accounts count toward a hop-2 page");
+        assert!(page.iter().all(|(_, h)| *h == 2));
+    }
+
+    #[test]
+    fn paging_walks_the_whole_hop_without_gaps_or_repeats() {
+        let graph = FollowGraph::new();
+        let k = keys(25);
+        graph.set_admitted(k.iter().map(|pk| (*pk, 2)).collect());
+
+        let mut seen = Vec::new();
+        let mut offset = 0;
+        loop {
+            let (total, page) = graph.admitted_page(2, offset, 10, None);
+            assert_eq!(total, 25);
+            if page.is_empty() {
+                break;
+            }
+            offset += page.len();
+            seen.extend(page.into_iter().map(|(pk, _)| pk));
+        }
+
+        assert_eq!(seen.len(), 25, "every account appears exactly once");
+        let unique: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), 25);
+    }
+
+    #[test]
+    fn a_page_cannot_exceed_the_ceiling() {
+        let graph = FollowGraph::new();
+        graph.set_admitted(keys(900).into_iter().map(|pk| (pk, 2)).collect());
+
+        // A client asking for everything must not be able to make the relay
+        // serialise six figures of keys into one response.
+        let (total, page) = graph.admitted_page(2, 0, 100_000, None);
+        assert_eq!(total, 900);
+        assert_eq!(page.len(), ADMITTED_PAGE_MAX);
+    }
+
+    #[test]
+    fn search_filters_before_paging() {
+        // The point of filtering server-side: "find this key" has to look at
+        // the whole tier, not just the rows that happen to be on screen.
+        let graph = FollowGraph::new();
+        let mut admitted: Vec<(PublicKey, u8)> = keys(600).into_iter().map(|pk| (pk, 2)).collect();
+        let needle = Keys::generate().public_key();
+        admitted.push((needle, 2));
+        graph.set_admitted(admitted);
+
+        let (total, page) = graph.admitted_page(2, 0, 50, Some(&needle.to_hex()));
+        assert_eq!(total, 1, "the filter applies to the tier, not the page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].0, needle);
+    }
+
+    #[test]
+    fn search_matches_npub_as_well_as_hex() {
+        let graph = FollowGraph::new();
+        let target = Keys::generate().public_key();
+        graph.set_admitted(vec![(target, 2)]);
+
+        let npub: String = target.to_bech32().unwrap();
+        let (total, _) = graph.admitted_page(2, 0, 10, Some(&npub));
+        assert_eq!(total, 1, "operators paste npubs, not hex");
+
+        // Case and whitespace are what a paste actually carries.
+        let (padded, _) =
+            graph.admitted_page(2, 0, 10, Some(&format!("  {}  ", npub.to_uppercase())));
+        assert_eq!(padded, 1);
+    }
+
+    #[test]
+    fn an_empty_search_is_not_a_filter() {
+        let graph = FollowGraph::new();
+        graph.set_admitted(keys(3).into_iter().map(|pk| (pk, 2)).collect());
+        assert_eq!(graph.admitted_page(2, 0, 10, Some("   ")).0, 3);
+    }
+
+    #[test]
+    fn the_preview_mixes_hops_nearest_first() {
+        let graph = FollowGraph::new();
+        let k = keys(4);
+        // Deliberately out of order going in.
+        graph.set_admitted(vec![(k[0], 3), (k[1], 1), (k[2], 2), (k[3], 3)]);
+
+        let preview = graph.admitted_preview(3);
+        assert_eq!(
+            preview.iter().map(|(_, h)| *h).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the card shows the closest accounts first, across every hop"
+        );
+    }
 
     fn keys(n: usize) -> Vec<PublicKey> {
         (0..n).map(|_| Keys::generate().public_key()).collect()

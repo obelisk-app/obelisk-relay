@@ -50,6 +50,25 @@ impl AccessTier {
     /// a person vouching, three hops is a chain of strangers. An open relay
     /// grants the least of all — nobody vouched at all — which is what keeps
     /// "open" survivable rather than merely permitted.
+    /// Which UI tier a hop count belongs to.
+    ///
+    /// The console presents admission as Tier 1/2/3, and the mapping has to be
+    /// exhaustive or accounts vanish: hops 0 and 1 both land in Tier 1, because
+    /// a reference account and the people it follows are trusted at full
+    /// budget and `budget_percent` already groups them that way.
+    ///
+    /// Getting this wrong is not cosmetic. An earlier version of the tier
+    /// listing treated Tier 1 as only the manual and follow-sync *lists*, so on
+    /// a relay whose graph roots are pinned directly -- where follow sync never
+    /// runs -- the root and everyone it followed appeared in no tier at all:
+    /// seven accounts admitted, four listed.
+    pub fn tier_for_hops(hops: u8) -> u8 {
+        match hops {
+            0 | 1 => 1,
+            other => other,
+        }
+    }
+
     pub fn budget_percent(self) -> u32 {
         match self {
             AccessTier::Relay | AccessTier::Manual => 100,
@@ -344,6 +363,39 @@ impl Whitelist {
             path.display()
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tier_mapping_tests {
+    use super::AccessTier;
+
+    /// Every hop the graph can report must land in exactly one tier, or
+    /// accounts disappear from the console while still being admitted.
+    #[test]
+    fn hop_to_tier_is_exhaustive_and_stable() {
+        assert_eq!(
+            AccessTier::tier_for_hops(0),
+            1,
+            "a reference account is Tier 1"
+        );
+        assert_eq!(AccessTier::tier_for_hops(1), 1, "so is anyone it follows");
+        assert_eq!(AccessTier::tier_for_hops(2), 2);
+        assert_eq!(AccessTier::tier_for_hops(3), 3);
+        assert_eq!(AccessTier::tier_for_hops(5), 5, "max_hops is capped at 5");
+    }
+
+    /// The tiers must agree with the publishing budget, or an operator sees one
+    /// grouping on the Access screen and a different one in the rate ladder.
+    #[test]
+    fn tiers_agree_with_the_budget_grouping() {
+        let tier1: Vec<u32> = [0u8, 1]
+            .iter()
+            .map(|h| AccessTier::WebOfTrust(*h).budget_percent())
+            .collect();
+        assert_eq!(tier1, vec![100, 100], "Tier 1 is the full-budget tier");
+        assert_eq!(AccessTier::WebOfTrust(2).budget_percent(), 50);
+        assert_eq!(AccessTier::WebOfTrust(3).budget_percent(), 25);
     }
 }
 

@@ -4,6 +4,7 @@ import { adminApi, type ReportCase } from '../../services/AdminApiClient'
 import { fetchProfiles, type NostrProfile } from '../../services/ProfileFetcher'
 import { AdminEmptyState } from './AdminEmptyState'
 import { ProfileCard } from './ProfileCard'
+import { noteUrl } from '../../utils/obelisk-links'
 
 type StatusFilter = 'open' | 'resolved' | 'all'
 
@@ -307,7 +308,25 @@ export const ReportsManager = () => {
                         ))}
                       </div>
                       <div class="text-[var(--color-text-tertiary)] break-all">
-                        {isEvent && c.target.kind === 'event' ? `message ${shortHex(c.target.id)}` : null}
+                        {/* Linked only while the event is still on the relay.
+                            A snapshot means the original is gone, and a link
+                            to a viewer that would render nothing is the same
+                            silent dead end this screen avoids elsewhere. */}
+                        {isEvent && c.target.kind === 'event'
+                          ? c.content_from_snapshot
+                            ? `message ${shortHex(c.target.id)}`
+                            : (
+                              <a
+                                href={noteUrl(c.target.id, c.reported_pubkey)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="Open this message on Obelisk"
+                                style={{ color: 'var(--color-accent)' }}
+                              >
+                                message {shortHex(c.target.id)}
+                              </a>
+                            )
+                          : null}
                         {c.group_id && ` · in group ${c.group_id}`}
                       </div>
                     </div>

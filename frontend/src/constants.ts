@@ -44,7 +44,7 @@ export const MIN_NUTZAP_AMOUNT = 1; // minimum sats for nutzap compatibility che
  * Public relays stay behind it as fallbacks, for a signer that refuses to talk
  * to an unfamiliar host.
  */
-const ownRelayUrl = (): string => {
+export const ownRelayUrl = (): string => {
   if (typeof window === 'undefined') return 'wss://public.obelisk.ar';
   const { protocol, host } = window.location;
   return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}`;

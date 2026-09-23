@@ -1,5 +1,6 @@
 import { useEffect } from 'preact/hooks'
 import type { NostrProfile } from '../../services/ProfileFetcher'
+import { profileUrl } from '../../utils/obelisk-links'
 
 interface ProfileCardProps {
   profile: NostrProfile | undefined
@@ -117,13 +118,13 @@ export const ProfileCard = ({ profile, hex, npub, onClose }: ProfileCardProps) =
 
         {/* External link */}
         <a
-          href={`https://njump.me/${npub}`}
+          href={profileUrl(npub)}
           target="_blank"
           rel="noopener noreferrer"
           class="block w-full text-center text-sm py-2 rounded-lg transition-colors"
           style={{ background: 'rgba(var(--color-accent-rgb), 0.1)', color: 'var(--color-accent)', border: '1px solid rgba(var(--color-accent-rgb), 0.2)' }}
         >
-          View on njump.me
+          View profile
         </a>
       </div>
     </div>

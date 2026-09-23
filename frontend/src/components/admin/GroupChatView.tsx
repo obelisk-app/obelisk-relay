@@ -1,6 +1,7 @@
 import { Fragment } from 'preact'
 import type { EventInfo } from '../../services/AdminApiClient'
 import { getDisplayName, type NostrProfile } from '../../services/ProfileFetcher'
+import { noteUrl } from '../../utils/obelisk-links'
 
 /**
  * Chat-shaped rendering of a group's events for moderation.
@@ -190,9 +191,20 @@ export const GroupChatView = ({
                             return p ? getDisplayName(p, ev.pubkey) : short(ev.pubkey, 10)
                           })()}
                         </button>
-                        <span class="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                        {/* The timestamp is the permalink, as it is in every
+                            other chat client. The console can show you an
+                            event but not render it the way a reader saw it;
+                            this hands that job to something that can. */}
+                        <a
+                          href={noteUrl(ev.id, ev.pubkey)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="text-xs"
+                          title="Open this message on Obelisk"
+                          style={{ color: 'var(--color-text-secondary)', textDecoration: 'none' }}
+                        >
                           {timeOf(ev.created_at)}
-                        </span>
+                        </a>
                         {ev.kind !== 9 && (
                           <span
                             class="text-xs px-1.5 rounded"
@@ -237,9 +249,16 @@ export const GroupChatView = ({
                       {systemLabel(ev.kind)}
                       {ev.content ? ` — ${ev.content.slice(0, 80)}` : ''}
                     </span>
-                    <span class="text-xs" style={{ color: 'var(--color-text-secondary)', opacity: 0.6 }}>
+                    <a
+                      href={noteUrl(ev.id, ev.pubkey)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-xs"
+                      title="Open this event on Obelisk"
+                      style={{ color: 'var(--color-text-secondary)', opacity: 0.6, textDecoration: 'none' }}
+                    >
                       {timeOf(ev.created_at)}
-                    </span>
+                    </a>
                   </div>,
                 )}
           </Fragment>

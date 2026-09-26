@@ -5,17 +5,23 @@
 **Group chat that lives in the relay, not in an app.**
 
 A NIP-29 Nostr relay with server-side membership, roles, private groups,
-and a moderation console you can actually work from.
+web-of-trust admission, and a moderation console you can actually work from.
 
 [![GitHub stars](https://img.shields.io/github/stars/obelisk-app/obelisk-relay?style=flat&logo=github&color=b4f953&labelColor=0a0a0a)](https://github.com/obelisk-app/obelisk-relay/stargazers)
 [![License](https://img.shields.io/github/license/obelisk-app/obelisk-relay?style=flat&color=b4f953&labelColor=0a0a0a)](LICENSE)
 [![Stack](https://img.shields.io/badge/rust-tokio%20%2B%20axum-b4f953?style=flat&labelColor=0a0a0a)](#architecture)
 
-Live instance: **`wss://public.obelisk.ar`**
+Live instance **`wss://public.obelisk.ar`** · Chat client **[obelisk.ar](https://obelisk.ar)**
+
+[Why](#why-a-relay-level-group) · [Features](#what-you-get) · [The console](#the-console) · [Quick start](#quick-start) · [Docs](#docs)
 
 </div>
 
-![The relay's landing page](docs/images/landing.png)
+<br>
+
+![The admin console's Overview on public.obelisk.ar](docs/images/admin-overview.png)
+
+<p align="center"><sub>The console on <code>public.obelisk.ar</code>, 2026-09-22: live connections, disk, and the access mode actually in force.</sub></p>
 
 ---
 
@@ -36,33 +42,53 @@ able to act on it without opening an SSH session.
 
 | | |
 |---|---|
-| 🔐 **Layered admission** | A manual allowlist, everyone your reference accounts follow, or web-of-trust distance in the follow graph. NIP-42 authenticated. A blacklist overrides all of it. |
+| 🪜 **Admission is a ladder** | Three tiers, decided in that order: added by hand, followed by one of your reference accounts, or close enough in the follow graph. NIP-42 authenticated. A block list overrides all of it. |
+| ⚖️ **Budgets by distance** | Each tier publishes on a share of the rate budget — 6,000, 3,000 and 1,500 events a minute by default — because distance from your reference accounts is how much evidence you have. |
+| 🔎 **"Is this account allowed?"** | Paste an npub, hex key or NIP-05 address and the console names the tier that admits it, or why it is refused. |
 | 👥 **Server-side roles** | Admin / moderator / member, enforced by the relay rather than requested by the client. |
 | 🔒 **Private groups** | Content is filtered on read. Non-members get nothing — not a hidden UI. |
 | 🎫 **Invites** | Expiring, usage-capped, with a minimum code length so they cannot be guessed. |
-| 🚩 **Moderation queue** | NIP-56 reports, one row per reported thing. The message is captured when the report arrives, so deleting it is not a way out. |
+| 🚩 **Moderation queue** | NIP-56 reports, one row per reported thing, counted by distinct reporters. The message is captured when the report arrives, so deleting it is not a way out. |
 | 🖥️ **Admin console** | Every screen below. No SSH, no YAML editing for day-to-day work. |
-| ⚡ **Cashu wallet** | NIP-60/61 micropayments in the bundled chat UI. |
 | 📦 **Two commands** | `./setup.sh` gives you a relay. `./expose.sh` gives the world a way to reach it. |
 
 ## The console
 
-Sign in with a Nostr identity — browser extension, remote signer, or a pasted
-key if you insist.
+Every screenshot here is the live `public.obelisk.ar` console, captured
+2026-09-22.
 
-![Admin sign-in](docs/images/admin-login.png)
+### Sign in
+
+With a Nostr identity — browser extension, remote signer, or a pasted key if
+you insist.
+
+<p align="center"><img src="docs/images/admin-login.png" alt="Admin sign-in" width="440"></p>
+
+### Overview — is it healthy, and what is it actually doing
+
+Connections and disk use, extended live while the screen is open, and the
+configuration really in force: retention, database size, and the access mode.
+That is the screen at the top of this page.
 
 ### Access — who gets in, and on whose say-so
 
 Admission is a ladder, not a switch: someone you added by hand, someone your
-reference accounts follow, or someone close enough in the follow graph. Rate
-limits are per-pubkey, per-connection and relay-wide, and the budget falls off
-with distance — the further from your references, the less evidence there is
-that someone should be trusted with your disk.
+reference accounts follow, or someone close enough in the follow graph. Paste
+any key into **Is this account allowed?** and the console answers with the tier
+that admits it — and the tier counts sit right under it.
 
-![Access control and rate limits](docs/images/admin-access.png)
+![Access: tiers, reference accounts, and the account check](docs/images/admin-access.png)
+
+Rate limits are per-pubkey, per-connection and relay-wide, and the budget falls
+off with distance — the further from your references, the less evidence there
+is that someone should be trusted with your disk.
+
+![What each tier may publish, and web-of-trust admission](docs/images/admin-access-budget.png)
 
 ### Groups — what is actually on your relay
+
+Every group with its visibility, members and admins, searchable by name, ID or
+parent, with the events and members of each one a click away.
 
 ![Groups overview](docs/images/admin-groups.png)
 
@@ -79,7 +105,13 @@ unreviewable — deletion as a defence rather than a remedy.
 
 ![Moderation reports queue](docs/images/admin-reports.png)
 
+<sub>Reporter names and the accounts they named are blurred here, for the same reason the queue is admin-only.</sub>
+
 ### Storage — what you are spending disk on
+
+The file on disk, what it holds, what has been deleted, and whether automatic
+pruning is armed — with the disk history that shows why deleting events does
+not shrink the file.
 
 ![Storage and pruning](docs/images/admin-storage.png)
 
@@ -126,16 +158,15 @@ settings.
 </details>
 
 > [!IMPORTANT]
-> **`:latest` is behind the dated tags.** `setup.sh` pulls
-> `ghcr.io/obelisk-app/obelisk-relay:latest`, which has not been moved to the
-> current builds — those are arm64-only and `:latest` is multi-arch, so
-> repointing it would break every amd64 install with
-> `no matching manifest for linux/amd64`. Until an amd64 leg is built in CI and
-> the two are joined with `docker buildx imagetools create`, pin the tag to get
-> the current relay:
+> **Pin the tag to get the current relay.** `setup.sh` pulls the image pinned
+> for `groups_relay` in `compose.yml` (`v2026.09.18-compaction-update-arm64`),
+> which is behind what `public.obelisk.ar` runs. The dated builds are
+> arm64-only: on amd64 the pull fails and `setup.sh` falls back to building
+> from source, which gets you the checked-out code instead. On arm64, pin the
+> tag the public relay deploys:
 >
 > ```bash
-> RELAY_IMAGE_TAG=v2026.09.19-reports-4-arm64 ./setup.sh
+> RELAY_IMAGE_TAG=v2026.09.22-console-rework-arm64 ./setup.sh
 > ```
 
 ## Prerequisites

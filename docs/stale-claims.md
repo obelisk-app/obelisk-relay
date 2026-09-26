@@ -34,7 +34,11 @@ it is derived, it is reading the wrong field, which is a bug rather than a typo.
 console already has the vocabulary: allowlist plus web-of-trust, blocked
 overrides.
 
-## 2. The README pins an image tag three releases behind what is deployed
+Still open. Until it is fixed, the README deliberately shows no screenshot of the
+landing page, which prints this string; the sign-in shot is cropped to the card
+for the same reason.
+
+## 2. ~~The README pins an image tag three releases behind what is deployed~~ — fixed 2026-09-26
 
 **Where:** `README.md:138`.
 
@@ -53,7 +57,16 @@ dated tags). The pin is the correct mechanism; the number is just old.
 **Should say:** the current dated tag, or be generated from `compose.yml` so it
 cannot drift again.
 
-## 3. The README still sells the bundled chat client
+**Fixed 2026-09-26** (README refresh): the callout now pins
+`v2026.09.22-console-rework-arm64`, the tag `public_relay` deploys. It also said
+`setup.sh` pulls `:latest`, which was a second stale claim: `setup.sh` pulls
+`groups_relay` at the tag `compose.yml` pins for it
+(`v2026.09.18-compaction-update-arm64`), and falls back to building from source
+when that arm64-only pull fails on amd64. The callout now says so. Drift is
+still possible (two hand-maintained tags in `compose.yml`), so generating the
+README tag from `compose.yml` remains the real fix.
+
+## 3. ~~The README still sells the bundled chat client~~ — fixed 2026-09-26
 
 **Where:** `README.md:45`.
 
@@ -67,6 +80,8 @@ removed that UI. `frontend/src/main.tsx:36` now redirects `/app` to
 
 **Should say:** either drop the row, or point it at the client that now owns the
 feature and make clear the relay is not serving it.
+
+**Fixed 2026-09-26:** the row is gone.
 
 ## 4. The reference-accounts card cannot be retinted
 

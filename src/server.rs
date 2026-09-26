@@ -614,6 +614,11 @@ pub async fn run_server(
     // event processor runs, so the synchronous admission check has an answer.
     // Installed unconditionally; with the tier off it is a pair of lock reads.
     let wot_admission = WotAdmissionMiddleware::new(whitelist.clone());
+    let unindexed_query = UnindexedQueryMiddleware::new(
+        whitelist.clone(),
+        relay_keys.public_key,
+        admin_pubkeys.clone(),
+    );
 
     // Build the local follow graph, then keep it fresh. Done off the startup
     // path because it fetches contact lists: the relay must come up and serve
@@ -694,7 +699,7 @@ pub async fn run_server(
                 chain
                     .with(wot_admission)
                     .with(group_state_filter)
-                    .with(UnindexedQueryMiddleware::new())
+                    .with(unindexed_query)
                     .with(search_capability)
                     .with(rate_limiter)
                     .with(Nip40ExpirationMiddleware::new())

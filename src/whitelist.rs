@@ -241,6 +241,33 @@ impl Whitelist {
         self.inner.read().is_empty() && self.follow_derived.read().is_empty()
     }
 
+    /// The whole admission rule for a connection: blacklist first, then an
+    /// unrestricted relay admits everyone, then the tiers or relay-admin status.
+    ///
+    /// Lives here rather than in `GroupsRelayProcessor` so that anything which
+    /// has to predict the processor's verdict — the unindexed-query budget,
+    /// which must not charge for a REQ that admission is about to refuse — asks
+    /// the same question instead of re-deriving it. `is_admin` is supplied by
+    /// the caller because relay-admin status is not whitelist state.
+    ///
+    /// The blacklist is consulted before the open-relay short-circuit; see
+    /// `GroupsRelayProcessor::is_allowed` for the bug that ordering fixed.
+    pub fn admits(
+        &self,
+        pubkey: Option<&PublicKey>,
+        is_admin: impl Fn(&PublicKey) -> bool,
+    ) -> bool {
+        if let Some(pk) = pubkey {
+            if self.blacklist.contains(pk) {
+                return false;
+            }
+        }
+        if self.is_empty() {
+            return true;
+        }
+        pubkey.is_some_and(|pk| self.contains(pk) || is_admin(pk))
+    }
+
     /// Return a snapshot of all whitelisted pubkeys (manual + follow-derived union), excluding blacklisted.
     pub fn list(&self) -> Vec<PublicKey> {
         let manual = self.inner.read().clone();

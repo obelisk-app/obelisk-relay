@@ -6,7 +6,7 @@ relay:
   local_addr: "0.0.0.0:8080"
 
   relay_name: "Obelisk Public Relay"
-  relay_description: "Public NIP-29 groups relay for Obelisk. Open to all pubkeys; per-pubkey rate limited. No automatic retention pruning."
+  relay_description: "Public NIP-29 groups relay for Obelisk. Admission by web of trust from the relay's reference accounts; per-pubkey rate limited. No automatic retention pruning."
 
   # Empty whitelist => no pubkey restriction (public mode).
   whitelisted_pubkeys: []

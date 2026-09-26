@@ -30,6 +30,15 @@ use tracing::{debug, warn};
 /// payloads are NIP-44 encrypted between two keys that already know each other.
 const KIND_NIP46_SIGNER: u16 = 24133;
 
+/// Obelisk mesh-voice WebRTC signalling (offer / answer / ICE candidates).
+///
+/// Delivered only to the pubkeys it is `p`-tagged for, and to its author. The
+/// payload is plaintext SDP, and SDP carries ICE candidates -- i.e. the
+/// sender's public and LAN IP addresses. Kind 25050 is ephemeral, so this is
+/// purely a live-delivery rule; left to the default, any admitted subscriber to
+/// `{kinds:[25050]}` could harvest the addresses of everyone in a voice call.
+const KIND_VOICE_SIGNAL_25050: u16 = 25050;
+
 /// Per-pubkey token-bucket rate limiter. Keyed by pubkey hex; spammers reconnecting
 /// or rotating connections still hit the same bucket as long as they sign with the same key.
 pub type PubkeyLimiter = DefaultKeyedRateLimiter<PublicKey>;
@@ -276,19 +285,8 @@ impl GroupsRelayProcessor {
     /// A ban has to mean the same thing in every configuration, and "blocked"
     /// is the one answer that must never depend on how permissive the relay is.
     fn is_allowed(&self, pubkey: &Option<PublicKey>) -> bool {
-        if let Some(pk) = pubkey {
-            if self.whitelist.blacklist().contains(pk) {
-                return false;
-            }
-        }
-
-        if self.whitelist.is_empty() {
-            return true;
-        }
-        match pubkey {
-            Some(pk) => self.whitelist.contains(pk) || self.is_relay_admin(pk),
-            None => false,
-        }
+        self.whitelist
+            .admits(pubkey.as_ref(), |pk| self.is_relay_admin(pk))
     }
 
     fn is_relay_admin(&self, pubkey: &PublicKey) -> bool {
@@ -435,6 +433,20 @@ impl EventProcessor for GroupsRelayProcessor {
         _custom_state: Arc<RwLock<()>>,
         context: &EventContext,
     ) -> Result<bool> {
+        if event.kind.as_u16() == KIND_VOICE_SIGNAL_25050 {
+            let mut recipients = event.tags.public_keys().peekable();
+            // Untargeted signalling keeps the default behaviour; only an
+            // addressed message has someone whose privacy it can violate.
+            if recipients.peek().is_some() {
+                let Some(viewer) = context.authed_pubkey.as_ref() else {
+                    return Ok(false);
+                };
+                return Ok(*viewer == event.pubkey
+                    || self.is_relay_admin(viewer)
+                    || recipients.any(|pk| pk == viewer));
+            }
+        }
+
         // Check if this is a group event
         if let Some(group_ref) = self.groups.find_group_from_event(event, &context.subdomain) {
             // Group event - check access control using the group's can_see_event method
@@ -476,6 +488,18 @@ impl EventProcessor for GroupsRelayProcessor {
         }
 
         if !is_signer_traffic && !self.is_allowed(&context.authed_pubkey) {
+            // Not having authenticated yet is not the same as being refused.
+            // nostr-tools (and most clients) only AUTH-and-retry on an
+            // `auth-required:` prefix; answering `restricted:` to a socket that
+            // simply has not finished NIP-42 made every write on a fresh or
+            // reconnected socket fail for good -- voice beacons and SDP were
+            // lost this way, and the SFU restarted every ten minutes over it.
+            if context.authed_pubkey.is_none() {
+                return Err(relay_builder::Error::auth_required(
+                    "Authentication required: this relay only accepts whitelisted pubkeys"
+                        .to_string(),
+                ));
+            }
             return Err(relay_builder::Error::restricted(
                 "Access denied: your pubkey is not whitelisted on this relay".to_string(),
             ));
@@ -1105,5 +1129,120 @@ mod tests {
             }
             _ => panic!("Expected SaveSignedEvent command"),
         }
+    }
+
+    async fn closed_relay_processor() -> (tempfile::TempDir, GroupsRelayProcessor, Keys, Keys) {
+        let (tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+        let member = Keys::generate();
+        let whitelist = Whitelist::new(
+            vec![member.public_key()],
+            None,
+            crate::blacklist::Blacklist::new(None),
+        );
+        let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), whitelist);
+        (tmp_dir, processor, admin_keys, member)
+    }
+
+    /// Clients only AUTH-and-retry on `auth-required:`. Answering `restricted:`
+    /// to a socket that had not finished NIP-42 yet lost every write sent on a
+    /// fresh or reconnected socket -- mesh-voice beacons and SDP among them.
+    #[tokio::test]
+    async fn an_unauthenticated_write_is_told_to_authenticate() {
+        let (_tmp_dir, processor, admin_keys, member) = closed_relay_processor().await;
+        let note = create_test_event(&member, 20078, vec![]).await;
+
+        let anonymous = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let err = processor
+            .handle_event(note.clone(), empty_state(), &anonymous)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, relay_builder::Error::AuthRequired { .. }),
+            "not having authenticated yet must read as auth-required, got {err:?}"
+        );
+
+        // Authenticated as someone who is not admitted: AUTH will not help,
+        // so this one stays restricted.
+        let stranger = EventContext {
+            authed_pubkey: Some(Keys::generate().public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let err = processor
+            .handle_event(note.clone(), empty_state(), &stranger)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, relay_builder::Error::Restricted { .. }),
+            "an authenticated, unadmitted key must be restricted, got {err:?}"
+        );
+
+        let as_member = EventContext {
+            authed_pubkey: Some(member.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(processor
+            .handle_event(note, empty_state(), &as_member)
+            .await
+            .is_ok());
+    }
+
+    /// Voice signalling is plaintext SDP, which carries IP addresses. Only the
+    /// addressed peer (and the sender) may receive it.
+    #[tokio::test]
+    async fn addressed_voice_signalling_reaches_only_its_recipient() {
+        let (_tmp_dir, processor, admin_keys, sender) = closed_relay_processor().await;
+        let recipient = Keys::generate();
+        let bystander = Keys::generate();
+
+        let signal = create_test_event(
+            &sender,
+            KIND_VOICE_SIGNAL_25050,
+            vec![Tag::public_key(recipient.public_key())],
+        )
+        .await;
+
+        let viewing_as = |pk: Option<PublicKey>| EventContext {
+            authed_pubkey: pk,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let sees = |pk: Option<PublicKey>| {
+            processor
+                .can_see_event(&signal, empty_state(), &viewing_as(pk))
+                .unwrap()
+        };
+
+        assert!(sees(Some(recipient.public_key())), "the recipient");
+        assert!(sees(Some(sender.public_key())), "the sender");
+        assert!(sees(Some(admin_keys.public_key())), "the relay itself");
+        assert!(!sees(Some(bystander.public_key())), "not a bystander");
+        assert!(!sees(None), "not an unauthenticated subscriber");
+
+        // Unaddressed signalling has no recipient to protect and keeps the
+        // default behaviour.
+        let broadcast = create_test_event(&sender, KIND_VOICE_SIGNAL_25050, vec![]).await;
+        assert!(processor
+            .can_see_event(
+                &broadcast,
+                empty_state(),
+                &viewing_as(Some(bystander.public_key()))
+            )
+            .unwrap());
     }
 }

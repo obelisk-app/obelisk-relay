@@ -488,3 +488,39 @@ Properties worth knowing:
 - **The file grows with reports, never shrinks.** It is small (one short text per
   reported message) but it is not covered by the pruner, deliberately: pruning
   the evidence would reintroduce the problem it exists to solve.
+
+---
+
+## 21. Mesh voice broke on three relay behaviours at once
+
+**Severity: high for voice. Fixed 2026-09-26.**
+
+Found by the mesh-voice audit (`obelisk-dex/OBELISK-MESH-FIXES.md`). Relay
+forwarding was fine; the relay's gates around it were not.
+
+- **An unauthenticated write was answered `restricted:`.** `handle_event`
+  returned `restricted` whenever admission failed, including when the socket
+  simply had not finished NIP-42. nostr-tools only runs AUTH-and-retry on an
+  `auth-required:` prefix, so every beacon and SDP sent on a fresh or
+  reconnected socket was lost for good, and the SFU restarted every ten minutes
+  over the same thing. Now: no authenticated key → `auth-required`; an
+  authenticated key that is not admitted → `restricted`. The REQ path already
+  did this.
+- **The unindexed-query budget closed voice subscriptions.** `{kinds:[20078]}`
+  and `{kinds:[25050]}` name no author, id or tag, so they counted as scrapes,
+  and clients re-issue them on every reconnect. A REQ whose filters are *all*
+  ephemeral-only is now exempt, **and** is rewritten to `limit: 0`. The
+  exemption would be a free denial-of-service without the rewrite: nothing
+  ephemeral is stored, but with no kind index the storage layer would still
+  walk the whole table to prove it. It has to be every filter, because
+  relay_builder applies the smallest `limit` in a REQ to all of its filters.
+- **REQs that admission was about to refuse still spent budget.** The budget
+  middleware runs before `verify_filters`, so it now asks
+  `Whitelist::admits` (the processor's own rule) first and does not charge a
+  connection that will be told `auth-required`.
+
+**Behaviour change for clients:** p-tagged kind 25050 (voice signalling) is now
+delivered only to its `p`-tagged recipients, its author and relay admins. It is
+plaintext SDP, so it carries ICE candidates, which include IP addresses, and before
+this change any admitted subscriber could read them. A client must be authenticated
+*as the recipient* to receive its signals. Untagged 25050 is unchanged.

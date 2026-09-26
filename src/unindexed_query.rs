@@ -31,6 +31,24 @@
 //! reason the client can act on, and the connection keeps working for everything
 //! else. A client doing something reasonable will never see it.
 //!
+//! Two kinds of REQ are deliberately never charged:
+//!
+//! - **Ephemeral-only REQs** (every filter asks only for kinds 20000-29999).
+//!   Nothing of those kinds is ever stored, so the historical query can only
+//!   return nothing — yet with no kind index it would still walk the whole
+//!   event table to prove it. These are live feeds (mesh-voice presence 20078,
+//!   voice signalling 25050, NIP-46 24133) that clients re-issue on every
+//!   reconnect, and charging them closed voice calls' subscriptions with
+//!   `rate-limited`. Exempting them is only safe because the scan is removed
+//!   too: each filter is rewritten to `limit: 0`, which the storage layer
+//!   answers without reading a row. The rule is *every* filter, because
+//!   relay_builder applies the smallest limit in a REQ to all of its filters,
+//!   so a `limit: 0` on one filter would silently empty the others.
+//! - **REQs from connections admission will refuse.** `verify_filters` answers
+//!   those with `auth-required`, after this middleware; charging them meant a
+//!   client that subscribed before finishing NIP-42 spent budget on REQs that
+//!   never ran, and found it gone when it retried after AUTH.
+//!
 //! See `crate::group_state_filter` for the rewrite that removed the one query
 //! this relay could not otherwise avoid.
 
@@ -45,6 +63,8 @@ use governor::{Quota, RateLimiter};
 use nostr_sdk::prelude::*;
 use relay_builder::nostr_middleware::{InboundContext, NostrMiddleware};
 use tracing::warn;
+
+use crate::whitelist::Whitelist;
 
 /// Minimum gap between warnings, so one busy client cannot flood the log.
 /// The counter is incremented on every occurrence regardless.
@@ -79,6 +99,16 @@ pub fn would_scrape(filter: &Filter) -> bool {
     filter.ids.is_none() && filter.authors.is_none() && filter.generic_tags.is_empty()
 }
 
+/// True when the filter can only ever match ephemeral events.
+///
+/// A filter with no `kinds` matches everything, so it is never ephemeral-only.
+pub fn is_ephemeral_only(filter: &Filter) -> bool {
+    filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| !kinds.is_empty() && kinds.iter().all(|k| k.is_ephemeral()))
+}
+
 fn describe(filter: &Filter) -> String {
     match &filter.kinds {
         Some(kinds) if !kinds.is_empty() => {
@@ -101,6 +131,11 @@ fn now_unix() -> i64 {
 #[derive(Clone)]
 pub struct UnindexedQueryMiddleware {
     limiter: Arc<ScrapeLimiter>,
+    /// Admission, so a REQ that `verify_filters` is about to refuse is not
+    /// charged. The same rule the processor applies — see [`Whitelist::admits`].
+    whitelist: Whitelist,
+    relay_pubkey: PublicKey,
+    admin_pubkeys: Arc<Vec<PublicKey>>,
 }
 
 impl std::fmt::Debug for UnindexedQueryMiddleware {
@@ -109,14 +144,12 @@ impl std::fmt::Debug for UnindexedQueryMiddleware {
     }
 }
 
-impl Default for UnindexedQueryMiddleware {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl UnindexedQueryMiddleware {
-    pub fn new() -> Self {
+    pub fn new(
+        whitelist: Whitelist,
+        relay_pubkey: PublicKey,
+        admin_pubkeys: Vec<PublicKey>,
+    ) -> Self {
         let per_minute =
             NonZeroU32::new(SCRAPE_QUERIES_PER_MINUTE).expect("scrape budget must be non-zero");
         let burst = NonZeroU32::new(SCRAPE_BURST).expect("scrape burst must be non-zero");
@@ -124,7 +157,16 @@ impl UnindexedQueryMiddleware {
             limiter: Arc::new(RateLimiter::keyed(
                 Quota::per_minute(per_minute).allow_burst(burst),
             )),
+            whitelist,
+            relay_pubkey,
+            admin_pubkeys: Arc::new(admin_pubkeys),
         }
+    }
+
+    fn admits(&self, pubkey: Option<&PublicKey>) -> bool {
+        self.whitelist.admits(pubkey, |pk| {
+            *pk == self.relay_pubkey || self.admin_pubkeys.contains(pk)
+        })
     }
 
     /// Whether this connection may run another scraping query right now.
@@ -143,7 +185,7 @@ impl UnindexedQueryMiddleware {
 impl NostrMiddleware<()> for UnindexedQueryMiddleware {
     async fn process_inbound<Next>(
         &self,
-        ctx: InboundContext<'_, (), Next>,
+        mut ctx: InboundContext<'_, (), Next>,
     ) -> Result<(), anyhow::Error>
     where
         Next: relay_builder::nostr_middleware::InboundProcessor<()>,
@@ -151,10 +193,17 @@ impl NostrMiddleware<()> for UnindexedQueryMiddleware {
         let Some(ClientMessage::Req {
             filters,
             subscription_id,
-        }) = &ctx.message
+        }) = &mut ctx.message
         else {
             return ctx.next().await;
         };
+
+        if !filters.is_empty() && filters.iter().all(|f| is_ephemeral_only(f)) {
+            for filter in filters.iter_mut() {
+                filter.to_mut().limit = Some(0);
+            }
+            return ctx.next().await;
+        }
 
         let offenders: Vec<String> = filters
             .iter()
@@ -164,6 +213,12 @@ impl NostrMiddleware<()> for UnindexedQueryMiddleware {
 
         if !offenders.is_empty() {
             crate::metrics::unindexed_queries().increment(offenders.len() as u64);
+
+            let authed_pubkey = ctx.state.read().await.authed_pubkey;
+            if !self.admits(authed_pubkey.as_ref()) {
+                // Admission will refuse this REQ; do not bill for it.
+                return ctx.next().await;
+            }
 
             if !self.allow(ctx.connection_id) {
                 let subscription_id = subscription_id.as_ref().clone();
@@ -207,6 +262,15 @@ impl NostrMiddleware<()> for UnindexedQueryMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blacklist::Blacklist;
+
+    fn open_relay_mw() -> UnindexedQueryMiddleware {
+        UnindexedQueryMiddleware::new(
+            Whitelist::new(vec![], None, Blacklist::new(None)),
+            Keys::generate().public_key(),
+            vec![],
+        )
+    }
 
     #[test]
     fn a_kinds_only_filter_scrapes() {
@@ -238,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_connection_may_burst_then_is_throttled() {
-        let mw = UnindexedQueryMiddleware::new();
+        let mw = open_relay_mw();
 
         // The opening burst a normal client is entitled to.
         for i in 0..SCRAPE_BURST {
@@ -257,7 +321,7 @@ mod tests {
 
     #[test]
     fn the_budget_is_per_connection() {
-        let mw = UnindexedQueryMiddleware::new();
+        let mw = open_relay_mw();
         for _ in 0..SCRAPE_BURST {
             assert!(mw.allow("noisy"));
         }
@@ -294,5 +358,60 @@ mod tests {
             .since(Timestamp::from(1_700_000_000))
             .until(Timestamp::from(1_800_000_000));
         assert!(would_scrape(&f));
+    }
+
+    #[test]
+    fn live_feeds_of_ephemeral_kinds_are_ephemeral_only() {
+        // Mesh-voice presence, voice signalling, NIP-46: the REQs this exists for.
+        for kind in [20078u16, 25050, 24133] {
+            assert!(is_ephemeral_only(&Filter::new().kind(Kind::from(kind))));
+        }
+        assert!(is_ephemeral_only(
+            &Filter::new()
+                .kind(Kind::from(25050u16))
+                .since(Timestamp::from(1_700_000_000))
+        ));
+    }
+
+    #[test]
+    fn a_stored_kind_or_no_kinds_is_not_ephemeral_only() {
+        // One stored kind is enough for the query to have history to scan.
+        assert!(!is_ephemeral_only(
+            &Filter::new().kinds(vec![Kind::from(20078u16), Kind::from(1u16)])
+        ));
+        // No kinds means every kind.
+        assert!(!is_ephemeral_only(&Filter::new()));
+        assert!(!is_ephemeral_only(&Filter::new().kinds(Vec::<Kind>::new())));
+        // Replaceable (10000-19999) and addressable (30000+) are stored.
+        assert!(!is_ephemeral_only(
+            &Filter::new().kind(Kind::from(10002u16))
+        ));
+        assert!(!is_ephemeral_only(
+            &Filter::new().kind(Kind::from(30000u16))
+        ));
+    }
+
+    #[test]
+    fn admission_matches_the_processor_rule() {
+        let member = Keys::generate().public_key();
+        let admin = Keys::generate().public_key();
+        let relay = Keys::generate().public_key();
+        let mw = UnindexedQueryMiddleware::new(
+            Whitelist::new(vec![member], None, Blacklist::new(None)),
+            relay,
+            vec![admin],
+        );
+
+        // Unauthenticated on a closed relay: verify_filters will answer
+        // auth-required, so the budget must not be charged for it.
+        assert!(!mw.admits(None));
+        assert!(!mw.admits(Some(&Keys::generate().public_key())));
+
+        assert!(mw.admits(Some(&member)));
+        assert!(mw.admits(Some(&admin)));
+        assert!(mw.admits(Some(&relay)));
+
+        // An open relay admits everyone, authenticated or not.
+        assert!(open_relay_mw().admits(None));
     }
 }

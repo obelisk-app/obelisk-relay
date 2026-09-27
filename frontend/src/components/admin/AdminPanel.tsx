@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'preact/hooks'
+import { useLogout, useSigner } from '@nostr-wot/ui'
+import type { NostrSigner } from '@nostr-wot/signers'
 import { adminApi, type PublicRelayInfo, type SetupStatus } from '../../services/AdminApiClient'
 import { AdminAuth } from './AdminAuth'
 import { AdminSetupWizard } from './AdminSetupWizard'
@@ -11,8 +13,11 @@ import { StorageManager } from './StorageManager'
 import { SearchIcon } from './SearchIcon'
 import { AdminSaveBar } from './AdminSaveBar'
 import { SettingsDirtyProvider } from './settingsDirty'
+import { AdminIdentity } from './AdminIdentity'
+import { clearStoredSigners } from './adminSigner'
 import {
   AccessIcon,
+  DocsIcon,
   GroupsIcon,
   OverviewIcon,
   RelayIcon,
@@ -118,6 +123,9 @@ export const AdminPanel = (_props: { path?: string }) => {
   const [globalSearch, setGlobalSearch] = useState('')
   const [relayInfo, setRelayInfo] = useState<PublicRelayInfo | null>(null)
   const [iconBroken, setIconBroken] = useState(false)
+  const [signedOut, setSignedOut] = useState(false)
+  const signer = useSigner() as NostrSigner | null
+  const sdkLogout = useLogout()
 
   // Brand the console from the relay's own NIP-11 identity, and point the
   // browser tab at the same icon so several deployments stay distinguishable.
@@ -178,6 +186,22 @@ export const AdminPanel = (_props: { path?: string }) => {
     }
   }, [])
 
+  // The signed-in admin, for the identity card. Fetched once authenticated
+  // rather than threaded out of checkAccess, because sign-in and setup both
+  // reach the authenticated state without passing through it.
+  const [adminPubkey, setAdminPubkey] = useState<string | null>(null)
+  useEffect(() => {
+    if (!authenticated) {
+      setAdminPubkey(null)
+      return
+    }
+    let cancelled = false
+    adminApi.checkSession()
+      .then(session => { if (!cancelled) setAdminPubkey(session.pubkey ?? null) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [authenticated])
+
   if (checking) {
     return (
       <div class="min-h-screen flex items-center justify-center" style={{ background: 'var(--color-bg-primary)' }}>
@@ -202,11 +226,27 @@ export const AdminPanel = (_props: { path?: string }) => {
   }
 
   if (!authenticated) {
-    return <AdminAuth onAuthenticated={() => setAuthenticated(true)} />
+    return (
+      <AdminAuth
+        fresh={signedOut}
+        onAuthenticated={() => {
+          setSignedOut(false)
+          setAuthenticated(true)
+        }}
+      />
+    )
   }
 
-  const handleLogout = () => {
+  // Dropping the token alone was not a sign-out: the SDK still held the
+  // signer, so the login screen authenticated straight back in with it. Clear
+  // the persisted signer and the SDK session too, and have the login screen
+  // wait for an explicit choice -- an extension signer is always re-derivable.
+  // The relay has no server-side logout endpoint; the token lapses at its TTL.
+  const handleLogout = async () => {
     adminApi.clearToken()
+    setSignedOut(true)
+    await clearStoredSigners(signer)
+    await sdkLogout().catch(() => undefined)
     setAuthenticated(false)
   }
 
@@ -297,9 +337,35 @@ export const AdminPanel = (_props: { path?: string }) => {
               </button>
             )
           })}
+          {/* Docs is a menu section like the rest, but /docs is its own page
+              (with its own section rail and scroll-spy), so it opens there
+              rather than rendering inside the console. Same-origin, so it
+              documents this deployment's version. */}
+          <a
+            href="/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="admin-nav-item text-left px-3 py-3 transition-colors flex-shrink-0 md:flex-shrink"
+            style={{
+              minWidth: '150px',
+              borderRadius: '8px',
+              border: '1px solid transparent',
+              color: 'var(--color-text-primary)',
+            }}
+          >
+            <span class="flex items-center gap-2.5">
+              <DocsIcon class="w-[18px] h-[18px] flex-shrink-0 opacity-80" />
+              <span class="min-w-0">
+                <span class="block text-sm font-semibold">Docs</span>
+                <span class="block text-xs mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+                  Relay documentation
+                </span>
+              </span>
+            </span>
+          </a>
         </nav>
 
-        <div class="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 gap-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+        <div class="p-4 flex flex-col gap-3" style={{ borderTop: '1px solid var(--color-border)' }}>
           {/* Open the client against THIS relay, not a fixed one. The admin
               panel is served by the relay itself, so the host serving this page
               is the relay's own public hostname -- which keeps the link correct
@@ -313,26 +379,7 @@ export const AdminPanel = (_props: { path?: string }) => {
           >
             Open Chat
           </a>
-          {/* The relay serves its own documentation at /docs and the console
-              never linked to it, so the reference for everything on these
-              screens was reachable only by typing the path. Same-origin, so it
-              follows this deployment rather than a canonical copy that may
-              describe a different version. */}
-          <a
-            href="/docs"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="admin-sidebar-action admin-sidebar-action-accent"
-          >
-            Open Docs
-          </a>
-          <button
-            type="button"
-            onClick={handleLogout}
-            class="admin-sidebar-action admin-sidebar-action-danger"
-          >
-            Sign out
-          </button>
+          <AdminIdentity pubkey={adminPubkey} onLogout={handleLogout} />
         </div>
       </aside>
 
@@ -396,7 +443,7 @@ export const AdminPanel = (_props: { path?: string }) => {
         {/* The only thing that scrolls. min-h-0 lets it shrink below its
             content height, which is what allows overflow-y-auto to scroll
             rather than stretch the column. */}
-        <div class="flex-1 min-h-0 overflow-y-auto">
+        <div class="flex-1 min-h-0 overflow-y-auto lc-grid-bg">
         <div class="p-5 md:p-8 max-w-7xl">
           {activeTab === 'dashboard' && <Dashboard />}
           {activeTab === 'whitelist' && <AccessScreen />}

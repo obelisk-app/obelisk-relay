@@ -255,6 +255,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_app_manifest_needs_no_h_tag() {
+        // An Obelisk Apps manifest describes an app, not a group: it is kind
+        // 32390, addressable, and carries a `d` tag instead of `h`.
+        let event = EventBuilder::new(Kind::Custom(32390), "")
+            .tags(vec![
+                Tag::identifier("chain-reaction"),
+                Tag::custom(TagKind::custom("path"), ["/index.js", &"a".repeat(64)]),
+            ])
+            .sign(&Keys::generate())
+            .await
+            .unwrap();
+        assert!(middleware().validate_event(&event).is_ok());
+    }
+
+    #[tokio::test]
     async fn a_group_event_without_an_h_tag_is_refused() {
         let event = signed("hi", vec![], None).await;
         assert!(middleware().validate_event(&event).is_err());

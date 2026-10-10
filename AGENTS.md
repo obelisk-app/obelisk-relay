@@ -96,7 +96,8 @@ This is the most important agent. It implements the `EventProcessor` trait with 
 Called when a client sends a REQ (subscription request).
 1. **Whitelist check** — is this pubkey allowed on the relay at all?
 2. **Group access check** — for private groups, is the user a member?
-3. Returns auth-required error if whitelist is active and user is unauthenticated
+3. Not admitted: returns `auth-required` if the socket has not authenticated yet
+   (clients AUTH and retry on it), `restricted` if it has (AUTH won't help)
 
 #### `can_see_event()` — Event Visibility
 Called before delivering each event to a subscriber.
@@ -272,6 +273,7 @@ Non-member  → Read public groups, submit join requests
 4. User sends REQ for group events
 5. GroupsRelayProcessor.verify_filters():
    a. is_allowed(unknown_pubkey)? → NOT in whitelist → ✗
-   b. Returns Error::auth_required
-6. User receives: ["CLOSED", sub_id, "auth-required: ..."]
+   b. Authenticated but not admitted → Error::restricted
+      (before AUTH it would be Error::auth_required, prompting the client to AUTH)
+6. User receives: ["CLOSED", sub_id, "restricted: Access denied: your pubkey is not whitelisted on this relay"]
 ```

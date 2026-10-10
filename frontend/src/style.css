@@ -394,6 +394,66 @@ body {
   color: #fecaca;
 }
 
+/* Docs sits in the nav as a link, so it needs the hover the tab buttons get
+   from being plain transparent buttons on the sidebar. */
+.admin-nav-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* The signed-in admin, bottom-left of the sidebar. Same card as the SFU and
+   agents consoles so the three Obelisk admin screens identify you alike. */
+.lc-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 12px;
+  background: #121212;
+  border: 1px solid var(--color-border);
+}
+
+.lc-icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  transition: all 0.15s ease;
+}
+
+.lc-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-border);
+}
+
+.lc-avatar {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.lc-avatar img,
+.lc-avatar-mono {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  object-fit: cover;
+  background: #0a0a0a;
+  box-shadow: 0 0 0 3px #171717, 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* Through the accent variable, so the purple retint carries into the monogram. */
+.lc-avatar-mono {
+  font-weight: 800;
+  color: #0a0a0a;
+  background: linear-gradient(135deg, var(--color-accent), #262626);
+}
+
 .admin-settings-card,
 .admin-access-panel,
 .admin-stat-card {

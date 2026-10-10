@@ -801,7 +801,7 @@ mod tests {
 
         let graph = oracle.graph().expect("local mode builds a graph").clone();
         graph.replace(
-            std::collections::HashMap::from([(root, std::collections::HashSet::from([friend]))]),
+            std::collections::HashMap::from([(root, vec![friend].into_boxed_slice())]),
             crate::wot_graph::Coverage::default(),
         );
 

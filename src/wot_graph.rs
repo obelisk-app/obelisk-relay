@@ -75,10 +75,19 @@ pub struct Coverage {
     pub reachable_total: usize,
 }
 
+/// One account's follows, deduplicated.
+///
+/// A boxed slice rather than a `HashSet`: the graph only ever iterates a
+/// follow list, never looks one up, and at ~3M edges the hash table's empty
+/// slots and per-entry overhead were most of the graph's size. The graph is
+/// rebuilt hourly with the old copy still live, so that overhead counted twice
+/// at every peak -- and with glibc's arenas the peak is what the process keeps.
+pub type Follows = Box<[PublicKey]>;
+
 /// Directed follow edges: who follows whom.
 #[derive(Debug, Default)]
 pub struct FollowGraph {
-    edges: RwLock<HashMap<PublicKey, HashSet<PublicKey>>>,
+    edges: RwLock<HashMap<PublicKey, Follows>>,
     built_at: RwLock<Option<Instant>>,
     coverage: RwLock<Coverage>,
     /// Everyone the graph admits, with their exact hop count, sorted
@@ -122,7 +131,7 @@ impl FollowGraph {
                 let Some(follows) = edges.get(&node) else {
                     continue;
                 };
-                for followed in follows {
+                for followed in follows.iter() {
                     if followed == target {
                         return Some(hop);
                     }
@@ -154,7 +163,7 @@ impl FollowGraph {
                 let Some(follows) = edges.get(&node) else {
                     continue;
                 };
-                for followed in follows {
+                for followed in follows.iter() {
                     if !distances.contains_key(followed) {
                         distances.insert(*followed, hop);
                         next.push_back(*followed);
@@ -169,7 +178,8 @@ impl FollowGraph {
         distances
     }
 
-    pub fn replace(&self, edges: HashMap<PublicKey, HashSet<PublicKey>>, coverage: Coverage) {
+    pub fn replace(&self, mut edges: HashMap<PublicKey, Follows>, coverage: Coverage) {
+        edges.shrink_to_fit();
         *self.edges.write() = edges;
         *self.coverage.write() = coverage;
         *self.built_at.write() = Some(Instant::now());
@@ -281,8 +291,8 @@ impl FollowGraph {
 ///
 /// Newest wins per author: kind 3 is replaceable, and a scope can still hold an
 /// older copy.
-async fn edges_from_database(db: &Arc<RelayDatabase>) -> HashMap<PublicKey, HashSet<PublicKey>> {
-    let mut edges: HashMap<PublicKey, HashSet<PublicKey>> = HashMap::new();
+async fn edges_from_database(db: &Arc<RelayDatabase>) -> HashMap<PublicKey, Follows> {
+    let mut edges: HashMap<PublicKey, Follows> = HashMap::new();
     let mut newest: HashMap<PublicKey, Timestamp> = HashMap::new();
 
     let scopes = match db.list_scopes().await {
@@ -322,18 +332,21 @@ async fn edges_from_database(db: &Arc<RelayDatabase>) -> HashMap<PublicKey, Hash
 }
 
 /// The `p` tags of a contact list.
-fn follows_in(event: &Event) -> HashSet<PublicKey> {
-    event
+fn follows_in(event: &Event) -> Follows {
+    let mut follows: Vec<PublicKey> = event
         .tags
         .iter()
         .filter(|tag| tag.kind() == TagKind::p())
         .filter_map(|tag| tag.content())
         .filter_map(|hex| PublicKey::from_hex(hex).ok())
-        .collect()
+        .collect();
+    follows.sort_unstable();
+    follows.dedup();
+    follows.into_boxed_slice()
 }
 
 /// Fetch contact lists for `wanted` from public relays, in batches.
-async fn fetch_contact_lists(wanted: Vec<PublicKey>) -> HashMap<PublicKey, HashSet<PublicKey>> {
+async fn fetch_contact_lists(wanted: Vec<PublicKey>) -> HashMap<PublicKey, Follows> {
     let mut found = HashMap::new();
     if wanted.is_empty() {
         return found;
@@ -450,7 +463,7 @@ pub async fn rebuild(
         let mut next = Vec::new();
         for node in &frontier {
             if let Some(follows) = edges.get(node) {
-                for followed in follows {
+                for followed in follows.iter() {
                     if known.insert(*followed) {
                         next.push(*followed);
                     }
@@ -644,6 +657,20 @@ mod tests {
             Coverage::default(),
         );
         graph
+    }
+
+    #[test]
+    fn a_contact_list_is_stored_once_per_follow() {
+        let ks = keys(2);
+        let tags = [ks[0], ks[1], ks[0]].map(Tag::public_key);
+        let event = EventBuilder::new(Kind::ContactList, "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        let mut expected = ks.clone();
+        expected.sort_unstable();
+        assert_eq!(&*follows_in(&event), expected.as_slice());
     }
 
     #[test]

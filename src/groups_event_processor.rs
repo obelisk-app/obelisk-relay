@@ -175,6 +175,20 @@ impl GroupsRelayProcessor {
         self
     }
 
+    /// Every keyed limiter this processor checks. A keyed limiter keeps one
+    /// entry per pubkey it has ever seen until told to forget the idle ones,
+    /// so the server sweeps these periodically (see `server.rs`).
+    pub fn rate_limiters(&self) -> Vec<Arc<PubkeyLimiter>> {
+        let mut limiters: Vec<_> = self
+            .tier_limiters
+            .iter()
+            .flat_map(|tiers| tiers.values().cloned())
+            .collect();
+        limiters.extend(self.pubkey_limiter.iter().cloned());
+        limiters.extend(self.report_limiter.iter().cloned());
+        limiters
+    }
+
     /// The bucket for whichever tier admitted this pubkey.
     fn limiter_for(&self, pubkey: &PublicKey) -> Option<&Arc<PubkeyLimiter>> {
         let tiers = self.tier_limiters.as_ref()?;

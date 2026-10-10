@@ -153,6 +153,21 @@ pub fn setup_metrics() -> Result<PrometheusHandle, anyhow::Error> {
 
             let builder = PrometheusBuilder::new();
             let handle = builder.install_recorder()?;
+
+            // `install_recorder` leaves upkeep to the caller. Without it every
+            // histogram sample (event_latency, on a sample of all inbound
+            // EVENTs) is kept until something renders /metrics -- and since
+            // /metrics stopped answering internet requests nothing does, so
+            // the samples piled up for as long as the process lived. Same
+            // interval `install()` would use.
+            let upkeep = handle.clone();
+            std::thread::Builder::new()
+                .name("metrics-upkeep".into())
+                .spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    upkeep.run_upkeep();
+                })?;
+
             Ok(handle)
         })
         .cloned()

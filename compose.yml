@@ -65,6 +65,19 @@ services:
       # See the note on the same line in groups_relay: the console reports the
       # running version from this, because the container cannot discover it.
       RELAY_IMAGE_TAG: "${RELAY_IMAGE_TAG:-v2026.09.22-console-rework-arm64}"
+      # glibc gives each thread its own malloc arena and rarely hands freed
+      # memory back, so the hourly follow-graph rebuild ratchets RSS upward.
+      # Two arenas keep that churn in one place. Experiment from 2026-10-10;
+      # see the mem_limit note below.
+      MALLOC_ARENA_MAX: "2"
+    # Backstop, not a fix. Since 2026-10-08 the relay has grown to 1.5-2.6 GB
+    # and the kernel killed it mid server-wide memory shortage, ten times in
+    # two days. With a cap the OOM is scoped to this container and `restart`
+    # brings back just the relay. Swap is capped at the same value so it
+    # restarts at the limit instead of thrashing (a follow-graph rebuild took
+    # 981s instead of 49s while swapping).
+    mem_limit: 1536m
+    memswap_limit: 1536m
     ports:
       - "127.0.0.1:8081:8080"
     # The relay process still runs as uid 0 inside the container, because the

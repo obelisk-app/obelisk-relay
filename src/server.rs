@@ -672,6 +672,28 @@ pub async fn run_server(
         }
     }
 
+    // Same problem for the per-pubkey publish limiters: governor keeps an entry
+    // for every pubkey it has ever checked until `retain_recent` drops the ones
+    // whose budget has fully refilled.
+    let rate_limiters = groups_processor.rate_limiters();
+    if !rate_limiters.is_empty() {
+        let token = cancellation_token.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(600));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        for limiter in &rate_limiters {
+                            limiter.retain_recent();
+                            limiter.shrink_to_fit();
+                        }
+                    }
+                    _ = token.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // Expired verdicts would otherwise accumulate one entry per pubkey that
     // ever connected.
     if let Some(oracle) = wot_oracle.clone() {

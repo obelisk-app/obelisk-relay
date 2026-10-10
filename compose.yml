@@ -57,7 +57,7 @@ services:
       # A UI-driven update does this for you: scripts/relay-updater.sh runs
       # retint.sh against the new image and rewrites this line before recreating
       # the container, and fails the update rather than shipping a green theme.
-      - ./public-config/branding/assets/index-DAEwlZCD.css:/app/frontend/dist/assets/index-DAEwlZCD.css:ro
+      - ./public-config/branding/assets/index-9Gx2qIrj.css:/app/frontend/dist/assets/index-9Gx2qIrj.css:ro
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
       NIP29__relay__relay_url: "wss://public.obelisk.ar"

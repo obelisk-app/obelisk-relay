@@ -60,6 +60,13 @@ pub const KIND_PUSH_DEREGISTRATION_3080: Kind = Kind::Custom(3080);
 
 pub const KIND_GENERAL_EVENT_DELETION: Kind = Kind::EventDeletion;
 
+// Obelisk Apps manifest (addressable): an app or game published as an event,
+// its code on Blossom. It describes an app, not a group, so it carries no `h`
+// tag -- and whoever can write to this relay can publish one, which makes the
+// relay's own admission rules the app catalog's curation. Being addressable,
+// the pruner never deletes it. Spec: obelisk-app/obelisk-apps docs/app-format.md.
+pub const KIND_APP_MANIFEST_32390: Kind = Kind::Custom(32390);
+
 // Custom event kinds for groups
 pub const KIND_GROUP_CREATE_9007: Kind = Kind::Custom(9007); // Admin/Relay -> Relay: Create a new group
 pub const KIND_GROUP_DELETE_9008: Kind = Kind::Custom(9008); // Admin/Relay -> Relay: Delete an existing group
@@ -85,7 +92,7 @@ pub const ADDRESSABLE_EVENT_KINDS: [Kind; 4] = [
     KIND_GROUP_ROLES_39003,
 ];
 
-pub const NON_GROUP_ALLOWED_KINDS: [Kind; 15] = [
+pub const NON_GROUP_ALLOWED_KINDS: [Kind; 16] = [
     KIND_SIMPLE_LIST_10009,
     // A report is about a person or an event, not about a group, so it carries
     // no `h` tag and was previously refused outright by ValidationMiddleware.
@@ -106,6 +113,7 @@ pub const NON_GROUP_ALLOWED_KINDS: [Kind; 15] = [
     KIND_GENERAL_EVENT_DELETION,
     KIND_PUSH_REGISTRATION_3079,
     KIND_PUSH_DEREGISTRATION_3080,
+    KIND_APP_MANIFEST_32390,
 ];
 
 pub const ALL_GROUP_KINDS_EXCEPT_DELETE_AND_ADDRESSABLE: [Kind; 10] = [

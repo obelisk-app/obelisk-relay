@@ -44,12 +44,12 @@ A NIP-29 relay manages **group chats at the relay level**. Unlike regular Nostr 
 - **Manages roles** — admin, moderator, member with different permissions
 - **Controls visibility** — private groups are only readable by members
 - **Handles invites** — invite codes with expiration and usage limits
-- **Whitelists pubkeys** — only approved Nostr identities can connect at all
+- **Admits pubkeys** — only admitted Nostr identities can read or write (see Admission)
 
 ## Architecture
 
 ```
-Internet → Caddy (:443, HTTPS) → relay container (:8080)
+Internet → Cloudflare tunnel → 127.0.0.1:8081 → relay container (:8080)
                                     ├── Axum HTTP server
                                     │   ├── WebSocket upgrade → Nostr protocol
                                     │   ├── /health
@@ -96,32 +96,29 @@ Client sends EVENT → WebSocket
   → Broadcast to subscribers
 ```
 
-### Whitelist Mechanism
+### Admission
 
-The relay enforces a pubkey whitelist defined in `config/settings.local.yml`:
+Who may read and write is decided by `is_allowed()` (`src/groups_event_processor.rs`,
+backed by `src/whitelist.rs`): the blacklist first (it overrides everything),
+then the manual list, the follow-derived list, web-of-trust distance
+(`src/wot_graph.rs`) and redeemed relay invite codes (`src/relay_invites.rs`).
+See "What is actually deployed" above; `whitelisted_pubkeys` is empty on the
+live relay, and an empty list with an active tier does **not** mean "admit
+everyone" (`docs/known-issues.md` §7).
 
-```yaml
-whitelisted_pubkeys:
-  - "hex_pubkey_1"  # Only these can connect
-  - "hex_pubkey_2"
-```
+- The relay's own pubkey and the relay admins always have access.
+- Enforced on both `verify_filters()` (read) and `handle_event()` (write).
+- A socket that hasn't finished NIP-42 gets `auth-required: …`; an
+  authenticated key that isn't admitted gets `restricted: Access denied: your
+  pubkey is not whitelisted on this relay`. Clients tell "sign in" from
+  "you're not admitted" by that prefix, so keep the split.
+- `restricted: Access denied to private group` is **per group**, not an
+  admission refusal: a REQ naming a private group you aren't in is closed
+  whole. Clients must not treat it as "not admitted" (obelisk-sky once sent
+  admitted accounts to its guest island over it).
 
-**How it works** (`src/groups_event_processor.rs`):
-- `is_allowed()` checks if the authenticated pubkey is in the whitelist
-- Empty whitelist = no restriction (all pubkeys allowed)
-- Relay's own pubkey always has access
-- Enforced at both `verify_filters()` (read) and `handle_event()` (write)
-- Requires NIP-42 authentication when whitelist is active
-
-### Current Whitelisted Pubkeys (3)
-
-| npub | Hex |
-|------|-----|
-| `npub1m9vsm9d8sy0pevcjhenwm4ny6l37dm2hsg4dnusna43ql3n5305qy4zlg4` | `d9590d95...` (owner) |
-| `npub1gxdhmu9swqduwhr6zptjy4ya693zp3ql28nemy4hd97kuufyrqdqwe5zfk` | `419b7df0...` |
-| `npub1ur853z967pvl8mnzglzvedgnzqsznkmzeuw7rvzw0dappfvke53srvd97k` | `e0cf4888...` |
-
-To add a new pubkey: edit `config/settings.local.yml`, add the hex pubkey, restart the container.
+To admit someone by hand, use the admin console or the runtime list rather
+than editing YAML; an invite link (`docs/relay-invites.md`) is usually simpler.
 
 ## NIP-29 Event Kinds
 
@@ -145,7 +142,7 @@ To add a new pubkey: edit `config/settings.local.yml`, add the hex pubkey, resta
 
 ## Group Types
 
-- **Public/Private** — Private groups require membership to read events
+- **Public/Private** — Private groups require membership to read events (relay admins read them too). Their kind 39000 stays visible to everyone unless `hidden`; their 39001/39002 only reach members
 - **Open/Closed** — Open groups auto-accept join requests; closed require admin approval
 - **Broadcast** — Only admins can post content; members can only join/leave
 
@@ -153,17 +150,17 @@ To add a new pubkey: edit `config/settings.local.yml`, add the hex pubkey, resta
 
 Config is loaded in priority order (later overrides earlier):
 1. `config/settings.yml` — defaults
-2. `config/settings.local.yml` — production overrides (whitelist, keys, URL)
+2. `config/settings.local.yml` — overrides (the live relay's are in `public-config/settings.local.yml`)
 3. Environment variables with `NIP29__` prefix
 
-Key settings in `config/settings.local.yml`:
+Key settings in `public-config/settings.local.yml`:
 ```yaml
 relay:
   relay_secret_key: "hex_private_key"
-  relay_url: "wss://relay.obelisk.ar"
+  relay_url: "wss://public.obelisk.ar"
   local_addr: "0.0.0.0:8080"
   db_path: "/app/db"
-  whitelisted_pubkeys: [...]
+  whitelisted_pubkeys: []   # empty on the live relay; admission is WoT + invites
   max_subscriptions: 50
   max_limit: 500
   websocket:
@@ -255,7 +252,7 @@ Included utilities (in Docker image):
 ## Upstream
 
 Forked from [verse-pbc/groups_relay](https://github.com/verse-pbc/groups_relay). Our customizations:
-- Pubkey whitelist in `config/settings.local.yml`
-- Production config for `wss://relay.obelisk.ar`
+- Admission tiers: blacklist, manual and follow lists, web of trust, relay invite codes
+- Production config for `wss://public.obelisk.ar` (`public-config/`)
 - `start.sh` launcher script
 - Roadmap for admin panel with Nostr authentication

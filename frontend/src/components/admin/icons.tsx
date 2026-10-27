@@ -118,3 +118,19 @@ export const DeployIcon = ({ class: className = '' }: IconProps) => (
     <path d="M3 6l7 3.5L17 6M10 9.5V17" {...stroke} />
   </svg>
 )
+
+/** Docs — an open book. */
+export const DocsIcon = ({ class: className = '' }: IconProps) => (
+  <svg {...base(className)}>
+    <path d="M10 5.5C8.5 4.3 6.3 3.8 3 4v11c3.3-.2 5.5.3 7 1.5 1.5-1.2 3.7-1.7 7-1.5V4c-3.3-.2-5.5.3-7 1.5Z" {...stroke} />
+    <path d="M10 5.5v11" {...stroke} />
+  </svg>
+)
+
+/** Logout — an arrow leaving a door frame. */
+export const LogoutIcon = ({ class: className = '' }: IconProps) => (
+  <svg {...base(className)}>
+    <path d="M8 3H4.5a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1H8" {...stroke} />
+    <path d="m13 6.5 3.5 3.5-3.5 3.5M16.5 10H8" {...stroke} />
+  </svg>
+)

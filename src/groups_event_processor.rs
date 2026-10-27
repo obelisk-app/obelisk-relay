@@ -182,6 +182,20 @@ impl GroupsRelayProcessor {
         self
     }
 
+    /// Every keyed limiter this processor checks. A keyed limiter keeps one
+    /// entry per pubkey it has ever seen until told to forget the idle ones,
+    /// so the server sweeps these periodically (see `server.rs`).
+    pub fn rate_limiters(&self) -> Vec<Arc<PubkeyLimiter>> {
+        let mut limiters: Vec<_> = self
+            .tier_limiters
+            .iter()
+            .flat_map(|tiers| tiers.values().cloned())
+            .collect();
+        limiters.extend(self.pubkey_limiter.iter().cloned());
+        limiters.extend(self.report_limiter.iter().cloned());
+        limiters
+    }
+
     /// The bucket for whichever tier admitted this pubkey.
     fn limiter_for(&self, pubkey: &PublicKey) -> Option<&Arc<PubkeyLimiter>> {
         let tiers = self.tier_limiters.as_ref()?;
@@ -442,10 +456,22 @@ impl EventProcessor for GroupsRelayProcessor {
                     .is_some_and(|kinds| kinds.iter().all(|k| k.as_u16() == KIND_NIP46_SIGNER))
             });
 
-        // Enforce pubkey whitelist
+        // Enforce pubkey whitelist. Same split as the write path in
+        // `handle_event`: a socket that has not finished NIP-42 is told to
+        // authenticate (clients only AUTH-and-retry on `auth-required:`), but
+        // an authenticated key that is not admitted gets `restricted:` -- AUTH
+        // will not help it, and answering `auth-required:` again left clients
+        // unable to tell "not signed in yet" from "not whitelisted", so the
+        // rejection surfaced late or as an authentication problem.
         if !signer_handshake && !self.is_allowed(&context.authed_pubkey) {
-            return Err(relay_builder::Error::auth_required(
-                "Authentication required: this relay only accepts whitelisted pubkeys".to_string(),
+            if context.authed_pubkey.is_none() {
+                return Err(relay_builder::Error::auth_required(
+                    "Authentication required: this relay only accepts whitelisted pubkeys"
+                        .to_string(),
+                ));
+            }
+            return Err(relay_builder::Error::restricted(
+                "Access denied: your pubkey is not whitelisted on this relay".to_string(),
             ));
         }
 
@@ -1256,6 +1282,50 @@ mod tests {
         );
         let processor = GroupsRelayProcessor::new(groups, admin_keys.public_key(), whitelist);
         (tmp_dir, processor, admin_keys, member)
+    }
+
+    /// Reads follow the same split as writes: anonymous sockets are told to
+    /// authenticate, authenticated-but-unadmitted keys are refused outright so
+    /// the client can say "not whitelisted" instead of retrying AUTH.
+    #[tokio::test]
+    async fn an_authenticated_unadmitted_read_is_restricted() {
+        let (_tmp_dir, processor, admin_keys, member) = closed_relay_processor().await;
+        let filters = vec![Filter::new().kind(Kind::Metadata).limit(1)];
+
+        let anonymous = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let err = processor
+            .verify_filters(&filters, empty_state(), &anonymous)
+            .unwrap_err();
+        assert!(
+            matches!(err, relay_builder::Error::AuthRequired { .. }),
+            "an unauthenticated read must read as auth-required, got {err:?}"
+        );
+
+        let stranger = EventContext {
+            authed_pubkey: Some(Keys::generate().public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let err = processor
+            .verify_filters(&filters, empty_state(), &stranger)
+            .unwrap_err();
+        assert!(
+            matches!(err, relay_builder::Error::Restricted { .. }),
+            "an authenticated, unadmitted read must be restricted, got {err:?}"
+        );
+
+        let as_member = EventContext {
+            authed_pubkey: Some(member.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        assert!(processor
+            .verify_filters(&filters, empty_state(), &as_member)
+            .is_ok());
     }
 
     /// Clients only AUTH-and-retry on `auth-required:`. Answering `restricted:`

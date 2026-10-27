@@ -19,9 +19,11 @@ import { LOGIN_METHOD_ICONS } from "./loginIcons"
 
 interface AdminAuthProps {
   onAuthenticated: () => void
+  /** Arrived here by signing out: wait for an explicit signer choice. */
+  fresh?: boolean
 }
 
-export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
+export const AdminAuth = ({ onAuthenticated, fresh = false }: AdminAuthProps) => {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const signer = useSigner() as NostrSigner | null
@@ -40,7 +42,7 @@ export const AdminAuth = ({ onAuthenticated }: AdminAuthProps) => {
    *
    * While this is set, nothing authenticates without an explicit choice.
    */
-  const [awaitingChoice, setAwaitingChoice] = useState(false)
+  const [awaitingChoice, setAwaitingChoice] = useState(fresh)
 
   const authenticateWithSigner = async (activeSigner: NostrSigner) => {
     setError(null)

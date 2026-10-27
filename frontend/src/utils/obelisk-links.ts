@@ -16,7 +16,11 @@ import { ownRelayUrl } from '../constants'
  */
 const OBELISK_ORIGIN = 'https://obelisk.ar'
 
-/** `/p/<npub>` — accepts npub, nprofile or bare hex at the other end. */
+/**
+ * `/p/<npub>`. The other end accepts npub or nprofile, but **not** bare hex:
+ * a 64-char hex is parsed as an event id there and 404s. Rules for these
+ * links: obelisk-design `development-style/nostr-links.md`.
+ */
 export function profileUrl(npub: string): string {
   return `${OBELISK_ORIGIN}/p/${npub}`
 }

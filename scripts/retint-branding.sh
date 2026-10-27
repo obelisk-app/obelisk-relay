@@ -49,10 +49,15 @@ OUT_DIR="${RETINT_OUT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/publ
 # The accent pair, and the same colour in the rgba() form the bundle also uses.
 # The earlier hand-made overrides replaced only the hex, leaving green glows and
 # focus rings scattered through a purple theme; doing both here fixes that.
-GREEN_HEX='b4f953'      ; PURPLE_HEX='a855f7'
-GREEN_HOVER='c5ff6e'    ; PURPLE_HOVER='c084fc'
-GREEN_RGB='180,249,83'  ; PURPLE_RGB='168,85,247'
-GREEN_RGB_SP='180, 249, 83' ; PURPLE_RGB_SP='168, 85, 247'
+#
+# Purple (public.obelisk.ar) unless another accent is asked for. Another relay
+# can wear its own colour with the same mechanism, e.g. Bitcoin orange:
+#   RETINT_ACCENT=f7931a RETINT_ACCENT_HOVER=ffa94d RETINT_ACCENT_RGB=247,147,26 \
+#   RETINT_OUT_DIR=/path/to/branding/assets scripts/retint-branding.sh <image>
+GREEN_HEX='b4f953'      ; PURPLE_HEX="${RETINT_ACCENT:-a855f7}"
+GREEN_HOVER='c5ff6e'    ; PURPLE_HOVER="${RETINT_ACCENT_HOVER:-c084fc}"
+GREEN_RGB='180,249,83'  ; PURPLE_RGB="${RETINT_ACCENT_RGB:-168,85,247}"
+GREEN_RGB_SP='180, 249, 83' ; PURPLE_RGB_SP="${PURPLE_RGB//,/, }"
 
 cid="$(docker create "$IMAGE")"
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
@@ -79,7 +84,7 @@ docker cp "$cid:/app/frontend/dist/assets/$css_name" - | tar -xO \
 # success case -- without it the script fails exactly when the tint is perfect.
 remaining="$(grep -o "$GREEN_HEX\|$GREEN_RGB" "$OUT_DIR/$css_name" | wc -l | tr -d ' ' || true)"
 
-echo "wrote public-config/branding/assets/$css_name"
+echo "wrote $OUT_DIR/$css_name"
 echo "green literals remaining: $remaining (expect 0)"
 echo
 echo "Now point compose.yml's public_relay mount at it:"

@@ -6,39 +6,42 @@ pull the same GHCR release tag as amd64 hosts.
 
 ## Current Release
 
-The relay-invites release published on 2026-10-27 is:
+The memory-apps release published on 2026-10-27 is:
 
 ```text
 Image:        ghcr.io/obelisk-app/obelisk-relay
-Release tag:  v2026.10.27-relay-invites.2
-Commit tag:   618bf11f73de
-Index digest: sha256:82fcac6d67504b61f7975e75a21ad1d302f13622dcb21a14f94813b8670b4e4e
+Release tag:  v2026.10.27-memory-apps
+Commit tag:   906f7c9d519b
+Index digest: sha256:48d775b3256433d527aa7f0b6d5d2720d17dc3901224ca0b3edf3d87888f6380
 Platforms:    linux/amd64, linux/arm64
 ```
 
 The index contains:
 
 ```text
-linux/amd64 sha256:057746532410a2c86b1eded938df9d3a2310e3d29b024be7751f0974f255e181
-linux/arm64 sha256:aec385358b2a74eee183f49b04f243c564f156062ef2e16eb0d87533a3a8657f
+linux/amd64 sha256:8b95fe5c94807cf1e51ab559df48c45b169e951acade2ac0588cd2182f18b9e4
+linux/arm64 sha256:b925181eb0485d8f3a510bbb99dce7884adc4856d423fb610db1f119988049c5
 ```
 
 Public tags that point at the same multi-arch index:
 
 ```text
-ghcr.io/obelisk-app/obelisk-relay:v2026.10.27-relay-invites.2
-ghcr.io/obelisk-app/obelisk-relay:618bf11f73de
+ghcr.io/obelisk-app/obelisk-relay:v2026.10.27-memory-apps
+ghcr.io/obelisk-app/obelisk-relay:906f7c9d519b
 ghcr.io/obelisk-app/obelisk-relay:latest
 ```
 
-Built on a 4-core amd64 workstation with `CARGO_BUILD_JOBS=3`, arm64
-cross-compiled: both platforms in 37 minutes. The git tag
-`v2026.10.27-relay-invites` (7d5c968) has no image of its own; its arm64
-half was being emulated and the build was lost to a restart, so `.2`
-replaced it.
+It is the PR #10 merge: the relay-invites work of `v2026.10.27-relay-invites.2`
+plus the memory-growth fix, Obelisk Apps manifests (kind 32390) without an
+`h` tag, `restricted:` answers for authenticated readers who aren't admitted,
+and the console profile card. Built on a 4-core amd64 workstation with
+`CARGO_BUILD_JOBS=3`, arm64 cross-compiled: both platforms in 40 minutes.
 
 The console changed in this release, so re-tint after deploying
 (`scripts/retint-branding.sh`, known-issues §11).
+
+Previous release: `v2026.10.27-relay-invites.2` (618bf11, index
+`sha256:82fcac6d67504b61f7975e75a21ad1d302f13622dcb21a14f94813b8670b4e4e`).
 
 ## Do Not Commit
 

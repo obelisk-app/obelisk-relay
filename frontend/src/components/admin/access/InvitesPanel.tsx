@@ -45,8 +45,32 @@ const STATUS_BADGE: Record<RelayInvite['status'], string> = {
   revoked: 'admin-status-badge-danger',
 }
 
-const copy = (text: string) => {
-  void navigator.clipboard?.writeText(text).catch(() => undefined)
+/**
+ * Copy, and say whether it worked. The Clipboard API is refused outside a
+ * secure context and by some browser policies, and used to fail silently
+ * here, so the button looked dead; fall back to a selected textarea.
+ */
+const copyText = async (text: string): Promise<boolean> => {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    let ok = false
+    try {
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    area.remove()
+    return ok
+  }
 }
 
 /**
@@ -70,6 +94,17 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
   const [busy, setBusy] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   const [created, setCreated] = useState<RelayInvite | null>(null)
+  // Which copy button just worked (or failed), so it can say so for a moment.
+  const [copied, setCopied] = useState<{ key: string; ok: boolean } | null>(null)
+
+  const copy = async (key: string, text: string) => {
+    const ok = await copyText(text)
+    setCopied({ key, ok })
+    setTimeout(() => setCopied(c => (c?.key === key ? null : c)), 2000)
+  }
+
+  const copyLabel = (key: string, label: string) =>
+    copied?.key === key ? (copied.ok ? 'Copied ✓' : 'Copy failed') : label
 
   const [codeForm, setCodeForm] = useState({ label: '', max_uses: 25, days: 30 })
   const [grantForm, setGrantForm] = useState({
@@ -183,17 +218,22 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
 
   const linkButtons = (code: string) => (
     <>
-      <button class="admin-action-btn admin-action-btn-secondary" onClick={() => copy(code)}>
-        Copy code
+      <button
+        class="admin-action-btn admin-action-btn-secondary"
+        onClick={() => void copy(`${code}:code`, code)}
+        aria-live="polite"
+      >
+        {copyLabel(`${code}:code`, 'Copy code')}
       </button>
       {INVITE_APPS.map(app => (
         <button
           key={app.id}
-          class="admin-action-btn admin-action-btn-secondary"
-          onClick={() => copy(inviteLink(app.base, code))}
+          class={`admin-action-btn ${copied?.key === `${code}:${app.id}` && copied.ok ? '' : 'admin-action-btn-secondary'}`}
+          onClick={() => void copy(`${code}:${app.id}`, inviteLink(app.base, code))}
           title={inviteLink(app.base, code)}
+          aria-live="polite"
         >
-          {app.label} link
+          {copyLabel(`${code}:${app.id}`, `Copy ${app.label} link`)}
         </button>
       ))}
     </>

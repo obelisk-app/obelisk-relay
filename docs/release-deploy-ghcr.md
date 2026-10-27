@@ -6,30 +6,39 @@ pull the same GHCR release tag as amd64 hosts.
 
 ## Current Release
 
-The admin/docs release published on 2026-06-04 is:
+The relay-invites release published on 2026-10-27 is:
 
 ```text
 Image:        ghcr.io/obelisk-app/obelisk-relay
-Release tag:  v2026.06.04-admin-docs
-Commit tag:   5c9e9c3e8846
-Index digest: sha256:31b155a541a48a2e20ab061d5e671b223c25169048ec35aa583597dc249ea221
+Release tag:  v2026.10.27-relay-invites.2
+Commit tag:   618bf11f73de
+Index digest: sha256:82fcac6d67504b61f7975e75a21ad1d302f13622dcb21a14f94813b8670b4e4e
 Platforms:    linux/amd64, linux/arm64
 ```
 
 The index contains:
 
 ```text
-linux/amd64 sha256:e2b210a8b40b2532c7daca5b293673c952e02d5ee8de8e2970c6753eeda87c84
-linux/arm64 sha256:943b16a6c1e52f85b4beb63ba3f6d5d5265a6fff128bdc93e9dd26de7052eb57
+linux/amd64 sha256:057746532410a2c86b1eded938df9d3a2310e3d29b024be7751f0974f255e181
+linux/arm64 sha256:aec385358b2a74eee183f49b04f243c564f156062ef2e16eb0d87533a3a8657f
 ```
 
 Public tags that point at the same multi-arch index:
 
 ```text
-ghcr.io/obelisk-app/obelisk-relay:v2026.06.04-admin-docs
-ghcr.io/obelisk-app/obelisk-relay:5c9e9c3e8846
+ghcr.io/obelisk-app/obelisk-relay:v2026.10.27-relay-invites.2
+ghcr.io/obelisk-app/obelisk-relay:618bf11f73de
 ghcr.io/obelisk-app/obelisk-relay:latest
 ```
+
+Built on a 4-core amd64 workstation with `CARGO_BUILD_JOBS=3`, arm64
+cross-compiled: both platforms in 37 minutes. The git tag
+`v2026.10.27-relay-invites` (7d5c968) has no image of its own; its arm64
+half was being emulated and the build was lost to a restart, so `.2`
+replaced it.
+
+The console changed in this release, so re-tint after deploying
+(`scripts/retint-branding.sh`, known-issues §11).
 
 ## Do Not Commit
 

@@ -42,12 +42,13 @@ able to act on it without opening an SSH session.
 
 | | |
 |---|---|
-| 🪜 **Admission is a ladder** | Three tiers, decided in that order: added by hand, followed by one of your reference accounts, or close enough in the follow graph. NIP-42 authenticated. A block list overrides all of it. |
+| 🪜 **Admission is a ladder** | Decided in this order: added by hand, followed by one of your reference accounts, invited with a code, or close enough in the follow graph. NIP-42 authenticated. A block list overrides all of it. |
+| 🎟️ **Relay invite codes** | A front door for brand-new keys. Admins, and people you grant a quota, create codes; apps redeem them silently with NIP-43, and again whenever the user makes a new key. The console shows who came in on whose code. See [docs/relay-invites.md](docs/relay-invites.md). |
 | ⚖️ **Budgets by distance** | Each tier publishes on a share of the rate budget — 6,000, 3,000 and 1,500 events a minute by default — because distance from your reference accounts is how much evidence you have. |
 | 🔎 **"Is this account allowed?"** | Paste an npub, hex key or NIP-05 address and the console names the tier that admits it, or why it is refused. |
 | 👥 **Server-side roles** | Admin / moderator / member, enforced by the relay rather than requested by the client. |
 | 🔒 **Private groups** | Content is filtered on read. Non-members get nothing — not a hidden UI. |
-| 🎫 **Invites** | Expiring, usage-capped, with a minimum code length so they cannot be guessed. |
+| 🎫 **Group invites** | Expiring, usage-capped, with a minimum code length so they cannot be guessed. Limits and use counts survive a restart. |
 | 🚩 **Moderation queue** | NIP-56 reports, one row per reported thing, counted by distinct reporters. The message is captured when the report arrives, so deleting it is not a way out. |
 | 🖥️ **Admin console** | Every screen below. No SSH, no YAML editing for day-to-day work. |
 | 📦 **Two commands** | `./setup.sh` gives you a relay. `./expose.sh` gives the world a way to reach it. |
@@ -248,6 +249,7 @@ Internet → Cloudflare edge → cloudflared sidecar → relay container (:8080)
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | Architecture, event-processing flow, event kinds |
 | [docs/known-issues.md](docs/known-issues.md) | Every sharp edge this deployment has actually hit, and the reasoning behind each fix |
+| [docs/relay-invites.md](docs/relay-invites.md) | Relay invitation codes: protocol (NIP-43 claim + NIP-98 API), usage rules, minter grants, client integration |
 | [docs/release-deploy-ghcr.md](docs/release-deploy-ghcr.md) | Multi-arch release, pinned deploys, rollback |
 | [ROADMAP.md](ROADMAP.md) | What is next |
 | [ABUSE.md](ABUSE.md) · [SECURITY.md](SECURITY.md) | Operator obligations and disclosure |

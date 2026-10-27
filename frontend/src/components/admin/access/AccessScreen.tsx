@@ -5,6 +5,7 @@ import { fetchProfiles, type NostrProfile } from '../../../services/ProfileFetch
 import { AccessSearch } from './AccessSearch'
 import { TierPanel } from './TierPanel'
 import { BlockedPanel } from './BlockedPanel'
+import { InvitesPanel } from './InvitesPanel'
 // The rules only: access mode, the rate ladder and the web-of-trust settings.
 // Its listing sections are gone -- the tier panels and the search bar say the
 // same thing, and two shapes for one fact is the confusion being removed here.
@@ -13,7 +14,7 @@ import { PoliciesPanel } from './PoliciesPanel'
 // on a screen of their own.
 import { ReferenceAccountsManager } from '../ReferenceAccountsManager'
 
-type Section = 'tier1' | 'tier2' | 'tier3' | 'blocked' | 'policies'
+type Section = 'tier1' | 'tier2' | 'tier3' | 'invites' | 'blocked' | 'policies'
 
 /**
  * Everything that decides who can connect, in one place.
@@ -107,7 +108,7 @@ export const AccessScreen = () => {
       id: 'tier1',
       label: 'Tier 1',
       count: summary?.tier1.total ?? null,
-      hint: 'Added by hand, the reference accounts themselves, and everyone they follow. Full publishing budget.',
+      hint: 'Added by hand, invited, the reference accounts themselves, and everyone they follow. Full publishing budget.',
     },
     {
       id: 'tier2',
@@ -120,6 +121,12 @@ export const AccessScreen = () => {
       label: 'Tier 3',
       count: summary ? hopCount(3) : null,
       hint: 'Three hops away. A quarter of the publishing budget, and the tier most likely to be incomplete.',
+    },
+    {
+      id: 'invites',
+      label: 'Invites',
+      count: summary?.tier1.invited ?? null,
+      hint: 'Invite codes, who may create them, and who came in on whose code. Invitees are in Tier 1.',
     },
     {
       id: 'blocked',
@@ -186,7 +193,7 @@ export const AccessScreen = () => {
                 key={`t1-${reloadKey}`}
                 tier={1}
                 title="Tier 1"
-                blurb="Added by hand, the reference accounts, and everyone they follow. These publish at the full rate budget."
+                blurb="Added by hand, invited with a code, the reference accounts, and everyone they follow. These publish at the full rate budget."
                 onInspect={setInspecting}
                 onRemove={async entry => {
                   await adminApi.removeFromWhitelist(entry.hex)
@@ -221,6 +228,10 @@ export const AccessScreen = () => {
             bulkActions={[promoteSelected, blockSelected]}
             onBulkComplete={changed}
           />
+        )}
+
+        {section === 'invites' && (
+          <InvitesPanel key={`i-${reloadKey}`} onInspect={setInspecting} onChanged={changed} />
         )}
 
         {section === 'blocked' && (

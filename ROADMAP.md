@@ -122,7 +122,8 @@ Leverage Nostr's social graph for automated trust decisions:
 
 - [ ] **WoT-based auto-whitelist** — Automatically whitelist pubkeys within N degrees of existing members
 - [ ] **Trust scores** — Display WoT distance in admin panel
-- [ ] **Vouching system** — Whitelisted users can vouch for others (with configurable limits)
+- [x] **Vouching system** — Admins grant chosen users quotas to mint relay invite codes; every redemption is attributed to its inviter (`docs/relay-invites.md`, shipped 2026-10-27)
+- [ ] **WoT-derived minting** — Grant invite quotas automatically by graph distance or tenure instead of by hand
 - [ ] **Integration with nostr-wot** — Use the WoT toolkit from the Obelisk ecosystem
 
 ---

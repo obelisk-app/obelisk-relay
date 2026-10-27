@@ -435,6 +435,16 @@ pub const DEFAULT_INVITE_TTL_SECS: u64 = 60 * 60 * 24 * 30;
 /// does not set one. Bounded so an invite that leaks has a blast radius.
 pub const DEFAULT_INVITE_MAX_USES: u32 = 100;
 
+/// When the expiry and use-cap defaults started being applied (2026-09-19 UTC).
+///
+/// Invites are rebuilt on startup by replaying their 9009 events, and the
+/// defaults live nowhere in those events -- they were applied in memory at
+/// creation and lost at the next restart, so every invite came back uncapped
+/// and immortal. Replay now re-applies them, but only to invites created after
+/// this point: older ones never had a limit and stay grandfathered (see
+/// docs/known-issues.md §15).
+pub const INVITE_LIMITS_SINCE: u64 = 1_789_776_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invite {
     pub event_id: EventId,
@@ -1198,23 +1208,18 @@ impl Group {
 
         match invite_data {
             // Valid invite that can be used
-            Some((invite_code, true, reusable, roles)) => {
+            Some((invite_code, true, _reusable, roles)) => {
                 // println!(
                 //     "[join_request] Invite code matched, adding member {}",
                 //     event.pubkey
                 // );
                 info!("Invite code matched, adding member {}", event.pubkey);
 
-                // Now modify the invite if needed (for single-use invites)
-                if !reusable {
-                    // For single-use invites, mark it as used
-                    // println!("[join_request] Single-use invite, marking as used");
-                    if let Some(invite) = self.invites.get_mut(invite_code) {
-                        invite.mark_used(event.pubkey, event.created_at);
-                        // Let the RefMut be dropped automatically at the end of this scope
-                    }
-                } else {
-                    // println!("[join_request] Reusable invite, no need to mark as used");
+                // Count the use for every invite. This used to run only for
+                // single-use invites, so a reusable invite's `uses` never moved
+                // and its `max_uses` was never reached.
+                if let Some(invite) = self.invites.get_mut(invite_code) {
+                    invite.mark_used(event.pubkey, event.created_at);
                 }
 
                 // Add the member with the roles we collected earlier
@@ -1417,7 +1422,21 @@ impl Group {
 
         let mut invite = Invite::new(invite_event.id, HashSet::from([GroupRole::Member]));
         invite.reusable = is_reusable;
+        Self::apply_invite_limits(&mut invite, invite_event, true);
 
+        self.invites.insert(invite_code.to_string(), invite);
+        self.update_state();
+        Ok(true)
+    }
+
+    /// Expiry and use ceiling for an invite, from its 9009 event.
+    ///
+    /// Shared by creation and by startup replay so the two cannot drift: the
+    /// replay path used to restore only the code and `reusable`, which is how
+    /// every invite lost its limits on restart. `with_defaults` is false for
+    /// grandfathered invites (see `INVITE_LIMITS_SINCE`), which then get only
+    /// what their tags say.
+    fn apply_invite_limits(invite: &mut Invite, invite_event: &Event, with_defaults: bool) {
         // Expiry, from an explicit `expiration` tag (NIP-40 spelling) or the
         // default. An invite is a credential; credentials expire.
         let explicit_expiry = invite_event
@@ -1426,25 +1445,24 @@ impl Group {
             .and_then(|t| t.content())
             .and_then(|v| v.parse::<u64>().ok())
             .map(Timestamp::from);
-        invite.expires_at = Some(explicit_expiry.unwrap_or_else(|| {
-            Timestamp::from(invite_event.created_at.as_secs() + DEFAULT_INVITE_TTL_SECS)
-        }));
+        invite.expires_at = explicit_expiry.or_else(|| {
+            with_defaults.then(|| {
+                Timestamp::from(invite_event.created_at.as_secs() + DEFAULT_INVITE_TTL_SECS)
+            })
+        });
 
         // Only reusable invites need a use ceiling; a single-use invite is
         // already bounded by `redeemed_by`.
-        if is_reusable {
+        if invite.reusable {
             let explicit_max = invite_event
                 .tags
                 .find(TagKind::custom("max_uses"))
                 .and_then(|t| t.content())
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|v| *v > 0);
-            invite.max_uses = Some(explicit_max.unwrap_or(DEFAULT_INVITE_MAX_USES));
+            invite.max_uses =
+                explicit_max.or_else(|| with_defaults.then_some(DEFAULT_INVITE_MAX_USES));
         }
-
-        self.invites.insert(invite_code.to_string(), invite);
-        self.update_state();
-        Ok(true)
     }
 
     pub fn leave_request(
@@ -1583,6 +1601,22 @@ impl Group {
     }
 
     pub fn load_join_request_from_event(&mut self, event: &Event) -> Result<(), Error> {
+        // Recount invite use from history. Replay must see the 9009s first
+        // (see `Groups::load_groups`), or the code is not known yet.
+        //
+        // Counts every 9021 that named a known code, including ones refused at
+        // the time because the invite was already spent. That can only
+        // over-count, i.e. err towards an invite running out sooner, never
+        // towards a spent invite coming back to life.
+        if let Some(code) = event
+            .tags
+            .find(TagKind::custom("code"))
+            .and_then(|t| t.content())
+        {
+            if let Some(invite) = self.invites.get_mut(code) {
+                invite.mark_used(event.pubkey, event.created_at);
+            }
+        }
         if !self.members.contains_key(&event.pubkey) {
             self.join_requests.insert(event.pubkey);
             self.update_timestamps(event);
@@ -1612,6 +1646,11 @@ impl Group {
 
             let mut invite = Invite::new(event.id, roles);
             invite.reusable = is_reusable;
+            Self::apply_invite_limits(
+                &mut invite,
+                event,
+                event.created_at.as_secs() >= INVITE_LIMITS_SINCE,
+            );
 
             self.invites.insert(code.to_string(), invite);
             self.update_timestamps(event);
@@ -2426,6 +2465,127 @@ mod tests {
             !invite.can_use_at(now),
             "a reusable invite must stop once it has been redeemed max_uses times"
         );
+    }
+
+    fn reusable_invite_tags(group_id: &str, code: &str, max_uses: u32) -> Vec<Tag> {
+        vec![
+            Tag::custom(TagKind::h(), [group_id]),
+            Tag::custom(TagKind::custom("code"), [code]),
+            Tag::custom(TagKind::custom("reusable"), &[] as &[String]),
+            Tag::custom(TagKind::custom("max_uses"), [max_uses.to_string()]),
+        ]
+    }
+
+    async fn join_with_code(group_id: &str, code: &str) -> Box<Event> {
+        let user = Keys::generate();
+        Box::new(
+            create_test_event(
+                &user,
+                9021,
+                vec![
+                    Tag::custom(TagKind::h(), [group_id]),
+                    Tag::custom(TagKind::custom("code"), [code]),
+                ],
+            )
+            .await,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_reusable_invite_counts_each_join_and_runs_out() {
+        // join_request used to call mark_used only for single-use invites, so a
+        // reusable invite's counter never moved and max_uses never bit.
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+        let code = "reusable-capped-0123456789";
+        let invite =
+            create_test_event(&admin_keys, 9009, reusable_invite_tags(&group_id, code, 2)).await;
+        group
+            .create_invite(&invite, &admin_keys.public_key())
+            .unwrap();
+
+        for _ in 0..2 {
+            let join = join_with_code(&group_id, code).await;
+            let joiner = join.pubkey;
+            group.join_request(join, &admin_keys.public_key()).unwrap();
+            assert!(group.members.contains_key(&joiner));
+        }
+        assert_eq!(group.invites.get(code).unwrap().uses, 2);
+
+        let late = join_with_code(&group_id, code).await;
+        let late_pk = late.pubkey;
+        group.join_request(late, &admin_keys.public_key()).unwrap();
+        assert!(
+            !group.members.contains_key(&late_pk),
+            "the third join must not get in on a two-use invite"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_invite_keeps_its_limits_and_its_use_count() {
+        // Startup rebuilds invites from 9009 + 9021 history. It used to restore
+        // only the code, so after any restart every invite was uncapped and
+        // never expired.
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+        let code = "replayed-capped-0123456789";
+        let mut tags = reusable_invite_tags(&group_id, code, 2);
+        tags.push(Tag::custom(TagKind::custom("expiration"), ["4102444800"]));
+        let invite = create_test_event(&admin_keys, 9009, tags).await;
+
+        group.load_invite_from_event(&invite).unwrap();
+        for _ in 0..2 {
+            group
+                .load_join_request_from_event(&*join_with_code(&group_id, code).await)
+                .unwrap();
+        }
+
+        let restored = group.invites.get(code).unwrap();
+        assert_eq!(restored.max_uses, Some(2));
+        assert_eq!(restored.expires_at, Some(Timestamp::from(4102444800)));
+        assert_eq!(restored.uses, 2);
+        assert!(
+            !restored.can_use(),
+            "a spent invite must stay spent across a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_invite_without_tags_gets_the_defaults_unless_grandfathered() {
+        let (admin_keys, _, _) = create_test_keys().await;
+        let (mut group, group_id) = create_test_group(&admin_keys).await;
+        let tags = |code: &str| {
+            vec![
+                Tag::custom(TagKind::h(), [group_id.as_str()]),
+                Tag::custom(TagKind::custom("code"), [code]),
+                Tag::custom(TagKind::custom("reusable"), &[] as &[String]),
+            ]
+        };
+
+        let fresh = create_test_event(&admin_keys, 9009, tags("fresh-invite-0123456789")).await;
+        group.load_invite_from_event(&fresh).unwrap();
+        let restored = group.invites.get("fresh-invite-0123456789").unwrap();
+        assert_eq!(restored.max_uses, Some(DEFAULT_INVITE_MAX_USES));
+        assert_eq!(
+            restored.expires_at,
+            Some(Timestamp::from(
+                fresh.created_at.as_secs() + DEFAULT_INVITE_TTL_SECS
+            ))
+        );
+
+        let old = UnsignedEvent::new(
+            admin_keys.public_key(),
+            Timestamp::from(INVITE_LIMITS_SINCE - 86_400),
+            Kind::Custom(9009),
+            tags("old-invite-0123456789ab"),
+            "",
+        )
+        .sign_with_keys(&admin_keys)
+        .unwrap();
+        group.load_invite_from_event(&old).unwrap();
+        let grandfathered = group.invites.get("old-invite-0123456789ab").unwrap();
+        assert_eq!(grandfathered.max_uses, None);
+        assert_eq!(grandfathered.expires_at, None);
     }
 
     #[test]

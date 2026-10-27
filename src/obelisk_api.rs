@@ -25,6 +25,7 @@ pub struct ObeliskHttpLimiter {
 pub enum ObeliskQuotaKind {
     Bootstrap,
     Messages,
+    Invites,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +163,35 @@ fn authenticate_nip98(
     uri: &Uri,
     method: &str,
 ) -> Result<ObeliskReadContext, Response> {
+    let pubkey = verify_nip98(state, headers, uri, method)?;
+
+    if !state.whitelist.is_empty()
+        && !state.whitelist.contains(&pubkey)
+        && pubkey != state.relay_public_key
+        && !state.admin_pubkeys.contains(&pubkey)
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Pubkey is not whitelisted on this relay",
+        ));
+    }
+
+    Ok(ObeliskReadContext {
+        pubkey,
+        relay_pubkey: state.relay_public_key,
+        admin_pubkeys: state.admin_pubkeys.clone(),
+    })
+}
+
+/// Verify a NIP-98 `Authorization: Nostr <base64 event>` header and return the
+/// signer, without any admission check. Callers decide what the signer may do;
+/// the invite API, for one, must answer keys that are not admitted yet.
+pub(crate) fn verify_nip98(
+    state: &ServerState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &str,
+) -> Result<PublicKey, Response> {
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -217,22 +247,7 @@ fn authenticate_nip98(
         ));
     }
 
-    if !state.whitelist.is_empty()
-        && !state.whitelist.contains(&event.pubkey)
-        && event.pubkey != state.relay_public_key
-        && !state.admin_pubkeys.contains(&event.pubkey)
-    {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "Pubkey is not whitelisted on this relay",
-        ));
-    }
-
-    Ok(ObeliskReadContext {
-        pubkey: event.pubkey,
-        relay_pubkey: state.relay_public_key,
-        admin_pubkeys: state.admin_pubkeys.clone(),
-    })
+    Ok(event.pubkey)
 }
 
 fn expected_http_url(state: &ServerState, uri: &Uri) -> String {

@@ -40,7 +40,7 @@ const BACKUP_DIR: &str = "backups";
 const BACKUP_PREFIX: &str = "config-reset-";
 const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
-const BACKUP_FILE_NAMES: [&str; 8] = [
+const BACKUP_FILE_NAMES: [&str; 9] = [
     SETTINGS_LOCAL_FILE,
     REFERENCE_ACCOUNTS_FILE,
     WHITELIST_RUNTIME_FILE,
@@ -49,6 +49,7 @@ const BACKUP_FILE_NAMES: [&str; 8] = [
     BLACKLIST_FILE,
     SETUP_OWNER_FILE,
     RELAY_OWNER_FILE,
+    crate::relay_invites::RELAY_INVITES_FILE,
 ];
 
 #[derive(Clone)]
@@ -774,6 +775,24 @@ fn verify_auth_event(event: &Event) -> Result<(), (StatusCode, Json<ErrorRespons
 
 fn is_admin(admin_state: &AdminState, pubkey: &PublicKey) -> bool {
     admin_state.admin_pubkeys.read().contains(pubkey)
+}
+
+/// The pubkey behind a valid admin session, for routes defined outside this
+/// module. Those routes still sit behind `require_admin_session`; this is the
+/// per-handler half of the belt and braces in known-issues §14.
+pub(crate) fn admin_session_pubkey(state: &ServerState, headers: &HeaderMap) -> Option<PublicKey> {
+    validate_session(&get_admin_state(state), headers)
+}
+
+/// Whether `pubkey` is the relay itself or an admin, including admins added at
+/// runtime from the console (which `ServerState::admin_pubkeys` does not see
+/// until a restart).
+pub(crate) fn is_relay_admin(state: &ServerState, pubkey: &PublicKey) -> bool {
+    *pubkey == state.relay_public_key
+        || state.admin_pubkeys.contains(pubkey)
+        || ADMIN_SHARED
+            .get()
+            .is_some_and(|admin_state| is_admin(admin_state, pubkey))
 }
 
 fn consume_challenge(
@@ -2195,6 +2214,12 @@ async fn handle_access_tier(
                 rows.push((pk, "follow_sync"));
             }
         }
+        // Invitees budget at 100% like a direct follow, so they are Tier 1.
+        for pk in state.whitelist.list_invited() {
+            if !rows.iter().any(|(existing, _)| *existing == pk) {
+                rows.push((pk, "invite"));
+            }
+        }
         if let Some(graph) = state.whitelist.wot().and_then(|o| o.graph().cloned()) {
             for hops in [0u8, 1u8] {
                 // Whole-tier pages: this is bounded by the root set and its
@@ -2322,6 +2347,7 @@ async fn handle_access_tier_summary(
         .into_iter()
         .filter(|pk| !blacklist.contains(pk))
         .count();
+    let invited = state.whitelist.list_invited().len();
 
     #[allow(clippy::type_complexity)]
     let (wot_total, per_hop, truncated, complete_to_hop, max_hops) = match state.whitelist.wot() {
@@ -2355,10 +2381,11 @@ async fn handle_access_tier_summary(
         "tier1": {
             "manual": manual,
             "follow_sync": follow_derived,
+            "invited": invited,
             "near_graph": near_graph,
             // Not a sum: the same key can appear in more than one source, so
             // the authoritative figure is what the tier page reports.
-            "total": std::cmp::max(manual + follow_derived, near_graph),
+            "total": std::cmp::max(manual + follow_derived + invited, near_graph),
         },
         "wot": {
             "enabled": state.whitelist.wot().is_some(),
@@ -2515,6 +2542,7 @@ pub fn admin_routes(state: Arc<ServerState>) -> Router<Arc<ServerState>> {
         .route("/reports", get(handle_reports_list))
         .route("/reports/resolve", post(handle_report_resolve))
         .route("/users/{pubkey}/events", delete(handle_user_events_delete))
+        .nest("/relay-invites", crate::invite_api::admin_routes())
         // route_layer, not layer: it runs only for routes this router matched, so
         // an unknown /api/admin path still 404s rather than reporting 401.
         .route_layer(middleware::from_fn_with_state(state, require_admin_session));
@@ -5153,6 +5181,8 @@ struct AccessSourcesResponse {
     manual: usize,
     /// Pulled from the reference accounts' contact lists by follow sync.
     follow_derived: usize,
+    /// Admitted by redeeming a relay invite code.
+    invited: usize,
     /// Blocked outright; overrides every tier above.
     blacklisted: usize,
     wot_enabled: bool,
@@ -5218,6 +5248,7 @@ async fn handle_access_sources(
         budget_ladder,
         manual: state.whitelist.list_manual().len(),
         follow_derived: state.whitelist.list_follow_derived().len(),
+        invited: state.whitelist.list_invited().len(),
         blacklisted: state.whitelist.blacklist().len(),
         wot_enabled: wot.is_some(),
         wot_admitted,
@@ -5243,8 +5274,8 @@ struct AccessCheckResponse {
     hex: String,
     npub: String,
     admitted: bool,
-    /// `blacklist`, `manual`, `follow_sync`, `web_of_trust`, `open_relay`, or
-    /// `none`.
+    /// `blacklist`, `manual`, `follow_sync`, `invite`, `web_of_trust`,
+    /// `open_relay`, or `none`.
     tier: &'static str,
     /// Hops from the nearest root, when the graph could place them.
     hops: Option<u8>,
@@ -5299,6 +5330,20 @@ async fn handle_access_check(
             "follow_sync",
             true,
             "Followed by a reference account, via follow sync.".to_string(),
+        )
+    } else if let Some((code, inviter, _at)) = whitelist
+        .list_invited()
+        .contains(&pk)
+        .then(|| state.relay_invites.invited_by(&pk))
+        .flatten()
+    {
+        (
+            "invite",
+            true,
+            format!(
+                "Redeemed invite code {code}, shared by {}.",
+                inviter.to_bech32().unwrap_or_else(|_| inviter.to_hex())
+            ),
         )
     } else if let Some(hops) = hops {
         (

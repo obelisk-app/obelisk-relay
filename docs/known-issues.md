@@ -524,3 +524,45 @@ delivered only to its `p`-tagged recipients, its author and relay admins. It is
 plaintext SDP, so it carries ICE candidates, which include IP addresses, and before
 this change any admitted subscriber could read them. A client must be authenticated
 *as the recipient* to receive its signals. Untagged 25050 is unchanged.
+
+---
+
+## 22. Relay invite claims bypass admission, on purpose
+
+**Severity: deliberate exemption. Read before adding any new gate to `handle_event`.**
+
+Kind 28934 (NIP-43 join request, `["claim", <code>]`) is handled by
+`handle_relay_claim` *before* `is_allowed`, because its author is by definition
+not admitted yet: that's the whole point of an invite. It is the second
+exemption after NIP-46 signer traffic (§1). Any new gate added in front of
+admission has to keep both, or newcomers with a code are refused forever with
+a generic `restricted:`, and the apps can't tell an exhausted code from a
+broken relay.
+
+Kept narrow:
+
+- The blacklist is checked first. A banned key can't spend or launder a code.
+- Nothing is stored or broadcast. 28934 is ephemeral, and the handler returns no
+  store commands.
+- `created_at` must be within 10 minutes of now.
+- The only effect is on `config/relay_invites.json` and the in-memory invite
+  tier.
+
+**Every distinct pubkey costs a use, including key rotation.** The apps store the
+code and replay it when the user makes a new key, and that replay spends a use.
+This is intended: `max_uses` limits keys let in. If a code "runs out early",
+check its redemptions in **Access → Invites → Referrals** before suspecting a
+bug.
+
+**Revoking a code doesn't remove the people who used it** unless you choose
+"Revoke and remove". Removing an invitee only removes the *invite* tier: if a
+reference account follows them, they are still admitted. Block them to make it
+final.
+
+**Group invite limits now survive restarts.** Before this release, startup replay
+of 9009 events restored only the code and `reusable`. Every invite came back
+with no expiry and no cap, and reusable invites never counted uses at all, so
+`max_uses` was never enforced (§15). Replay now restores `expiration` and
+`max_uses` from tags and recounts uses from replayed 9021s. Invites created
+before `INVITE_LIMITS_SINCE` (2026-09-19) with no explicit tags stay
+grandfathered as unlimited.

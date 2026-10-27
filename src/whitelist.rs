@@ -2,6 +2,7 @@ use crate::blacklist::Blacklist;
 use crate::wot::WotOracle;
 use nostr_sdk::prelude::PublicKey;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -22,6 +23,8 @@ pub enum AccessTier {
     Manual,
     /// Followed by a reference account, via follow sync.
     FollowSync,
+    /// Redeemed a relay invitation code (see `relay_invites`).
+    Invite,
     /// Reached through the follow graph, at this many hops.
     WebOfTrust(u8),
     /// Admitted only because nothing restricts access.
@@ -37,6 +40,7 @@ impl AccessTier {
             AccessTier::Relay => "relay",
             AccessTier::Manual => "manual",
             AccessTier::FollowSync => "follow_sync",
+            AccessTier::Invite => "invite",
             AccessTier::WebOfTrust(_) => "web_of_trust",
             AccessTier::Open => "open_relay",
             AccessTier::Denied => "denied",
@@ -76,6 +80,9 @@ impl AccessTier {
             // follow sync *is* the one-hop set — so they share a budget rather
             // than appearing as two rungs with identical numbers.
             AccessTier::FollowSync | AccessTier::WebOfTrust(0..=1) => 100,
+            // Someone with minting rights vouched for this person directly, by
+            // handing them a code -- the same evidence as a direct follow.
+            AccessTier::Invite => 100,
             AccessTier::WebOfTrust(2) => 50,
             AccessTier::WebOfTrust(_) => 25,
             AccessTier::Open => 10,
@@ -90,7 +97,7 @@ impl AccessTier {
         match self {
             AccessTier::Relay | AccessTier::Manual => "manual",
             // One bucket: follow sync and one hop are the same people.
-            AccessTier::FollowSync | AccessTier::WebOfTrust(0..=1) => "direct",
+            AccessTier::FollowSync | AccessTier::WebOfTrust(0..=1) | AccessTier::Invite => "direct",
             AccessTier::WebOfTrust(2) => "wot_mid",
             AccessTier::WebOfTrust(_) => "wot_far",
             AccessTier::Open => "open",
@@ -104,6 +111,7 @@ impl AccessTier {
             AccessTier::Relay => "Relay or admin".to_string(),
             AccessTier::Manual => "Added by hand".to_string(),
             AccessTier::FollowSync => "Followed by a reference account".to_string(),
+            AccessTier::Invite => "Redeemed an invite code".to_string(),
             AccessTier::WebOfTrust(0) => "A reference account".to_string(),
             AccessTier::WebOfTrust(1) => "Followed by a reference account".to_string(),
             AccessTier::WebOfTrust(hops) => format!("{hops} hops away in the follow graph"),
@@ -122,6 +130,13 @@ pub struct Whitelist {
     inner: Arc<RwLock<Vec<PublicKey>>>,
     /// Follow-derived pubkeys (from reference account sync)
     follow_derived: Arc<RwLock<Vec<PublicKey>>>,
+    /// Pubkeys admitted by redeeming a relay invite code. Owned by
+    /// `RelayInviteStore`, which persists it; this is the hot-path copy.
+    ///
+    /// Deliberately *not* consulted by [`Self::is_empty`]: an invite admits a
+    /// person, it does not restrict anyone else. Counting it would mean the
+    /// first redemption on an open relay closed the relay to everybody else.
+    invited: Arc<RwLock<HashSet<PublicKey>>>,
     /// Blacklist that overrides whitelist membership
     blacklist: Blacklist,
     /// Optional Web-of-Trust tier. When present, a pubkey the oracle has
@@ -165,6 +180,7 @@ impl Whitelist {
         Self {
             inner: Arc::new(RwLock::new(pubkeys)),
             follow_derived: Arc::new(RwLock::new(Vec::new())),
+            invited: Arc::new(RwLock::new(HashSet::new())),
             blacklist,
             wot: Arc::new(RwLock::new(None)),
         }
@@ -181,8 +197,8 @@ impl Whitelist {
     }
 
     /// Check if a pubkey may use this relay: blacklisted keys are always
-    /// refused, then manual, follow-derived, and Web-of-Trust admission are
-    /// tried in turn.
+    /// refused, then manual, follow-derived, invite, and Web-of-Trust admission
+    /// are tried in turn.
     ///
     /// The WoT check only reads the oracle's cache — resolution happens in
     /// `WotAdmissionMiddleware` after NIP-42 auth, because this is called from
@@ -191,7 +207,10 @@ impl Whitelist {
         if self.blacklist.contains(pk) {
             return false;
         }
-        if self.inner.read().contains(pk) || self.follow_derived.read().contains(pk) {
+        if self.inner.read().contains(pk)
+            || self.follow_derived.read().contains(pk)
+            || self.invited.read().contains(pk)
+        {
             return true;
         }
         self.wot.read().as_ref().is_some_and(|wot| wot.admits(pk))
@@ -211,6 +230,9 @@ impl Whitelist {
         }
         if self.follow_derived.read().contains(pk) {
             return AccessTier::FollowSync;
+        }
+        if self.invited.read().contains(pk) {
+            return AccessTier::Invite;
         }
         if let Some(wot) = self.wot.read().clone() {
             if let Some(hops) = wot.cached(pk).and_then(|v| v.hops) {
@@ -305,7 +327,10 @@ impl Whitelist {
         if self.blacklist.contains(pk) {
             return false;
         }
-        if self.inner.read().contains(pk) || self.follow_derived.read().contains(pk) {
+        if self.inner.read().contains(pk)
+            || self.follow_derived.read().contains(pk)
+            || self.invited.read().contains(pk)
+        {
             return false;
         }
         wot.cached(pk).is_none()
@@ -369,6 +394,31 @@ impl Whitelist {
     /// Number of whitelisted pubkeys (manual + follow-derived, deduplicated, excluding blacklisted).
     pub fn len(&self) -> usize {
         self.list().len()
+    }
+
+    /// Replace the invite-admitted set, from `RelayInviteStore::admitted_pubkeys`.
+    pub fn set_invited(&self, pubkeys: Vec<PublicKey>) {
+        *self.invited.write() = pubkeys.into_iter().collect();
+    }
+
+    /// Admit one pubkey through the invite tier. Returns true if it was new.
+    pub fn add_invited(&self, pk: PublicKey) -> bool {
+        self.invited.write().insert(pk)
+    }
+
+    /// Withdraw a pubkey's invite admission. Other tiers are unaffected.
+    pub fn remove_invited(&self, pk: &PublicKey) -> bool {
+        self.invited.write().remove(pk)
+    }
+
+    /// Pubkeys admitted by an invite, excluding blacklisted ones.
+    pub fn list_invited(&self) -> Vec<PublicKey> {
+        self.invited
+            .read()
+            .iter()
+            .filter(|pk| !self.blacklist.contains(pk))
+            .copied()
+            .collect()
     }
 
     /// Replace the entire follow-derived set.
@@ -633,5 +683,52 @@ mod tests {
         assert!(list.contains(&manual));
         assert!(list.contains(&followed));
         assert!(!list.contains(&Keys::generate().public_key()));
+    }
+
+    #[test]
+    fn an_invite_admits_without_closing_an_open_relay() {
+        let list = whitelist(vec![]);
+        let invited = Keys::generate().public_key();
+        list.add_invited(invited);
+
+        assert!(
+            list.is_empty(),
+            "the first redemption must not turn an open relay into a closed one"
+        );
+        assert_eq!(list.tier_of(&invited), AccessTier::Invite);
+        assert_eq!(
+            list.tier_of(&Keys::generate().public_key()),
+            AccessTier::Open
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invite_admits_on_a_wot_relay_and_the_blacklist_still_wins() {
+        let list = whitelist(vec![]);
+        list.set_wot(Some(unreachable_oracle(vec![])));
+        let invited = Keys::generate().public_key();
+        assert!(!list.admits(Some(&invited), |_| false));
+
+        list.add_invited(invited);
+        assert!(list.admits(Some(&invited), |_| false));
+        assert!(!list.needs_wot_resolution(&invited));
+        assert_eq!(list.tier_of(&invited), AccessTier::Invite);
+
+        list.blacklist().add(invited);
+        assert!(!list.admits(Some(&invited), |_| false));
+        assert!(list.list_invited().is_empty());
+
+        list.blacklist().remove(&invited);
+        list.remove_invited(&invited);
+        assert!(!list.admits(Some(&invited), |_| false));
+    }
+
+    #[test]
+    fn invite_tier_budgets_like_a_direct_vouch() {
+        assert_eq!(AccessTier::Invite.budget_percent(), 100);
+        assert_eq!(
+            AccessTier::Invite.as_budget_key(),
+            AccessTier::FollowSync.as_budget_key()
+        );
     }
 }

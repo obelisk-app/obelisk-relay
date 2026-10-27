@@ -14,12 +14,14 @@ pub mod group_state_filter;
 pub mod groups;
 pub mod groups_event_processor;
 pub mod handler;
+pub mod invite_api;
 pub mod metrics;
 pub mod metrics_handler;
 pub mod obelisk_api;
 pub mod obelisk_index;
 pub mod pruner;
 pub mod reference_accounts;
+pub mod relay_invites;
 #[cfg(test)]
 pub mod relay_middleware_integration_tests;
 #[cfg(test)]

@@ -23,6 +23,11 @@ the `wot-oracle` sidecar is **not** required; it is behind a compose profile and
 is normally not running. At the time of writing that tier admits ~144,000
 accounts within 3 hops. See `src/whitelist.rs` and `src/wot_graph.rs`.
 
+A fourth path, **relay invite codes**, admits a specific key that redeemed a
+code (NIP-43 kind 28934). Codes are minted by admins or by users an admin
+granted a quota; usage and who-invited-whom live in `config/relay_invites.json`.
+See `docs/relay-invites.md` and `src/relay_invites.rs`.
+
 Enabling WoT *narrows* an otherwise-open relay rather than widening it, because
 an empty whitelist plus an active tier must not mean "admit everyone" — see
 `docs/known-issues.md` §7.
@@ -132,6 +137,7 @@ To add a new pubkey: edit `config/settings.local.yml`, add the hex pubkey, resta
 | 9009 | Create invite | Admin |
 | 9021 | Join request | Any whitelisted user |
 | 9022 | Leave request | Group member |
+| 28934 | Relay invite claim (NIP-43) | Anyone not blocked — exempt from admission; see `docs/relay-invites.md` |
 | 39000 | Group metadata (replaceable) | Relay |
 | 39001 | Group admins (replaceable) | Relay |
 | 39002 | Group members (replaceable) | Relay |

@@ -395,6 +395,11 @@ impl Groups {
                         scope
                     );
 
+                    // Invites before join requests: a 9021 replay recounts the
+                    // use of the code it names, which needs the 9009 loaded.
+                    let mut historical_events: Vec<Event> = historical_events.into_iter().collect();
+                    historical_events
+                        .sort_by_key(|e| (e.kind != KIND_GROUP_CREATE_INVITE_9009, e.created_at));
                     for event in historical_events {
                         if event.kind == KIND_GROUP_CREATE_9007 {
                             debug!("[{}] Found creation event in scope {:?}", group_id, scope);

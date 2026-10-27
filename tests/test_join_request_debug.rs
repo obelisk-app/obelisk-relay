@@ -54,7 +54,8 @@ async fn test_join_request_generates_correct_events() {
     println!("Group creation returned {} commands", commands.len());
 
     // Create invite
-    let invite_code = "TESTINVITE123";
+    // At least MIN_INVITE_CODE_LEN (16): shorter codes are refused (known-issues §15).
+    let invite_code = "TESTINVITE123456";
     let invite_event = EventBuilder::new(KIND_GROUP_CREATE_INVITE_9009, "")
         .tags(vec![
             Tag::custom(TagKind::h(), [group_id]),

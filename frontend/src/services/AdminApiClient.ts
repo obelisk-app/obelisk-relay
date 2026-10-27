@@ -468,6 +468,61 @@ export class AdminApiClient {
     return this.request(`/api/admin/blacklist/${hex}`, { method: 'DELETE' })
   }
 
+  // Relay invitation codes — see docs/relay-invites.md.
+
+  async getRelayInvites(): Promise<RelayInviteList> {
+    return this.request('/api/admin/relay-invites')
+  }
+
+  async createRelayInvite(opts: {
+    label?: string
+    /** 0 means unlimited. */
+    max_uses?: number
+    /** Seconds; 0 means never. */
+    expires_in?: number
+  }): Promise<RelayInvite> {
+    return this.request('/api/admin/relay-invites', {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    })
+  }
+
+  async revokeRelayInvite(code: string, evict = false): Promise<{ revoked: string; evicted: number }> {
+    return this.request(
+      `/api/admin/relay-invites/codes/${encodeURIComponent(code)}?evict=${evict}`,
+      { method: 'DELETE' },
+    )
+  }
+
+  async getInviteMinters(): Promise<InviteMinter[]> {
+    return this.request('/api/admin/relay-invites/minters')
+  }
+
+  async grantInviteMinter(grant: {
+    pubkey: string
+    max_codes?: number
+    max_uses_per_code?: number
+    max_total_admits?: number
+    max_ttl_days?: number
+  }): Promise<InviteGrant> {
+    return this.request('/api/admin/relay-invites/minters', {
+      method: 'POST',
+      body: JSON.stringify(grant),
+    })
+  }
+
+  async revokeInviteMinter(hex: string): Promise<void> {
+    return this.request(`/api/admin/relay-invites/minters/${hex}`, { method: 'DELETE' })
+  }
+
+  async getInviteReferrals(): Promise<InviteReferral[]> {
+    return this.request('/api/admin/relay-invites/referrals')
+  }
+
+  async evictInvitee(hex: string): Promise<void> {
+    return this.request(`/api/admin/relay-invites/invitees/${hex}`, { method: 'DELETE' })
+  }
+
   async deleteGroup(id: string): Promise<void> {
     return this.request(`/api/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' })
   }
@@ -873,7 +928,7 @@ export interface AccessCheck {
   hex: string
   npub: string
   admitted: boolean
-  tier: 'blacklist' | 'manual' | 'follow_sync' | 'web_of_trust' | 'open_relay' | 'none'
+  tier: 'blacklist' | 'manual' | 'follow_sync' | 'invite' | 'web_of_trust' | 'open_relay' | 'none'
   /** Hops from the nearest root, when the graph could place them. */
   hops: number | null
   explanation: string
@@ -1083,7 +1138,66 @@ export interface TierEntry {
    * behave differently: remove a `follow_sync` entry and it returns on the next
    * sync, whereas `manual` stays removed.
    */
-  source: 'manual' | 'follow_sync' | 'reference' | 'follows_reference' | 'web_of_trust'
+  source: 'manual' | 'follow_sync' | 'invite' | 'reference' | 'follows_reference' | 'web_of_trust'
+}
+
+export interface RelayInviteRedemption {
+  pubkey: string
+  npub: string
+  at: number
+  /** Set when an admin withdrew this person's invite admission. */
+  evicted_at?: number
+}
+
+export interface RelayInvite {
+  code: string
+  label: string | null
+  created_by: string
+  created_by_npub: string
+  created_by_admin: boolean
+  created_at: number
+  /** Null means unlimited. */
+  max_uses: number | null
+  uses: number
+  /** Null means it never expires. */
+  expires_at: number | null
+  revoked_at: number | null
+  status: 'active' | 'revoked' | 'expired' | 'exhausted'
+  redemptions: RelayInviteRedemption[]
+}
+
+export interface InviteGrant {
+  pubkey: string
+  npub: string
+  granted_by: string
+  granted_at: number
+  max_codes: number
+  max_uses_per_code: number
+  max_total_admits: number
+  max_ttl_secs: number
+}
+
+export interface InviteMinter extends InviteGrant {
+  active_codes: number
+  admits_used: number
+}
+
+export interface RelayInviteList {
+  invites: RelayInvite[]
+  minters: InviteGrant[]
+  active_codes: number
+  total_admitted: number
+}
+
+export interface InviteReferral {
+  inviter: string
+  inviter_npub: string
+  is_admin_code: boolean
+  has_grant: boolean
+  /** Hex pubkey of whoever invited the inviter, when they came in on a code. */
+  invited_by: string | null
+  total_admitted: number
+  codes: RelayInvite[]
 }
 
 export interface TierPage {
@@ -1100,7 +1214,14 @@ export interface TierPage {
 }
 
 export interface AccessTierSummary {
-  tier1: { manual: number; follow_sync: number; near_graph: number; total: number }
+  tier1: {
+    manual: number
+    follow_sync: number
+    /** Admitted by redeeming a relay invite code. */
+    invited: number
+    near_graph: number
+    total: number
+  }
   wot: {
     enabled: boolean
     total: number

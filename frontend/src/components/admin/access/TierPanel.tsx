@@ -12,6 +12,7 @@ const PAGE = 100
 const SOURCE_LABEL: Record<TierEntry['source'], string> = {
   manual: 'added by hand',
   follow_sync: 'from follow sync',
+  invite: 'redeemed an invite',
   reference: 'reference account',
   follows_reference: 'followed by a reference account',
   web_of_trust: 'follow graph',

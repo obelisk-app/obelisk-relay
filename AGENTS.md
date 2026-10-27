@@ -106,9 +106,14 @@ Called before delivering each event to a subscriber.
 
 #### `handle_event()` — Write Processing
 Called when a client sends an EVENT.
-1. **Whitelist enforcement** — rejects non-whitelisted pubkeys
-2. **Unmanaged groups** — allows events for groups not yet created (NIP-29 spec)
-3. **Kind routing** — routes to the appropriate handler:
+1. **Blacklist** — the event's author, whatever the session
+2. **Exemptions** — NIP-46 signer traffic (24133), and relay invite claims
+   (28934, `handle_relay_claim`; see `docs/relay-invites.md`), which by design
+   come from keys that are not admitted yet
+3. **Admission** — `is_allowed()`: `auth-required:` if not authenticated,
+   `restricted:` if authenticated but not admitted
+4. **Unmanaged groups** — allows events for groups not yet created (NIP-29 spec)
+5. **Kind routing** — routes to the appropriate handler:
 
 | Kind | Handler | What Happens |
 |------|---------|-------------|
@@ -121,22 +126,26 @@ Called when a client sends an EVENT.
 | 9001 | `handle_remove_user` | Admin removes user from group |
 | 9008 | `handle_delete_group` | Deletes group and all its data |
 | 9005 | `handle_delete_event` | Moderator deletes specific content |
-| 9009 | `handle_create_invite` | Creates invite code |
+| 9009 | `handle_create_invite` | Creates a group invite code |
+| 28934 | `handle_relay_claim` | Redeems a *relay* invite code (before admission) |
 | other+h-tag | `handle_group_content` | Stores chat messages, etc. |
 | other | pass-through | Non-group events stored directly |
 
 ### Whitelist Logic
+Admission is one rule, `Whitelist::admits` (`src/whitelist.rs`), which
+`is_allowed()` and the unindexed-query budget both call:
+
 ```rust
 fn is_allowed(&self, pubkey: &Option<PublicKey>) -> bool {
-    if self.whitelisted_pubkeys.is_empty() {
-        return true;  // No whitelist = open relay
-    }
-    match pubkey {
-        Some(pk) => self.whitelisted_pubkeys.contains(pk) || *pk == self.relay_pubkey,
-        None => false,  // Must authenticate if whitelist exists
-    }
+    self.whitelist.admits(pubkey.as_ref(), |pk| self.is_relay_admin(pk))
 }
+// admits: blacklist → open relay (nothing restricts) → contains(pk) || admin
+// contains: manual → follow-derived → invite → web-of-trust
 ```
+
+The invite tier (`AccessTier::Invite`) never makes an open relay closed:
+`is_empty()` ignores it. Its contents are owned and persisted by
+`RelayInviteStore` (`config/relay_invites.json`).
 
 ---
 

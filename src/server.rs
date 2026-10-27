@@ -93,6 +93,9 @@ pub struct ServerState {
     /// Snapshots of reported content, so the queue still has something to show
     /// after the original message is deleted or pruned.
     pub report_evidence: Arc<crate::reports::EvidenceStore>,
+    /// Relay invitation codes and minter grants. Shared with the event
+    /// processor, which redeems codes as kind 28934 claims arrive.
+    pub relay_invites: crate::relay_invites::RelayInviteStore,
     /// The live connection limiter, so the admin console can report what is
     /// actually being enforced rather than only what is saved in the file. The
     /// two differ between a save and the restart that applies it.
@@ -474,6 +477,12 @@ pub async fn run_server(
     // the admin API reads them when the original message is gone.
     let report_evidence = Arc::new(crate::reports::EvidenceStore::new(Some(config_dir)));
 
+    // Relay invitation codes. Their admissions seed the whitelist's invite tier
+    // here, before the first connection, so a restart never briefly locks out
+    // people who came in on a code.
+    let relay_invites = crate::relay_invites::RelayInviteStore::new(Some(config_dir));
+    whitelist.set_invited(relay_invites.admitted_pubkeys());
+
     let mut groups_processor = GroupsRelayProcessor::with_admin_pubkeys(
         groups.clone(),
         relay_keys.public_key,
@@ -481,7 +490,8 @@ pub async fn run_server(
         whitelist.clone(),
     );
     groups_processor = groups_processor
-        .with_report_evidence(Arc::clone(&report_evidence), config_dir.to_path_buf());
+        .with_report_evidence(Arc::clone(&report_evidence), config_dir.to_path_buf())
+        .with_relay_invites(relay_invites.clone(), config_dir.to_path_buf());
     if let Some(index) = &obelisk_index {
         groups_processor = groups_processor.with_obelisk_index(index.clone());
     }
@@ -741,6 +751,7 @@ pub async fn run_server(
         connection_limiter: Arc::clone(&connection_limiter),
         reports: crate::reports::ReportsState::new(Some(config_dir)),
         report_evidence: Arc::clone(&report_evidence),
+        relay_invites: relay_invites.clone(),
     });
 
     let cors = CorsLayer::new()
@@ -849,6 +860,7 @@ pub async fn run_server(
                     get(obelisk_api::handle_messages),
                 ),
         )
+        .nest("/api/invites", crate::invite_api::minter_routes())
         .nest("/api/admin", admin::admin_routes(Arc::clone(&app_state)))
         .nest("/api", admin::public_api_routes())
         .layer(TimeoutLayer::new(Duration::from_secs(30)))

@@ -5,6 +5,9 @@ use crate::groups::{
     KIND_GROUP_USER_JOIN_REQUEST_9021, KIND_GROUP_USER_LEAVE_REQUEST_9022, NON_GROUP_ALLOWED_KINDS,
 };
 use crate::obelisk_index::ObeliskIndex;
+use crate::relay_invites::{
+    RedeemOutcome, RelayInviteStore, CLAIM_FRESHNESS_SECS, KIND_RELAY_CLAIM,
+};
 use crate::whitelist::{AccessTier, Whitelist};
 use crate::Groups;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
@@ -83,6 +86,9 @@ pub struct GroupsRelayProcessor {
     /// Optional optimized Obelisk read index. Normal relay behavior does not
     /// depend on this; it is updated only after events pass relay validation.
     obelisk_index: Option<Arc<ObeliskIndex>>,
+    /// Relay invitation codes, redeemed with NIP-43 kind 28934. None leaves
+    /// 28934 with no meaning, as before.
+    relay_invites: Option<(RelayInviteStore, Arc<std::path::PathBuf>)>,
 }
 
 impl std::fmt::Debug for GroupsRelayProcessor {
@@ -120,6 +126,7 @@ impl GroupsRelayProcessor {
             report_evidence: None,
             config_dir: None,
             obelisk_index: None,
+            relay_invites: None,
         }
     }
 
@@ -270,6 +277,92 @@ impl GroupsRelayProcessor {
     pub fn with_obelisk_index(mut self, obelisk_index: Arc<ObeliskIndex>) -> Self {
         self.obelisk_index = Some(obelisk_index);
         self
+    }
+
+    /// Give kind 28934 its meaning: redeem a relay invitation code.
+    pub fn with_relay_invites(
+        mut self,
+        store: RelayInviteStore,
+        config_dir: std::path::PathBuf,
+    ) -> Self {
+        self.relay_invites = Some((store, Arc::new(config_dir)));
+        self
+    }
+
+    /// Redeem a NIP-43 claim: `["claim", <code>]`, signed by the key to admit.
+    ///
+    /// Runs *before* admission, because the whole point is that the author is
+    /// not admitted yet. That makes it the third exemption after NIP-46 signer
+    /// traffic, so it is kept narrow: nothing is stored or broadcast (28934 is
+    /// ephemeral), the event must be fresh, and the only effect is on the
+    /// invite store and the invite tier. The blacklist has already been checked
+    /// by the caller -- a banned key cannot launder itself through a code.
+    ///
+    /// The signature is the proof of key ownership; NIP-42 is not required.
+    /// A client that adds NIP-70's `-` tag, as NIP-43 suggests, is asked to
+    /// AUTH first by `Nip70Middleware`, and that works too.
+    /// relay_builder only answers `OK` for a `SaveSignedEvent`: returning no
+    /// commands leaves the client waiting forever. Kind 28934 is ephemeral, so
+    /// the storage layer does not persist it, and `can_see_event` refuses it to
+    /// every subscriber so the code is never broadcast.
+    fn acknowledge_claim(event: &Event) -> Vec<StoreCommand> {
+        vec![StoreCommand::SaveSignedEvent(
+            Box::new(event.clone()),
+            Scope::Default,
+            None,
+        )]
+    }
+
+    async fn handle_relay_claim(
+        &self,
+        event: &Event,
+        store: &RelayInviteStore,
+        config_dir: &Arc<std::path::PathBuf>,
+    ) -> Result<Vec<StoreCommand>> {
+        let now = Timestamp::now().as_secs();
+        if now.abs_diff(event.created_at.as_secs()) > CLAIM_FRESHNESS_SECS {
+            return Err(relay_builder::Error::restricted(
+                "invite stale: the claim's created_at is too far from now".to_string(),
+            ));
+        }
+        let Some(code) = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("claim"))
+            .and_then(|t| t.as_slice().get(1))
+        else {
+            return Err(relay_builder::Error::restricted(
+                "invite missing: a kind 28934 claim needs a [\"claim\", <code>] tag".to_string(),
+            ));
+        };
+
+        match store.redeem(code, event.pubkey, now) {
+            Ok(RedeemOutcome::Admitted { invited_by }) => {
+                self.whitelist.add_invited(event.pubkey);
+                let store = store.clone();
+                let dir = Arc::clone(config_dir);
+                match tokio::task::spawn_blocking(move || store.persist(&dir)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("Failed to persist relay invites: {}", e),
+                    Err(e) => warn!("Relay invite persist task failed: {}", e),
+                }
+                tracing::info!(
+                    "Relay invite redeemed: {} admitted, invited by {}",
+                    event.pubkey,
+                    invited_by
+                );
+                Ok(Self::acknowledge_claim(event))
+            }
+            Ok(RedeemOutcome::AlreadyAdmitted) => {
+                // Repair the hot-path copy if it ever drifted from the store.
+                self.whitelist.add_invited(event.pubkey);
+                Ok(Self::acknowledge_claim(event))
+            }
+            Err(e) => {
+                debug!("Relay invite refused for {}: {}", event.pubkey, e.as_str());
+                Err(relay_builder::Error::restricted(e.message()))
+            }
+        }
     }
 
     /// Check if a pubkey is allowed to use this relay.
@@ -433,6 +526,10 @@ impl EventProcessor for GroupsRelayProcessor {
         _custom_state: Arc<RwLock<()>>,
         context: &EventContext,
     ) -> Result<bool> {
+        // A relay invite claim carries the code in clear. Never deliver it.
+        if event.kind.as_u16() == KIND_RELAY_CLAIM {
+            return Ok(false);
+        }
         if event.kind.as_u16() == KIND_VOICE_SIGNAL_25050 {
             let mut recipients = event.tags.public_keys().peekable();
             // Untargeted signalling keeps the default behaviour; only an
@@ -485,6 +582,14 @@ impl EventProcessor for GroupsRelayProcessor {
             return Err(relay_builder::Error::restricted(
                 "This pubkey is blocked from this relay".to_string(),
             ));
+        }
+
+        // Relay invite redemption is exempt from admission: see
+        // `handle_relay_claim`. Checked after the blacklist on purpose.
+        if event.kind.as_u16() == KIND_RELAY_CLAIM {
+            if let Some((store, dir)) = &self.relay_invites {
+                return self.handle_relay_claim(&event, store, dir).await;
+            }
         }
 
         if !is_signer_traffic && !self.is_allowed(&context.authed_pubkey) {
@@ -1244,5 +1349,220 @@ mod tests {
                 &viewing_as(Some(bystander.public_key()))
             )
             .unwrap());
+    }
+
+    async fn closed_processor_with_invites() -> (
+        tempfile::TempDir,
+        GroupsRelayProcessor,
+        RelayInviteStore,
+        Whitelist,
+        Keys,
+    ) {
+        let (tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+        let whitelist = Whitelist::new(
+            vec![Keys::generate().public_key()],
+            None,
+            crate::blacklist::Blacklist::new(None),
+        );
+        let store = RelayInviteStore::new(Some(tmp_dir.path()));
+        let processor =
+            GroupsRelayProcessor::new(groups, admin_keys.public_key(), whitelist.clone())
+                .with_relay_invites(store.clone(), tmp_dir.path().to_path_buf());
+        (tmp_dir, processor, store, whitelist, admin_keys)
+    }
+
+    fn claim_tags(code: &str) -> Vec<Tag> {
+        vec![Tag::custom(TagKind::custom("claim"), [code])]
+    }
+
+    #[tokio::test]
+    async fn a_relay_invite_claim_admits_a_stranger_on_a_closed_relay() {
+        let (tmp_dir, processor, store, whitelist, admin_keys) =
+            closed_processor_with_invites().await;
+        let code = store
+            .mint(
+                admin_keys.public_key(),
+                true,
+                crate::relay_invites::MintOptions {
+                    max_uses: Some(2),
+                    ..Default::default()
+                },
+                Timestamp::now().as_secs(),
+            )
+            .unwrap()
+            .code;
+
+        let stranger = Keys::generate();
+        let context = EventContext {
+            authed_pubkey: Some(stranger.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        let note = create_test_event(&stranger, 1, vec![]).await;
+        assert!(processor
+            .handle_event(note, empty_state(), &context)
+            .await
+            .is_err());
+        let reads = vec![Filter::new().kind(Kind::from(1u16))];
+        assert!(processor
+            .verify_filters(&reads, empty_state(), &context)
+            .is_err());
+
+        let claim = create_test_event(&stranger, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        let stored = processor
+            .handle_event(claim, empty_state(), &context)
+            .await
+            .expect("a valid claim from a non-admitted key must be accepted");
+        // Handed back only so relay_builder answers OK; 28934 is ephemeral, so
+        // it is not persisted, and can_see_event withholds it from everyone.
+        assert_eq!(stored.len(), 1);
+        let claim_again = create_test_event(&stranger, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        assert!(
+            !processor
+                .can_see_event(&claim_again, empty_state(), &context)
+                .unwrap(),
+            "a claim carries the code in clear and must never be delivered"
+        );
+
+        assert_eq!(
+            whitelist.tier_of(&stranger.public_key()),
+            AccessTier::Invite
+        );
+        assert!(processor
+            .verify_filters(&reads, empty_state(), &context)
+            .is_ok());
+        assert!(
+            tmp_dir
+                .path()
+                .join(crate::relay_invites::RELAY_INVITES_FILE)
+                .exists(),
+            "the redemption must be persisted before the claim is acknowledged"
+        );
+
+        // Replaying the same claim for the same key consumes nothing.
+        let again = create_test_event(&stranger, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        assert!(processor
+            .handle_event(again, empty_state(), &context)
+            .await
+            .is_ok());
+        assert_eq!(store.get(&code).unwrap().uses(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_relay_invite_claim_is_refused_with_a_reason() {
+        let (_tmp_dir, processor, store, whitelist, admin_keys) =
+            closed_processor_with_invites().await;
+        let now = Timestamp::now().as_secs();
+        let code = store
+            .mint(
+                admin_keys.public_key(),
+                true,
+                crate::relay_invites::MintOptions {
+                    max_uses: Some(1),
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap()
+            .code;
+        let context = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+
+        // Use it up with a first key.
+        let first = Keys::generate();
+        let claim = create_test_event(&first, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        processor
+            .handle_event(claim, empty_state(), &context)
+            .await
+            .unwrap();
+
+        let second = Keys::generate();
+        let refusal = |e: relay_builder::Error| e.to_string();
+        let claim = create_test_event(&second, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        let err = refusal(
+            processor
+                .handle_event(claim, empty_state(), &context)
+                .await
+                .unwrap_err(),
+        );
+        assert!(err.contains("invite exhausted"), "got: {err}");
+        assert!(!whitelist.contains(&second.public_key()));
+
+        let claim =
+            create_test_event(&second, KIND_RELAY_CLAIM, claim_tags("not-a-real-code")).await;
+        let err = refusal(
+            processor
+                .handle_event(claim, empty_state(), &context)
+                .await
+                .unwrap_err(),
+        );
+        assert!(err.contains("invite unknown"), "got: {err}");
+
+        let claim = create_test_event(&second, KIND_RELAY_CLAIM, vec![]).await;
+        assert!(processor
+            .handle_event(claim, empty_state(), &context)
+            .await
+            .is_err());
+
+        // A stale claim is refused even with a good code.
+        let stale = UnsignedEvent::new(
+            second.public_key(),
+            Timestamp::from(now - CLAIM_FRESHNESS_SECS - 60),
+            Kind::Custom(KIND_RELAY_CLAIM),
+            claim_tags(&code),
+            "",
+        )
+        .sign_with_keys(&second)
+        .unwrap();
+        assert!(processor
+            .handle_event(stale, empty_state(), &context)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_blacklisted_key_cannot_redeem_a_relay_invite() {
+        let (_tmp_dir, processor, store, whitelist, admin_keys) =
+            closed_processor_with_invites().await;
+        let code = store
+            .mint(
+                admin_keys.public_key(),
+                true,
+                Default::default(),
+                Timestamp::now().as_secs(),
+            )
+            .unwrap()
+            .code;
+        let banned = Keys::generate();
+        whitelist.blacklist().add(banned.public_key());
+        let context = EventContext {
+            authed_pubkey: Some(banned.public_key()),
+            subdomain: Arc::new(Scope::Default),
+            relay_pubkey: admin_keys.public_key(),
+        };
+        let claim = create_test_event(&banned, KIND_RELAY_CLAIM, claim_tags(&code)).await;
+        assert!(processor
+            .handle_event(claim, empty_state(), &context)
+            .await
+            .is_err());
+        assert_eq!(
+            store.get(&code).unwrap().uses(),
+            0,
+            "no use may be spent on a ban"
+        );
     }
 }

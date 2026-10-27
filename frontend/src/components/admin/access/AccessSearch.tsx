@@ -8,6 +8,7 @@ import { SearchIcon } from '../SearchIcon'
 const TIER_OF: Record<string, string> = {
   manual: 'Tier 1 — added by hand',
   follow_sync: 'Tier 1 — followed by a reference account',
+  invite: 'Tier 1 — redeemed an invite code',
   web_of_trust: 'Web of trust',
   open_relay: 'No restriction',
   blacklist: 'Blocked',

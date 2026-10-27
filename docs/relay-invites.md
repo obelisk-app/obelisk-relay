@@ -311,6 +311,8 @@ any other relay.
 
 ## 7. Proposal for nostr-wot-sdk
 
+Filed as [nostr-wot/nostr-wot-sdk#26](https://github.com/nostr-wot/nostr-wot-sdk/issues/26).
+
 Steps 4–6 above are the same in every client and depend only on the relay hub
 and the signer, which nostr-wot-sdk already owns. Proposed additions:
 

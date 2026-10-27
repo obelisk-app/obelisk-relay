@@ -1,12 +1,47 @@
 ARG RUST_VERSION=1.91.0
 
-FROM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
+# The Rust build runs on the build machine's own CPU and cross-compiles for the
+# target's. It used to run *as* the target platform, which on an amd64
+# workstation meant compiling the arm64 image inside QEMU: every rustc
+# instruction translated, about 6x slower, two to three hours a release. Now
+# only the small runtime stage below runs as the target platform.
+#
+# For a cross build (TARGETARCH != BUILDARCH) this installs the target's C
+# toolchain and its OpenSSL from Debian's multiarch archive; crates that build
+# C (ring, LMDB, jemalloc, openssl-sys) find them through the variables in
+# /cross-env.sh. A native build gets the plain toolchain and the same
+# explicit --target, so both land in target/<triple>/release.
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
+ARG TARGETARCH
+ARG BUILDARCH
 
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    make \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu; gnu=x86_64-linux-gnu; pkg=x86-64-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; pkg=aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    env_name="$(echo "$triple" | tr 'a-z-' 'A-Z_')"; \
+    cc_name="$(echo "$triple" | tr '-' '_')"; \
+    echo "export CARGO_BUILD_TARGET=$triple" > /cross-env.sh; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      dpkg --add-architecture "$TARGETARCH"; \
+      apt-get update; \
+      apt-get install -y pkg-config make "gcc-$pkg" "g++-$pkg" "libc6-dev-$TARGETARCH-cross" "libssl-dev:$TARGETARCH"; \
+      { \
+        echo "export CARGO_TARGET_${env_name}_LINKER=$gnu-gcc"; \
+        echo "export CC_${cc_name}=$gnu-gcc"; \
+        echo "export CXX_${cc_name}=$gnu-g++"; \
+        echo "export AR_${cc_name}=$gnu-ar"; \
+        echo "export PKG_CONFIG_ALLOW_CROSS=1"; \
+        echo "export PKG_CONFIG_PATH=/usr/lib/$gnu/pkgconfig"; \
+      } >> /cross-env.sh; \
+    else \
+      apt-get update; \
+      apt-get install -y pkg-config libssl-dev make; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add "$triple"
 
 WORKDIR /usr/src/app
 
@@ -53,7 +88,11 @@ ARG BUILD_TIME=
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
 
-RUN cargo build --release --bins
+RUN . /cross-env.sh \
+    && cargo build --release --bins \
+    && mkdir -p /out \
+    && cd "target/$CARGO_BUILD_TARGET/release" \
+    && cp groups_relay delete_event add_original_relay lmdb_stat /out/
 
 # Install binaries from relay_builder.
 #
@@ -68,7 +107,9 @@ RUN cargo build --release --bins
 # Keep this in step with the `relay_builder` entry in Cargo.lock. `--locked` makes
 # the build fail rather than silently resolve a different dependency graph.
 ARG RELAY_BUILDER_REV=0c9c93a91eff45365a1f9908ca95fa1f0b5a13af
-RUN cargo install --git https://github.com/verse-pbc/relay_builder \
+RUN . /cross-env.sh && cargo install --git https://github.com/verse-pbc/relay_builder \
+    --target "$CARGO_BUILD_TARGET" \
+    --root /out-tools \
     --rev ${RELAY_BUILDER_REV} \
     --locked \
     --bin export_import \
@@ -76,7 +117,8 @@ RUN cargo install --git https://github.com/verse-pbc/relay_builder \
     --bin nostr-lmdb-dump \
     --bin nostr-lmdb-integrity
 
-FROM node:24-slim AS frontend-builder
+# The console is plain HTML/JS/CSS, the same on every CPU: built natively.
+FROM --platform=$BUILDPLATFORM node:24-slim AS frontend-builder
 
 WORKDIR /usr/src/app/frontend
 
@@ -113,20 +155,20 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy all pre-built binaries and default config
-COPY --from=rust-builder /usr/src/app/target/release/groups_relay ./groups_relay
-COPY --from=rust-builder /usr/src/app/target/release/delete_event ./delete_event
-COPY --from=rust-builder /usr/src/app/target/release/add_original_relay ./add_original_relay
+COPY --from=rust-builder /out/groups_relay ./groups_relay
+COPY --from=rust-builder /out/delete_event ./delete_event
+COPY --from=rust-builder /out/add_original_relay ./add_original_relay
 # The admin console shells out to this to measure free-list slack: LMDB forbids
 # opening the same environment twice in one process, so the running relay cannot
 # measure the database it is serving from.
-COPY --from=rust-builder /usr/src/app/target/release/lmdb_stat ./lmdb_stat
+COPY --from=rust-builder /out/lmdb_stat ./lmdb_stat
 # console_dump requires console-dump feature, skipped for stability testing
 # COPY --from=rust-builder /usr/src/app/target/release/console_dump ./console_dump
 # Copy cargo-installed binaries
-COPY --from=rust-builder /usr/local/cargo/bin/export_import ./export_import
-COPY --from=rust-builder /usr/local/cargo/bin/negentropy_sync ./negentropy_sync
-COPY --from=rust-builder /usr/local/cargo/bin/nostr-lmdb-dump ./nostr-lmdb-dump
-COPY --from=rust-builder /usr/local/cargo/bin/nostr-lmdb-integrity ./nostr-lmdb-integrity
+COPY --from=rust-builder /out-tools/bin/export_import ./export_import
+COPY --from=rust-builder /out-tools/bin/negentropy_sync ./negentropy_sync
+COPY --from=rust-builder /out-tools/bin/nostr-lmdb-dump ./nostr-lmdb-dump
+COPY --from=rust-builder /out-tools/bin/nostr-lmdb-integrity ./nostr-lmdb-integrity
 COPY config/settings.yml ./config/
 COPY --from=frontend-builder /usr/src/app/frontend/dist ./frontend/dist
 

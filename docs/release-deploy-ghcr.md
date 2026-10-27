@@ -70,6 +70,13 @@ docker buildx inspect --bootstrap
 
 Confirm the builder lists `linux/arm64`.
 
+The Rust and console stages cross-compile on the workstation's own CPU
+(`FROM --platform=$BUILDPLATFORM`, see the Dockerfile), so binfmt/QEMU only
+runs the small runtime stage (a Debian `apt-get`). Measured on a 4-core amd64
+box with `CARGO_BUILD_JOBS=3`: arm64 in 12 minutes, against more than two
+hours when the whole build ran under emulation. ARM workstations build amd64
+the same way.
+
 ## Publish A Fresh Multi-Arch Release
 
 Use this path when building both platforms in one clean release publish:

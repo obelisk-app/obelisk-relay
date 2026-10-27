@@ -572,6 +572,17 @@ impl EventProcessor for GroupsRelayProcessor {
 
         // Check if this is a group event
         if let Some(group_ref) = self.groups.find_group_from_event(event, &context.subdomain) {
+            // Relay admins read every group: `verify_filters` already lets their
+            // REQ for a private group through, and without this the REQ was
+            // accepted and then delivered nothing, so a private group looked
+            // empty to the people who moderate it.
+            if context
+                .authed_pubkey
+                .as_ref()
+                .is_some_and(|pk| self.is_relay_admin(pk))
+            {
+                return Ok(true);
+            }
             // Group event - check access control using the group's can_see_event method
             group_ref
                 .value()
@@ -1419,6 +1430,76 @@ mod tests {
                 &viewing_as(Some(bystander.public_key()))
             )
             .unwrap());
+    }
+
+    /// A relay admin's REQ for a private group passes `verify_filters`; its
+    /// events must then reach them too, not be filtered out on delivery.
+    #[tokio::test]
+    async fn relay_admins_read_private_groups_they_are_not_in() {
+        let (_tmp_dir, database, admin_keys) = setup_test().await;
+        let groups = Arc::new(
+            Groups::load_groups(
+                database.clone(),
+                admin_keys.public_key(),
+                "wss://test.relay.com".to_string(),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+        let owner = Keys::generate();
+        let operator = Keys::generate();
+        let stranger = Keys::generate();
+        let group_id = "private_group";
+        let create =
+            create_test_event(&owner, 9007, vec![Tag::custom(TagKind::h(), [group_id])]).await;
+        groups
+            .handle_group_create(Box::new(create), &Scope::Default)
+            .await
+            .unwrap();
+        let private = crate::test_utils::create_test_metadata_event(
+            &owner,
+            group_id,
+            crate::test_utils::TestGroupMetadata {
+                name: Some("p"),
+                about: None,
+                picture: None,
+                is_private: true,
+                is_closed: true,
+                is_broadcast: false,
+            },
+        )
+        .await;
+        groups
+            .handle_edit_metadata(Box::new(private), &Scope::Default)
+            .unwrap();
+        let processor = GroupsRelayProcessor::with_admin_pubkeys(
+            groups,
+            admin_keys.public_key(),
+            vec![operator.public_key()],
+            Whitelist::new(vec![], None, crate::blacklist::Blacklist::new(None)),
+        );
+        let message =
+            create_test_event(&owner, 9, vec![Tag::custom(TagKind::h(), [group_id])]).await;
+        let sees = |pk: PublicKey| {
+            processor
+                .can_see_event(
+                    &message,
+                    empty_state(),
+                    &EventContext {
+                        authed_pubkey: Some(pk),
+                        subdomain: Arc::new(Scope::Default),
+                        relay_pubkey: admin_keys.public_key(),
+                    },
+                )
+                .unwrap()
+        };
+
+        assert!(
+            sees(operator.public_key()),
+            "a relay admin outside the group"
+        );
+        assert!(!sees(stranger.public_key()), "not a stranger");
     }
 
     async fn closed_processor_with_invites() -> (

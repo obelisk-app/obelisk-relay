@@ -504,6 +504,8 @@ export class AdminApiClient {
     max_uses_per_code?: number
     max_total_admits?: number
     max_ttl_days?: number
+    /** More people on top of what they may invite now; links widen with it. */
+    add_admits?: number
   }): Promise<InviteGrant> {
     return this.request('/api/admin/relay-invites/minters', {
       method: 'POST',
@@ -517,6 +519,11 @@ export class AdminApiClient {
 
   async getInviteReferrals(): Promise<InviteReferral[]> {
     return this.request('/api/admin/relay-invites/referrals')
+  }
+
+  /** Every person who came in on a code, newest first, with whose code it was. */
+  async getInviteAdmissions(): Promise<InviteAdmission[]> {
+    return this.request('/api/admin/relay-invites/admissions')
   }
 
   async evictInvitee(hex: string): Promise<void> {
@@ -1177,9 +1184,32 @@ export interface InviteGrant {
   max_ttl_secs: number
 }
 
+/**
+ * Why someone may create invite links from the apps. The owner, admins and
+ * reference accounts get an automatic allowance; `grant` is one set by an admin.
+ */
+export type InviteBasis = 'owner' | 'admin' | 'reference' | 'grant'
+
 export interface InviteMinter extends InviteGrant {
+  basis: InviteBasis
+  /** Set when they would also have the automatic allowance without the grant. */
+  automatic: Exclude<InviteBasis, 'grant'> | null
   active_codes: number
   admits_used: number
+}
+
+export interface InviteAdmission {
+  pubkey: string
+  npub: string
+  at: number
+  evicted_at?: number
+  code: string
+  code_label: string | null
+  inviter: string
+  inviter_npub: string
+  inviter_admin_code: boolean
+  inviter_basis: InviteBasis | null
+  inviter_invited_by: string | null
 }
 
 export interface RelayInviteList {
@@ -1194,6 +1224,8 @@ export interface InviteReferral {
   inviter_npub: string
   is_admin_code: boolean
   has_grant: boolean
+  /** Why they may invite now, or null if they no longer may. */
+  basis: InviteBasis | null
   /** Hex pubkey of whoever invited the inviter, when they came in on a code. */
   invited_by: string | null
   total_admitted: number

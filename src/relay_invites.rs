@@ -6,8 +6,11 @@
 //! a group invite gets them nowhere: every REQ and EVENT is refused before the
 //! group logic is reached. This is the missing front door.
 //!
-//! A code is minted by a relay admin, or by a pubkey an admin has granted
-//! minting rights with quotas. It is redeemed with a NIP-43 kind 28934 event
+//! A code is minted by a relay admin from the console (no limits), or from the
+//! apps by someone with an invite allowance: the relay owner, the admins and
+//! the reference accounts get one automatically (`DEFAULT_INVITE_ALLOWANCE`
+//! people, across as many links as they like), and an admin can grant one to
+//! anybody else, or override the automatic one, with explicit limits. It is redeemed with a NIP-43 kind 28934 event
 //! carrying `["claim", <code>]`, signed by the key being admitted. Each distinct
 //! pubkey that redeems consumes one use; the same pubkey redeeming again is a
 //! no-op. That is what lets a client keep the code and replay it whenever the
@@ -49,6 +52,13 @@ const MAX_CODE_INPUT_LEN: usize = 64;
 /// handed out in chat should expire and have a blast radius.
 pub const DEFAULT_RELAY_INVITE_TTL_SECS: u64 = 60 * 60 * 24 * 30;
 pub const DEFAULT_RELAY_INVITE_MAX_USES: u32 = 100;
+
+/// People the owner, an admin or a reference account may bring in from the
+/// apps without an explicit grant: in total, ever, however many links they
+/// split it across. An explicit grant from the console replaces it.
+pub const DEFAULT_INVITE_ALLOWANCE: u32 = 10;
+/// Longest life of a link made on the automatic allowance.
+pub const DEFAULT_ALLOWANCE_TTL_SECS: u64 = 60 * 60 * 24 * 30;
 
 const LABEL_MAX_CHARS: usize = 80;
 
@@ -132,6 +142,67 @@ pub struct MinterGrant {
     pub max_total_admits: u32,
     /// Ceiling on each code's lifetime.
     pub max_ttl_secs: u64,
+}
+
+/// Why someone may create invite links from the apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MintBasis {
+    /// The identity that set the relay up.
+    Owner,
+    /// A relay admin.
+    Admin,
+    /// One of the relay's reference accounts (the web-of-trust roots).
+    Reference,
+    /// An explicit grant from an admin, with its own limits.
+    Grant,
+}
+
+impl MintBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MintBasis::Owner => "owner",
+            MintBasis::Admin => "admin",
+            MintBasis::Reference => "reference",
+            MintBasis::Grant => "grant",
+        }
+    }
+}
+
+/// Answers "is this pubkey the owner, an admin or a reference account?" for
+/// the automatic allowance. Supplied by the server, which knows those lists;
+/// asked at mint and at redemption time, so removing someone from a list
+/// stops their codes without touching this store.
+pub type AllowanceCheck = Arc<dyn Fn(&PublicKey) -> Option<MintBasis> + Send + Sync>;
+
+/// The automatic allowance, expressed as a grant so quotas are enforced by
+/// one code path.
+pub fn default_allowance(pk: PublicKey) -> MinterGrant {
+    MinterGrant {
+        pubkey: pk,
+        granted_by: pk,
+        granted_at: 0,
+        max_codes: DEFAULT_INVITE_ALLOWANCE,
+        max_uses_per_code: DEFAULT_INVITE_ALLOWANCE,
+        max_total_admits: DEFAULT_INVITE_ALLOWANCE,
+        max_ttl_secs: DEFAULT_ALLOWANCE_TTL_SECS,
+    }
+}
+
+impl MinterGrant {
+    /// The same grant with room for `extra` more people. Links scale with it:
+    /// the live-link cap never falls below the new total, and a per-link cap
+    /// that was as wide as the old total widens too, so the extra people can
+    /// come in on one new link if the minter wants.
+    pub fn with_extra_admits(mut self, extra: u32) -> Self {
+        let old_total = self.max_total_admits;
+        self.max_total_admits = old_total.saturating_add(extra);
+        if self.max_uses_per_code >= old_total {
+            self.max_uses_per_code = self.max_total_admits;
+        }
+        self.max_codes = self.max_codes.max(self.max_total_admits);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -220,7 +291,9 @@ pub struct MintOptions {
 #[derive(Debug, Clone, Serialize)]
 pub struct MinterStatus {
     pub can_mint: bool,
-    pub is_admin: bool,
+    /// Why they may invite at all; `None` when they may not.
+    pub basis: Option<MintBasis>,
+    /// The limits in force: the explicit grant, or the automatic allowance.
     pub grant: Option<MinterGrant>,
     pub active_codes: u32,
     pub codes_left: Option<u32>,
@@ -237,9 +310,16 @@ pub struct ReferralBranch {
     pub codes: Vec<RelayInvite>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayInviteStore {
     inner: Arc<RwLock<InviteState>>,
+    allowance: Arc<RwLock<Option<AllowanceCheck>>>,
+}
+
+impl std::fmt::Debug for RelayInviteStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayInviteStore").finish_non_exhaustive()
+    }
 }
 
 impl Default for RelayInviteStore {
@@ -294,7 +374,32 @@ impl RelayInviteStore {
         }
         Self {
             inner: Arc::new(RwLock::new(state)),
+            allowance: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Install the check behind the automatic allowance. Shared by every clone.
+    pub fn set_allowance_check(&self, check: AllowanceCheck) {
+        *self.allowance.write() = Some(check);
+    }
+
+    /// Why `pk` may invite without an explicit grant, if they may.
+    pub fn automatic_basis(&self, pk: &PublicKey) -> Option<MintBasis> {
+        self.allowance.read().as_ref().and_then(|check| check(pk))
+    }
+
+    /// The limits `pk` invites under: an explicit grant wins over the automatic
+    /// allowance, so an admin can widen or narrow it per person.
+    fn effective_grant(
+        &self,
+        state: &InviteState,
+        pk: &PublicKey,
+    ) -> Option<(MinterGrant, MintBasis)> {
+        if let Some(g) = state.minters.get(&pk.to_hex()) {
+            return Some((g.clone(), MintBasis::Grant));
+        }
+        self.automatic_basis(pk)
+            .map(|basis| (default_allowance(*pk), basis))
     }
 
     /// Write the whole state atomically: a temp file and a rename, so a crash
@@ -397,9 +502,8 @@ impl RelayInviteStore {
         };
 
         if !created_by_admin {
-            let grant = state.minters.get(&created_by.to_hex()).cloned();
-            match grant {
-                Some(g) if Self::admits_by(&state, &created_by) < g.max_total_admits => {}
+            match self.effective_grant(&state, &created_by) {
+                Some((g, _)) if Self::admits_by(&state, &created_by) < g.max_total_admits => {}
                 _ => return Err(RedeemError::MinterInactive),
             }
         }
@@ -419,29 +523,20 @@ impl RelayInviteStore {
         self.inner.read().minters.get(&pk.to_hex()).cloned()
     }
 
-    pub fn minter_status(&self, pk: &PublicKey, is_admin: bool, now: u64) -> MinterStatus {
+    /// Where `pk` stands as an inviter from the apps. Everyone, admins
+    /// included, is bound by an allowance here; unlimited codes are a console
+    /// action.
+    pub fn minter_status(&self, pk: &PublicKey, now: u64) -> MinterStatus {
         let state = self.inner.read();
-        let grant = state.minters.get(&pk.to_hex()).cloned();
         let active_codes = Self::live_codes_by(&state, pk, now);
         let admits_used = Self::admits_by(&state, pk);
-        if is_admin {
-            return MinterStatus {
-                can_mint: true,
-                is_admin: true,
-                grant,
-                active_codes,
-                codes_left: None,
-                admits_used,
-                admits_left: None,
-            };
-        }
-        match grant {
-            Some(g) => {
+        match self.effective_grant(&state, pk) {
+            Some((g, basis)) => {
                 let codes_left = g.max_codes.saturating_sub(active_codes);
                 let admits_left = g.max_total_admits.saturating_sub(admits_used);
                 MinterStatus {
                     can_mint: codes_left > 0 && admits_left > 0,
-                    is_admin: false,
+                    basis: Some(basis),
                     grant: Some(g),
                     active_codes,
                     codes_left: Some(codes_left),
@@ -451,7 +546,7 @@ impl RelayInviteStore {
             }
             None => MinterStatus {
                 can_mint: false,
-                is_admin: false,
+                basis: None,
                 grant: None,
                 active_codes,
                 codes_left: Some(0),
@@ -461,8 +556,10 @@ impl RelayInviteStore {
         }
     }
 
-    /// Mint a code. Admins get the defaults unless they ask otherwise and may
-    /// ask for unlimited (`0`); minters are clamped to their grant.
+    /// Mint a code. `is_admin` is for the console only: admin codes get the
+    /// defaults unless asked otherwise, may be unlimited (`0`), and are bound
+    /// by no allowance. Everyone else, including an admin minting from the
+    /// apps, is clamped to their grant or automatic allowance.
     pub fn mint(
         &self,
         by: PublicKey,
@@ -484,10 +581,8 @@ impl RelayInviteStore {
             };
             (max_uses, expires_at)
         } else {
-            let grant = state
-                .minters
-                .get(&by.to_hex())
-                .cloned()
+            let (grant, _) = self
+                .effective_grant(&state, &by)
                 .ok_or(MintError::NotAllowed)?;
             if Self::live_codes_by(&state, &by, now) >= grant.max_codes {
                 return Err(MintError::CodeQuotaReached);
@@ -606,6 +701,18 @@ impl RelayInviteStore {
 
     pub fn list_grants(&self) -> Vec<MinterGrant> {
         self.inner.read().minters.values().cloned().collect()
+    }
+
+    /// Every admission by code, newest first: who came in, on whose code.
+    pub fn admissions(&self) -> Vec<(RelayInvite, Redemption)> {
+        let state = self.inner.read();
+        let mut rows: Vec<(RelayInvite, Redemption)> = state
+            .invites
+            .values()
+            .flat_map(|i| i.redemptions.iter().map(move |r| (i.clone(), r.clone())))
+            .collect();
+        rows.sort_by(|a, b| b.1.at.cmp(&a.1.at));
+        rows
     }
 
     /// Who came in through whom: one branch per inviter, most prolific first.
@@ -775,7 +882,7 @@ mod tests {
                 .unwrap_err(),
             MintError::NotAllowed
         );
-        assert!(!store.minter_status(&pk(), false, NOW).can_mint);
+        assert!(!store.minter_status(&pk(), NOW).can_mint);
     }
 
     #[test]
@@ -821,7 +928,7 @@ mod tests {
                 .unwrap_err(),
             MintError::CodeQuotaReached
         );
-        let status = store.minter_status(&minter, false, NOW);
+        let status = store.minter_status(&minter, NOW);
         assert_eq!(status.active_codes, 2);
         assert_eq!(status.codes_left, Some(0));
         assert!(!status.can_mint);
@@ -945,5 +1052,170 @@ mod tests {
         assert_eq!(reloaded.get(&code).unwrap().uses(), 1);
         assert_eq!(reloaded.grant_of(&minter), store.grant_of(&minter));
         assert_eq!(reloaded.admitted_pubkeys(), vec![invitee]);
+    }
+    fn with_allowance(store: &RelayInviteStore, who: PublicKey, basis: MintBasis) {
+        store.set_allowance_check(Arc::new(move |pk| (*pk == who).then_some(basis)));
+    }
+
+    #[test]
+    fn reference_accounts_get_ten_invites_in_total_across_links() {
+        let store = RelayInviteStore::default();
+        let reference = pk();
+        with_allowance(&store, reference, MintBasis::Reference);
+
+        let status = store.minter_status(&reference, NOW);
+        assert!(status.can_mint);
+        assert_eq!(status.basis, Some(MintBasis::Reference));
+        assert_eq!(status.admits_left, Some(DEFAULT_INVITE_ALLOWANCE));
+
+        // One link for 7, another for the rest: the second is clamped to 3.
+        let a = store
+            .mint(
+                reference,
+                false,
+                MintOptions {
+                    max_uses: Some(7),
+                    ..Default::default()
+                },
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(a.max_uses, Some(7));
+        for _ in 0..7 {
+            store.redeem(&a.code, pk(), NOW).unwrap();
+        }
+        let b = store
+            .mint(
+                reference,
+                false,
+                MintOptions {
+                    max_uses: Some(10),
+                    ..Default::default()
+                },
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(b.max_uses, Some(3));
+        for _ in 0..3 {
+            store.redeem(&b.code, pk(), NOW).unwrap();
+        }
+        let status = store.minter_status(&reference, NOW);
+        assert_eq!(status.admits_used, 10);
+        assert!(!status.can_mint);
+        assert_eq!(
+            store
+                .mint(reference, false, MintOptions::default(), NOW)
+                .unwrap_err(),
+            MintError::AdmitQuotaReached
+        );
+    }
+
+    #[test]
+    fn a_single_link_can_carry_the_whole_allowance() {
+        let store = RelayInviteStore::default();
+        let owner = pk();
+        with_allowance(&store, owner, MintBasis::Owner);
+        let code = store
+            .mint(owner, false, MintOptions::default(), NOW)
+            .unwrap();
+        assert_eq!(code.max_uses, Some(DEFAULT_INVITE_ALLOWANCE));
+        for _ in 0..DEFAULT_INVITE_ALLOWANCE {
+            store.redeem(&code.code, pk(), NOW).unwrap();
+        }
+        assert_eq!(
+            store.redeem(&code.code, pk(), NOW),
+            Err(RedeemError::Exhausted)
+        );
+    }
+
+    #[test]
+    fn losing_the_automatic_allowance_stops_the_links() {
+        let store = RelayInviteStore::default();
+        let reference = pk();
+        with_allowance(&store, reference, MintBasis::Reference);
+        let code = store
+            .mint(reference, false, MintOptions::default(), NOW)
+            .unwrap()
+            .code;
+        let first = pk();
+        store.redeem(&code, first, NOW).unwrap();
+
+        // Removed from the reference accounts.
+        store.set_allowance_check(Arc::new(|_| None));
+        assert_eq!(
+            store.redeem(&code, pk(), NOW),
+            Err(RedeemError::MinterInactive)
+        );
+        assert!(!store.minter_status(&reference, NOW).can_mint);
+        assert!(store.admitted_pubkeys().contains(&first));
+    }
+
+    #[test]
+    fn an_explicit_grant_overrides_the_automatic_allowance() {
+        let store = RelayInviteStore::default();
+        let admin = pk();
+        with_allowance(&store, admin, MintBasis::Admin);
+        store.set_grant(grant(admin, 3, 50, 50));
+        let status = store.minter_status(&admin, NOW);
+        assert_eq!(status.basis, Some(MintBasis::Grant));
+        assert_eq!(status.admits_left, Some(50));
+    }
+
+    #[test]
+    fn admissions_list_every_entry_with_its_inviter() {
+        let store = RelayInviteStore::default();
+        let owner = pk();
+        with_allowance(&store, owner, MintBasis::Owner);
+        let code = store
+            .mint(owner, false, MintOptions::default(), NOW)
+            .unwrap()
+            .code;
+        let (a, b) = (pk(), pk());
+        store.redeem(&code, a, NOW).unwrap();
+        store.redeem(&code, b, NOW + 5).unwrap();
+        let rows = store.admissions();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1.pubkey, b, "newest first");
+        assert!(rows.iter().all(|(i, _)| i.created_by == owner));
+    }
+
+    #[test]
+    fn extra_admits_raise_the_total_and_let_one_link_carry_them() {
+        let store = RelayInviteStore::default();
+        let reference = pk();
+        with_allowance(&store, reference, MintBasis::Reference);
+        let code = store
+            .mint(reference, false, MintOptions::default(), NOW)
+            .unwrap()
+            .code;
+        for _ in 0..DEFAULT_INVITE_ALLOWANCE {
+            store.redeem(&code, pk(), NOW).unwrap();
+        }
+        assert!(!store.minter_status(&reference, NOW).can_mint);
+
+        store.set_grant(default_allowance(reference).with_extra_admits(15));
+        let status = store.minter_status(&reference, NOW);
+        assert!(status.can_mint);
+        assert_eq!(status.admits_left, Some(15));
+        let big = store
+            .mint(
+                reference,
+                false,
+                MintOptions {
+                    max_uses: Some(15),
+                    ..Default::default()
+                },
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(big.max_uses, Some(15));
+    }
+
+    #[test]
+    fn extra_admits_keep_a_deliberately_narrow_per_link_cap() {
+        let g = grant(pk(), 2, 3, 10).with_extra_admits(5);
+        assert_eq!(g.max_total_admits, 15);
+        assert_eq!(g.max_uses_per_code, 3);
+        assert_eq!(g.max_codes, 15);
     }
 }

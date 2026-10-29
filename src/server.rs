@@ -482,6 +482,29 @@ pub async fn run_server(
     // people who came in on a code.
     let relay_invites = crate::relay_invites::RelayInviteStore::new(Some(config_dir));
     whitelist.set_invited(relay_invites.admitted_pubkeys());
+    // Who may invite from the apps without an explicit grant: the owner, the
+    // admins and the reference accounts, each on the default allowance. Asked
+    // live, so changing those lists in the console takes effect at once.
+    {
+        use crate::relay_invites::MintBasis;
+        let refs = reference_accounts.clone();
+        let admins = admin_pubkeys.clone();
+        let dir = config_dir.to_path_buf();
+        let relay_pk = relay_keys.public_key;
+        relay_invites.set_allowance_check(Arc::new(move |pk| {
+            if *pk == relay_pk {
+                None
+            } else if admin::load_relay_owner(&dir).as_ref() == Some(pk) {
+                Some(MintBasis::Owner)
+            } else if admin::is_admin_pubkey(&admins, pk) {
+                Some(MintBasis::Admin)
+            } else if refs.list().contains(pk) {
+                Some(MintBasis::Reference)
+            } else {
+                None
+            }
+        }));
+    }
 
     let mut groups_processor = GroupsRelayProcessor::with_admin_pubkeys(
         groups.clone(),

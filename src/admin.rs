@@ -795,6 +795,28 @@ pub(crate) fn is_relay_admin(state: &ServerState, pubkey: &PublicKey) -> bool {
             .is_some_and(|admin_state| is_admin(admin_state, pubkey))
 }
 
+/// Every admin right now: the configured ones plus any added at runtime.
+pub(crate) fn current_admin_pubkeys(state: &ServerState) -> Vec<PublicKey> {
+    let mut out = state.admin_pubkeys.clone();
+    if let Some(admin_state) = ADMIN_SHARED.get() {
+        for pk in admin_state.admin_pubkeys.read().iter() {
+            if !out.contains(pk) {
+                out.push(*pk);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `pubkey` is a runtime or configured admin, without a `ServerState`:
+/// for the invite allowance check, which lives in the invite store.
+pub(crate) fn is_admin_pubkey(configured: &[PublicKey], pubkey: &PublicKey) -> bool {
+    configured.contains(pubkey)
+        || ADMIN_SHARED
+            .get()
+            .is_some_and(|admin_state| is_admin(admin_state, pubkey))
+}
+
 fn consume_challenge(
     admin_state: &AdminState,
     event: &Event,

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'preact/hooks'
 import {
   adminApi,
+  type InviteAdmission,
+  type InviteBasis,
   type InviteMinter,
   type InviteReferral,
   type RelayInvite,
@@ -15,7 +17,7 @@ interface InvitesPanelProps {
   onChanged: () => void
 }
 
-type View = 'codes' | 'minters' | 'referrals'
+type View = 'entries' | 'codes' | 'minters' | 'referrals'
 
 const DAY = 86_400
 
@@ -37,6 +39,22 @@ const formatDate = (secs: number | null) =>
   secs == null ? 'never' : new Date(secs * 1000).toLocaleDateString()
 
 const usage = (i: RelayInvite) => `${i.uses} / ${i.max_uses == null ? '∞' : i.max_uses}`
+
+/** The automatic allowance in the apps; keep in step with `DEFAULT_INVITE_ALLOWANCE`. */
+const DEFAULT_ALLOWANCE = 10
+
+const BASIS_LABEL: Record<InviteBasis, string> = {
+  owner: 'Owner',
+  admin: 'Admin',
+  reference: 'Reference account',
+  grant: 'Granted',
+}
+
+/** How an inviter's role reads on a referral or an entry. */
+const inviterRole = (basis: InviteBasis | null, adminCode: boolean) =>
+  adminCode ? 'Admin (console code)' : basis ? BASIS_LABEL[basis] : 'Can no longer invite'
+
+const shortNpub = (npub: string) => `${npub.slice(0, 12)}…${npub.slice(-6)}`
 
 const STATUS_BADGE: Record<RelayInvite['status'], string> = {
   active: 'admin-status-badge-ok',
@@ -78,13 +96,15 @@ const copyText = async (text: string): Promise<boolean> => {
  * are on no list and in no follow graph and so would otherwise be refused
  * everything.
  *
- * Three views of one store. Codes is what exists and how much of it is used.
- * Minters is who besides admins may create codes, and how many. Referrals is
- * the answer to "where did all these people come from" -- every invitee,
- * grouped under whoever handed them the code.
+ * Four views of one store. Entries is the log: every npub that came in, and
+ * whose code let them in. Codes is what exists and how much of it is used.
+ * Minters is everyone who may create links from the apps -- the owner, admins
+ * and reference accounts on the automatic allowance, plus explicit grants.
+ * Referrals is the same people as Entries, grouped under each inviter.
  */
 export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
-  const [view, setView] = useState<View>('codes')
+  const [view, setView] = useState<View>('entries')
+  const [admissions, setAdmissions] = useState<InviteAdmission[]>([])
   const [invites, setInvites] = useState<RelayInvite[]>([])
   const [minters, setMinters] = useState<InviteMinter[]>([])
   const [referrals, setReferrals] = useState<InviteReferral[]>([])
@@ -106,6 +126,19 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
   const copyLabel = (key: string, label: string) =>
     copied?.key === key ? (copied.ok ? 'Copied ✓' : 'Copy failed') : label
 
+  // "Add people" amount per minter row, keyed by hex.
+  const [extra, setExtra] = useState<Record<string, number>>({})
+
+  const addPeople = (m: InviteMinter) => {
+    const n = extra[m.pubkey] ?? DEFAULT_ALLOWANCE
+    if (n <= 0) return
+    void run(
+      `extra:${m.pubkey}`,
+      () => adminApi.grantInviteMinter({ pubkey: m.pubkey, add_admits: n }),
+      'Could not add more invites',
+    )
+  }
+
   const [codeForm, setCodeForm] = useState({ label: '', max_uses: 25, days: 30 })
   const [grantForm, setGrantForm] = useState({
     pubkey: '',
@@ -119,20 +152,23 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
     setLoading(true)
     setError(null)
     try {
-      const [list, mintRows, tree] = await Promise.all([
+      const [list, mintRows, tree, entries] = await Promise.all([
         adminApi.getRelayInvites(),
         adminApi.getInviteMinters(),
         adminApi.getInviteReferrals(),
+        adminApi.getInviteAdmissions(),
       ])
       setInvites(list.invites)
       setMinters(mintRows)
       setReferrals(tree)
+      setAdmissions(entries)
       const keys = new Set<string>()
       for (const i of list.invites) {
         keys.add(i.created_by)
         i.redemptions.forEach(r => keys.add(r.pubkey))
       }
       mintRows.forEach(m => keys.add(m.pubkey))
+      tree.forEach(b => b.invited_by && keys.add(b.invited_by))
       fetchProfiles([...keys])
         .then(found => setProfiles(prev => new Map([...prev, ...found])))
         .catch(() => undefined)
@@ -198,6 +234,40 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
     const p = profiles.get(hex)
     return p ? getDisplayName(p, npub) : `${npub.slice(0, 12)}…`
   }
+
+  /** Name of a pubkey we only know as hex (an inviter's own inviter). */
+  const nameOfHex = (hex: string) => {
+    const known =
+      admissions.find(a => a.pubkey === hex)?.npub ??
+      referrals.find(r => r.inviter === hex)?.inviter_npub
+    return known ? nameOf(hex, known) : `${hex.slice(0, 8)}…`
+  }
+
+  const evictButton = (pubkey: string) =>
+    confirming === `evict:${pubkey}` ? (
+      <>
+        <button
+          class="admin-action-btn admin-action-btn-secondary"
+          disabled={busy !== null}
+          onClick={() =>
+            void run(pubkey, () => adminApi.evictInvitee(pubkey), 'Could not remove that invitee')
+          }
+        >
+          Confirm
+        </button>
+        <button class="admin-action-btn admin-action-btn-secondary" onClick={() => setConfirming(null)}>
+          Cancel
+        </button>
+      </>
+    ) : (
+      <button
+        class="admin-action-btn admin-action-btn-secondary"
+        onClick={() => setConfirming(`evict:${pubkey}`)}
+        title="Removes their invite admission. Another tier may still admit them; block them to make it final."
+      >
+        Remove
+      </button>
+    )
 
   const numberField = (
     label: string,
@@ -297,6 +367,7 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
   )
 
   const views: { id: View; label: string; count: number }[] = [
+    { id: 'entries', label: 'Entries', count: admissions.filter(a => !a.evicted_at).length },
     { id: 'codes', label: 'Codes', count: invites.filter(i => i.status === 'active').length },
     { id: 'minters', label: 'Minters', count: minters.length },
     {
@@ -316,6 +387,13 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
             otherwise fall in. Each distinct pubkey that redeems a code uses it up
             once; the apps replay a stored code when someone makes a new key, so
             that costs a use too. Invitees publish at the Tier 1 budget.
+          </p>
+          <p>
+            <strong>Who can invite from Obelisk and Sky:</strong> the owner, every
+            admin and every reference account, {DEFAULT_ALLOWANCE} people each in
+            total, split over as many links as they like. Anyone else needs a grant
+            under Minters, which also replaces the automatic allowance for that
+            person. Codes made here, in the console, have no allowance.
           </p>
         </div>
       </div>
@@ -339,6 +417,41 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
       )}
 
       {loading && invites.length === 0 && <div class="lc-skeleton h-24 w-full mt-3" />}
+
+      {view === 'entries' && (
+        <>
+          {!loading && admissions.length === 0 && (
+            <div class="mt-3">
+              <AdminEmptyState headline="Nobody has come in on a code yet">
+                Every key that redeems an invite link shows up here, with the
+                account whose link it was.
+              </AdminEmptyState>
+            </div>
+          )}
+          <div class="admin-account-list mt-3">
+            {admissions.map(a => (
+              <AccountRow
+                key={`${a.code}:${a.pubkey}`}
+                hex={a.pubkey}
+                npub={a.npub}
+                profile={profiles.get(a.pubkey)}
+                onInspect={() => onInspect({ hex: a.pubkey, npub: a.npub })}
+                subtitle={[
+                  a.evicted_at ? 'removed' : null,
+                  shortNpub(a.npub),
+                  `entered ${formatDate(a.at)}`,
+                  `invited by ${nameOf(a.inviter, a.inviter_npub)} (${inviterRole(a.inviter_basis, a.inviter_admin_code)})`,
+                  a.inviter_invited_by ? `who came in via ${nameOfHex(a.inviter_invited_by)}` : null,
+                  `link ${a.code_label ?? a.code.slice(0, 8) + '…'}`,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                actions={a.evicted_at ? undefined : evictButton(a.pubkey)}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
       {view === 'codes' && (
         <>
@@ -443,15 +556,19 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
             </button>
             <p class="admin-access-hint">
               Minters see an “Invite people” option in Obelisk and Sky settings.
-              Granting again to the same person updates their limits.
+              Granting again to the same person updates their limits; “Add people”
+              on a row raises their total by that many and keeps everything else. The owner,
+              admins and reference accounts are listed without a grant: to stop
+              one of them inviting, remove them from the reference accounts, or
+              give them a grant with smaller limits.
             </p>
           </form>
 
           {!loading && minters.length === 0 && (
             <div class="mt-3">
-              <AdminEmptyState headline="Only admins can invite">
-                Grant minting rights to let trusted people create their own codes,
-                within the limits you set.
+              <AdminEmptyState headline="Nobody can invite from the apps yet">
+                Add reference accounts, or grant minting rights to let trusted
+                people create their own links within the limits you set.
               </AdminEmptyState>
             </div>
           )}
@@ -464,9 +581,33 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
                 npub={m.npub}
                 profile={profiles.get(m.pubkey)}
                 onInspect={() => onInspect({ hex: m.pubkey, npub: m.npub })}
-                subtitle={`${m.active_codes}/${m.max_codes} codes · ${m.admits_used}/${m.max_total_admits} people · ${m.max_uses_per_code} per code · ${Math.round(m.max_ttl_secs / DAY)}d`}
+                subtitle={`${BASIS_LABEL[m.basis]}${m.basis === 'grant' ? '' : ' · automatic'} · ${m.admits_used}/${m.max_total_admits} people · ${m.active_codes} live link${m.active_codes === 1 ? '' : 's'} · ${m.max_uses_per_code} per link · ${Math.round(m.max_ttl_secs / DAY)}d`}
                 actions={
-                  confirming === `minter:${m.pubkey}` ? (
+                  <>
+                    <input
+                      type="number"
+                      min="1"
+                      class="admin-inline-number"
+                      style={{ width: '4.5rem' }}
+                      aria-label="People to add"
+                      title="How many more people they may invite, on top of what they have now"
+                      value={extra[m.pubkey] ?? DEFAULT_ALLOWANCE}
+                      onInput={e =>
+                        setExtra({
+                          ...extra,
+                          [m.pubkey]: Number((e.target as HTMLInputElement).value),
+                        })
+                      }
+                    />
+                    <button
+                      class="admin-action-btn"
+                      disabled={busy !== null}
+                      onClick={() => addPeople(m)}
+                      title="Raise their total. Their links widen with it, so they can make one link for all of the extra people."
+                    >
+                      {busy === `extra:${m.pubkey}` ? 'Adding…' : 'Add people'}
+                    </button>
+                  {m.basis !== 'grant' ? null : confirming === `minter:${m.pubkey}` ? (
                     <>
                       <button
                         class="admin-action-btn admin-action-btn-secondary"
@@ -492,11 +633,16 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
                     <button
                       class="admin-action-btn admin-action-btn-secondary"
                       onClick={() => setConfirming(`minter:${m.pubkey}`)}
-                      title="Their codes stop admitting. People they already invited keep access."
+                      title={
+                        m.automatic
+                          ? `They go back to the automatic allowance of ${DEFAULT_ALLOWANCE} as ${BASIS_LABEL[m.automatic].toLowerCase()}.`
+                          : 'Their codes stop admitting. People they already invited keep access.'
+                      }
                     >
-                      Withdraw
+                      {m.automatic ? 'Reset to automatic' : 'Withdraw'}
                     </button>
-                  )
+                  )}
+                  </>
                 }
               />
             ))}
@@ -523,14 +669,14 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
                   <div>
                     <h3>{nameOf(branch.inviter, branch.inviter_npub)}</h3>
                     <p>
-                      {branch.is_admin_code ? 'Admin' : branch.has_grant ? 'Minter' : 'Former minter'}
+                      {inviterRole(branch.basis, branch.is_admin_code)} · {shortNpub(branch.inviter_npub)}
                       {' · '}
                       {branch.codes.length} code{branch.codes.length === 1 ? '' : 's'}
                       {branch.invited_by &&
                         ` · was invited by ${
                           invitedBy
                             ? nameOf(invitedBy.inviter, invitedBy.inviter_npub)
-                            : `${branch.invited_by.slice(0, 8)}…`
+                            : nameOfHex(branch.invited_by)
                         }`}
                     </p>
                   </div>
@@ -547,40 +693,8 @@ export const InvitesPanel = ({ onInspect, onChanged }: InvitesPanelProps) => {
                         npub={r.npub}
                         profile={profiles.get(r.pubkey)}
                         onInspect={() => onInspect({ hex: r.pubkey, npub: r.npub })}
-                        subtitle={`${r.evicted_at ? 'removed · ' : ''}via ${code.label ?? code.code.slice(0, 8) + '…'} · ${formatDate(r.at)}`}
-                        actions={
-                          r.evicted_at ? undefined : confirming === `evict:${r.pubkey}` ? (
-                            <>
-                              <button
-                                class="admin-action-btn admin-action-btn-secondary"
-                                disabled={busy !== null}
-                                onClick={() =>
-                                  void run(
-                                    r.pubkey,
-                                    () => adminApi.evictInvitee(r.pubkey),
-                                    'Could not remove that invitee',
-                                  )
-                                }
-                              >
-                                Confirm
-                              </button>
-                              <button
-                                class="admin-action-btn admin-action-btn-secondary"
-                                onClick={() => setConfirming(null)}
-                              >
-                                Cancel
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              class="admin-action-btn admin-action-btn-secondary"
-                              onClick={() => setConfirming(`evict:${r.pubkey}`)}
-                              title="Removes their invite admission. Another tier may still admit them; block them to make it final."
-                            >
-                              Remove
-                            </button>
-                          )
-                        }
+                        subtitle={`${r.evicted_at ? 'removed · ' : ''}${shortNpub(r.npub)} · via ${code.label ?? code.code.slice(0, 8) + '…'} · ${formatDate(r.at)}`}
+                        actions={r.evicted_at ? undefined : evictButton(r.pubkey)}
                       />
                     )),
                   )}

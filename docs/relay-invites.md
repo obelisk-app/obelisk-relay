@@ -23,8 +23,8 @@ logic is never reached.
 
 Relay invitation codes are the missing front door:
 
-- An **admin** creates a code in the console, or **someone the admin granted
-  minting rights** creates one from inside Obelisk or Sky.
+- An **admin** creates a code in the console, or **someone allowed to invite**
+  creates a link from inside Obelisk or Sky (see [Who can invite](#who-can-invite)).
 - The newcomer opens a link. The app makes a key if they have none and
   **redeems the code for that key**. The user never sees the code, the relay or
   the word "whitelist".
@@ -69,9 +69,48 @@ stored code **does spend a use**. This was a deliberate product decision: usage
 counts are counts of keys let in, which is what the operator is limiting. Old
 keys keep their access; nothing is revoked automatically.
 
+### Who can invite
+
+| Who | How | Limit |
+|---|---|---|
+| Relay admin, in the **console** | Access → Invites → Codes | None. Defaults to 100 uses and 30 days; `0` means unlimited or never. |
+| The relay **owner** (whoever ran setup) | "Invite people" in Obelisk or Sky | Automatic allowance: **10 people in total** |
+| Every relay **admin** | "Invite people" in Obelisk or Sky | Automatic allowance: **10 people in total** |
+| Every **reference account** (the web-of-trust roots, Access → Reference accounts) | "Invite people" in Obelisk or Sky | Automatic allowance: **10 people in total** |
+| Anyone an admin gave a **grant** | "Invite people" in Obelisk or Sky | The grant's limits |
+| Anyone else | | Can't invite. They ask one of the people above for a link. |
+
+The **automatic allowance** (`DEFAULT_INVITE_ALLOWANCE = 10` in
+`src/relay_invites.rs`) counts **people**, not links. One link for ten people,
+ten links for one person each, or anything in between all work. Each new link
+is clamped to what is left, and a link lasts at most 30 days. Once ten people
+have come in, the "Invite people" panel still shows the links and who joined,
+but it can't create more, and links that still have uses stop admitting
+(`invite inactive`).
+
+Nobody is recorded for the automatic allowance. The relay checks the lists live
+at mint time and at redemption time
+(`RelayInviteStore::set_allowance_check`, wired in `src/server.rs`). Removing
+someone from the reference accounts, or as an admin, therefore stops their
+links at once. The people who already came in keep their access.
+
+From the apps, admins are bound by the allowance like everyone else. Unlimited
+or bulk codes are a console action.
+
+An explicit grant **replaces** the automatic allowance for that person. Use it
+to give a reference account more than 10, or fewer. Withdrawing the grant
+returns them to the automatic allowance.
+
+**Giving someone more.** In Access → Invites → Minters, every row has an
+**Add people** box: enter how many more people that person may bring in and
+press the button. This sends `POST /minters` with `add_admits`. It starts from
+what they have now (their grant, or the automatic 10), adds to the total, and
+widens their links to match. Someone who has used all 10 and gets 15 more can
+then make one link for all 15. Their earlier links and invitees are untouched.
+
 ### Minter grant
 
-An admin grants a non-admin pubkey the right to mint, with four limits:
+An admin grants a pubkey the right to mint, with four limits:
 
 | Limit | Default | Effect |
 |---|---|---|
@@ -185,22 +224,31 @@ to decide whether to show "Invite people".
   "invited_by": { "code": "…", "pubkey": "<hex>", "npub": "npub1…", "at": 1793000000 },
   "can_mint": true,
   "is_admin": false,
-  "codes_left": 3,
-  "admits_left": 18,
+  "basis": "reference",
+  "codes_left": 8,
+  "admits_left": 3,
   "admits_used": 7,
-  "grant": { "max_codes": 5, "max_uses_per_code": 10, "max_total_admits": 25, "max_ttl_secs": 2592000, "…": "…" },
+  "admits_total": 10,
+  "grant": { "max_codes": 10, "max_uses_per_code": 10, "max_total_admits": 10, "max_ttl_secs": 2592000, "…": "…" },
   "codes": [ /* InviteView, newest first, see below */ ]
 }
 ```
 
-Show the panel when `can_mint` is true. It's false when there's no grant, or
-when the grant's code or admit quota is spent. Admins always get
-`can_mint: true` and `null` quotas.
+`basis` says why the signer may invite: `owner`, `admin` or `reference` for the
+automatic allowance, `grant` for limits set by an admin, or `null` if they
+can't invite. `grant` holds the limits in force, whether that is the explicit
+grant or the automatic allowance. `admits_total` is the allowance in total.
+
+Show the **Invite people** entry when `basis` is not null, or when `codes` is
+non-empty: someone whose allowance is spent should still see their links and
+who joined. `can_mint` decides only whether **Create** is enabled. It is false
+when there is no basis, or when the allowance or live-code quota is spent.
 
 ### `POST /api/invites`
 
 Body (all optional): `{ "label": "…", "max_uses": 10, "expires_in": 604800 }`.
-Minters are clamped to their grant, and `0` doesn't mean unlimited for them.
+Everyone is clamped to their grant or automatic allowance, admins included, and
+`0` doesn't mean unlimited here.
 Returns `201` with an `InviteView`. Returns `403` with a message when no grant
 exists or a quota is spent.
 
@@ -232,13 +280,21 @@ People already admitted keep their access; only an admin can evict.
 ## 5. Admin console and API
 
 The **Access → Invites** tab (`frontend/src/components/admin/access/InvitesPanel.tsx`)
-has three views:
+has four views:
 
+- **Entries.** The log of who came in: every npub that redeemed a code, newest
+  first. For each: when, on which link, whose link it was, that inviter's
+  role (owner, admin, reference account, granted, or "can no longer
+  invite"), and who invited the inviter, if they came in on a code too. You
+  can remove a single invitee from here.
 - **Codes.** Create a code (label, max uses, expiry). Copy it, or copy an Obelisk
   or Sky link. Each code shows its usage. Revoke it, optionally also removing
   everyone who came in on it.
-- **Minters.** Grant or update minting rights by npub, hex or NIP-05, set the
-  four limits, or withdraw a grant.
+- **Minters.** Everyone who may invite from the apps. That is the owner, the
+  admins and the reference accounts on the automatic allowance (marked
+  "automatic"), plus explicit grants, each with people used out of their
+  total. Grant or update limits by npub, hex or NIP-05. Withdrawing a grant
+  from someone who also has the automatic allowance resets them to it.
 - **Referrals.** Who came from whom. One card per inviter shows who invited
   *them* (the next link up the chain), how many people they brought in, and
   every invitee with the code and date. You can remove a single invitee from
@@ -255,10 +311,11 @@ Admin-session routes, under `/api/admin/relay-invites`, behind
 | GET | `/` | `{invites, minters, active_codes, total_admitted}` |
 | POST | `/` | Mint as admin. `max_uses: 0` = unlimited, `expires_in: 0` = never. |
 | DELETE | `/codes/{code}?evict=bool` | Revoke; with `evict=true`, remove its invitees' invite admission. |
-| GET | `/minters` | Grants with live usage. |
-| POST | `/minters` | `{pubkey, max_codes?, max_uses_per_code?, max_total_admits?, max_ttl_days?}`. Upserts. |
+| GET | `/minters` | Everyone who may invite: explicit grants, plus owner, admins and reference accounts on the automatic allowance. Each row has `basis`, `automatic` and live usage. |
+| POST | `/minters` | `{pubkey, max_codes?, max_uses_per_code?, max_total_admits?, max_ttl_days?, add_admits?}`. Upserts, starting from the current grant or automatic allowance. `add_admits` raises the total by that many. |
 | DELETE | `/minters/{hex}` | Withdraw a grant. |
-| GET | `/referrals` | The referral tree. |
+| GET | `/referrals` | The referral tree. Each branch has `basis`: the inviter's role now. |
+| GET | `/admissions` | Every redemption, newest first: `{pubkey, npub, at, evicted_at?, code, code_label, inviter, inviter_npub, inviter_admin_code, inviter_basis, inviter_invited_by}`. |
 | DELETE | `/invitees/{hex}` | Remove one invitee's invite admission. |
 
 Eviction only removes the *invite* tier. If the person is also followed by a
@@ -304,8 +361,22 @@ any other relay.
    and show a plain message ("This invite link has expired — ask for a new
    one"). If it's `stale`, retry once.
 7. **Invite people.** For the logged-in key, call `GET /api/invites/me`. When
-   `can_mint` is true, show an **Invite people** entry in settings: create a
-   link, copy or share it, and list your codes with uses and who joined.
+   `basis` is set or `codes` is non-empty, show an **Invite people** entry in
+   settings:
+   - Say which relay the link is for. Settings are global, but a code belongs
+     to one relay, so the panel has its own relay picker (the user's relays,
+     current one first). Switching it loads that relay's `/me` without
+     changing the app's active relay.
+   - Say why the user may invite (`basis`), and show the allowance as people
+     left out of `admits_total`.
+   - Create a link with an optional label, how many people (up to
+     `admits_left`) and an expiry.
+   - Copy or share each link, list your links with uses and who joined, and
+     turn a link off.
+   - When `basis` is null, explain who can invite on that relay instead of
+     hiding the panel.
+8. **Retry.** On `stale` or no answer, retry once with a fresh `created_at`.
+   Report any other failure to the user instead of leaving an empty app.
 
 ---
 

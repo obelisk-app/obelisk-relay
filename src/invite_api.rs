@@ -16,7 +16,7 @@
 
 use crate::admin::{admin_session_pubkey, is_relay_admin};
 use crate::obelisk_api::{verify_nip98, ObeliskQuotaKind};
-use crate::relay_invites::{unix_now, MintOptions, MinterGrant, RelayInvite};
+use crate::relay_invites::{unix_now, MintBasis, MintOptions, MinterGrant, RelayInvite};
 use crate::server::ServerState;
 use axum::{
     extract::{OriginalUri, Path, Query, State},
@@ -204,10 +204,15 @@ struct MeResponse {
     invited_by: Option<InvitedBy>,
     can_mint: bool,
     is_admin: bool,
-    /// Codes that may still be created right now; `null` for admins.
+    /// Why the signer may invite: `owner`, `admin`, `reference` (automatic
+    /// allowance) or `grant` (limits set by an admin). `null` when they may not.
+    basis: Option<MintBasis>,
+    /// Codes that may still be created right now.
     codes_left: Option<u32>,
-    /// People that may still be brought in; `null` for admins.
+    /// People that may still be brought in, across all their links.
     admits_left: Option<u32>,
+    /// The allowance in total (`admits_used + admits_left`).
+    admits_total: Option<u32>,
     admits_used: u32,
     grant: Option<GrantView>,
     /// The signer's own codes, newest first, with who joined on each.
@@ -233,7 +238,7 @@ async fn handle_me(
     };
     let now = unix_now();
     let is_admin = is_relay_admin(&state, &pk);
-    let status = state.relay_invites.minter_status(&pk, is_admin, now);
+    let status = state.relay_invites.minter_status(&pk, now);
     let invited_by = state
         .relay_invites
         .invited_by(&pk)
@@ -256,9 +261,11 @@ async fn handle_me(
             .admits(Some(&pk), |p| is_relay_admin(&state, p)),
         invited_by,
         can_mint: status.can_mint,
-        is_admin: status.is_admin,
+        is_admin,
+        basis: status.basis,
         codes_left: status.codes_left,
         admits_left: status.admits_left,
+        admits_total: status.grant.as_ref().map(|g| g.max_total_admits),
         admits_used: status.admits_used,
         grant: status.grant.as_ref().map(GrantView::from),
         codes,
@@ -305,10 +312,11 @@ async fn handle_mint(
     };
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let now = unix_now();
-    let is_admin = is_relay_admin(&state, &pk);
+    // Never as admin: from the apps everyone is bound by an allowance.
+    // Unlimited codes are minted from the console.
     match state.relay_invites.mint(
         pk,
-        is_admin,
+        false,
         MintOptions {
             label: req.label,
             max_uses: req.max_uses,
@@ -361,6 +369,7 @@ pub fn admin_routes() -> Router<Arc<ServerState>> {
         )
         .route("/minters/{pubkey}", delete(handle_admin_ungrant))
         .route("/referrals", get(handle_admin_referrals))
+        .route("/admissions", get(handle_admin_admissions))
         .route("/invitees/{pubkey}", delete(handle_admin_evict))
 }
 
@@ -473,23 +482,58 @@ async fn handle_admin_minters(
     struct MinterRow {
         #[serde(flatten)]
         grant: GrantView,
+        /// `grant` for an explicit grant; `owner`, `admin` or `reference` for
+        /// the automatic allowance.
+        basis: MintBasis,
+        /// Whether the account would also have the automatic allowance, so
+        /// withdrawing an explicit grant falls back to it rather than to nothing.
+        automatic: Option<MintBasis>,
         active_codes: u32,
         admits_used: u32,
     }
-    let rows: Vec<MinterRow> = state
+    // Everyone who may invite: explicit grants, then the owner, admins and
+    // reference accounts on the automatic allowance.
+    let mut keys: Vec<PublicKey> = state
         .relay_invites
         .list_grants()
         .iter()
-        .map(|g| {
-            let status = state.relay_invites.minter_status(&g.pubkey, false, now);
-            MinterRow {
-                grant: GrantView::from(g),
+        .map(|g| g.pubkey)
+        .collect();
+    for pk in allowance_candidates(&state) {
+        if !keys.contains(&pk) {
+            keys.push(pk);
+        }
+    }
+    let rows: Vec<MinterRow> = keys
+        .iter()
+        .filter_map(|pk| {
+            let status = state.relay_invites.minter_status(pk, now);
+            let (basis, grant) = (status.basis?, status.grant?);
+            Some(MinterRow {
+                grant: GrantView::from(&grant),
+                basis,
+                automatic: state.relay_invites.automatic_basis(pk),
                 active_codes: status.active_codes,
                 admits_used: status.admits_used,
-            }
+            })
         })
         .collect();
     Json(rows).into_response()
+}
+
+/// The accounts the automatic allowance may cover: owner, admins, reference
+/// accounts. `automatic_basis` is still the judge; this only enumerates.
+fn allowance_candidates(state: &ServerState) -> Vec<PublicKey> {
+    let mut out: Vec<PublicKey> = Vec::new();
+    if let Some(owner) = crate::admin::load_relay_owner(std::path::Path::new(&state.config_dir)) {
+        out.push(owner);
+    }
+    out.extend(crate::admin::current_admin_pubkeys(state));
+    out.extend(state.reference_accounts.list());
+    out.retain(|pk| *pk != state.relay_public_key);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|pk| seen.insert(*pk));
+    out
 }
 
 #[derive(Deserialize)]
@@ -499,6 +543,9 @@ struct GrantRequest {
     max_uses_per_code: Option<u32>,
     max_total_admits: Option<u32>,
     max_ttl_days: Option<u64>,
+    /// Give this many more people on top of what they may invite now (their
+    /// grant, or the automatic allowance). Applied after the other fields.
+    add_admits: Option<u32>,
 }
 
 async fn handle_admin_grant(
@@ -513,13 +560,26 @@ async fn handle_admin_grant(
     let Some(pk) = parse_pubkey(&req.pubkey) else {
         return error(StatusCode::BAD_REQUEST, "Not a valid npub or hex pubkey");
     };
-    let existing = state.relay_invites.grant_of(&pk);
-    let grant = MinterGrant {
+    // Start from what they have now: an explicit grant, or failing that the
+    // automatic allowance, so granting a reference account more does not first
+    // reset them to the generic grant defaults.
+    let existing = state.relay_invites.grant_of(&pk).or_else(|| {
+        state
+            .relay_invites
+            .automatic_basis(&pk)
+            .map(|_| crate::relay_invites::default_allowance(pk))
+    });
+    let mut grant = MinterGrant {
         pubkey: pk,
-        granted_by: existing.as_ref().map(|g| g.granted_by).unwrap_or(admin),
+        granted_by: existing
+            .as_ref()
+            .filter(|g| g.granted_at != 0)
+            .map(|g| g.granted_by)
+            .unwrap_or(admin),
         granted_at: existing
             .as_ref()
             .map(|g| g.granted_at)
+            .filter(|at| *at != 0)
             .unwrap_or_else(unix_now),
         max_codes: req
             .max_codes
@@ -542,6 +602,9 @@ async fn handle_admin_grant(
             .or(existing.as_ref().map(|g| g.max_ttl_secs))
             .unwrap_or(DEFAULT_GRANT_TTL_DAYS * 86_400),
     };
+    if let Some(extra) = req.add_admits.filter(|n| *n > 0) {
+        grant = grant.with_extra_admits(extra);
+    }
     state.relay_invites.set_grant(grant.clone());
     persist(&state);
     Json(GrantView::from(&grant)).into_response()
@@ -572,6 +635,9 @@ struct ReferralView {
     is_admin_code: bool,
     /// Whether the inviter currently holds a grant (admins never need one).
     has_grant: bool,
+    /// Why the inviter may invite now: `owner`, `admin`, `reference`, `grant`,
+    /// or `null` if they no longer may.
+    basis: Option<MintBasis>,
     /// Whether the inviter was themselves invited, and by whom: the next link
     /// up the chain.
     invited_by: Option<String>,
@@ -596,12 +662,73 @@ async fn handle_admin_referrals(
             inviter_npub: npub(&b.inviter),
             is_admin_code: b.is_admin_code,
             has_grant: state.relay_invites.grant_of(&b.inviter).is_some(),
+            basis: state.relay_invites.minter_status(&b.inviter, now).basis,
             invited_by: state
                 .relay_invites
                 .invited_by(&b.inviter)
                 .map(|(_, by, _)| by.to_hex()),
             total_admitted: b.total_admitted,
             codes: b.codes.iter().map(|i| InviteView::from(i, now)).collect(),
+        })
+        .collect();
+    Json(rows).into_response()
+}
+
+/// One row per person who came in on a code: who, when, on which code, and
+/// whose code it was. The flat answer to "which npubs entered through whom".
+#[derive(Serialize)]
+struct AdmissionView {
+    pubkey: String,
+    npub: String,
+    at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evicted_at: Option<u64>,
+    code: String,
+    code_label: Option<String>,
+    inviter: String,
+    inviter_npub: String,
+    /// Admin-console code, bound by no allowance.
+    inviter_admin_code: bool,
+    /// Why the inviter may invite now; `null` if they no longer may.
+    inviter_basis: Option<MintBasis>,
+    /// Who invited the inviter, if they came in on a code themselves.
+    inviter_invited_by: Option<String>,
+}
+
+async fn handle_admin_admissions(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let now = unix_now();
+    let mut basis_cache = std::collections::HashMap::new();
+    let rows: Vec<AdmissionView> = state
+        .relay_invites
+        .admissions()
+        .into_iter()
+        .map(|(invite, r)| {
+            let inviter = invite.created_by;
+            let basis = *basis_cache
+                .entry(inviter)
+                .or_insert_with(|| state.relay_invites.minter_status(&inviter, now).basis);
+            AdmissionView {
+                pubkey: r.pubkey.to_hex(),
+                npub: npub(&r.pubkey),
+                at: r.at,
+                evicted_at: r.evicted_at,
+                code: invite.code.clone(),
+                code_label: invite.label.clone(),
+                inviter: inviter.to_hex(),
+                inviter_npub: npub(&inviter),
+                inviter_admin_code: invite.created_by_admin,
+                inviter_basis: basis,
+                inviter_invited_by: state
+                    .relay_invites
+                    .invited_by(&inviter)
+                    .map(|(_, by, _)| by.to_hex()),
+            }
         })
         .collect();
     Json(rows).into_response()

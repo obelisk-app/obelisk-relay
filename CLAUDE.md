@@ -24,9 +24,13 @@ is normally not running. At the time of writing that tier admits ~144,000
 accounts within 3 hops. See `src/whitelist.rs` and `src/wot_graph.rs`.
 
 A fourth path, **relay invite codes**, admits a specific key that redeemed a
-code (NIP-43 kind 28934). Codes are minted by admins or by users an admin
-granted a quota; usage and who-invited-whom live in `config/relay_invites.json`.
-See `docs/relay-invites.md` and `src/relay_invites.rs`.
+code (NIP-43 kind 28934). Admins mint unlimited codes in the console. From the
+apps, the owner, every admin and every reference account may bring in **10
+people in total** each (the automatic allowance, checked live, never stored),
+and anyone an admin granted a quota may invite within it. Usage and
+who-invited-whom live in `config/relay_invites.json`; the console's Access →
+Invites → Entries lists every npub that came in and through whom. See
+`docs/relay-invites.md` ("Who can invite") and `src/relay_invites.rs`.
 
 Enabling WoT *narrows* an otherwise-open relay rather than widening it, because
 an empty whitelist plus an active tier must not mean "admit everyone" — see

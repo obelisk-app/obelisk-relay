@@ -6,42 +6,44 @@ pull the same GHCR release tag as amd64 hosts.
 
 ## Current Release
 
-The memory-apps release published on 2026-10-27 is:
+The invite-allowance release published on 2026-10-29 is:
 
 ```text
 Image:        ghcr.io/obelisk-app/obelisk-relay
-Release tag:  v2026.10.27-memory-apps
-Commit tag:   906f7c9d519b
-Index digest: sha256:48d775b3256433d527aa7f0b6d5d2720d17dc3901224ca0b3edf3d87888f6380
+Release tag:  v2026.10.29-invite-allowance
+Commit tag:   1e1b8aa1388a
+Index digest: sha256:7107218e40370ccbabc3a9c6ff5175ff7062c528310ec4d76c81be0dfb67af0d
 Platforms:    linux/amd64, linux/arm64
 ```
 
 The index contains:
 
 ```text
-linux/amd64 sha256:8b95fe5c94807cf1e51ab559df48c45b169e951acade2ac0588cd2182f18b9e4
-linux/arm64 sha256:b925181eb0485d8f3a510bbb99dce7884adc4856d423fb610db1f119988049c5
+linux/amd64 sha256:eb0027fb8f7b85be99a3a1b3168cf6cfb394774c6150420da6522d83e11cb56c
+linux/arm64 sha256:196ab7380dbbb99abf265489ba2ed1487e09bf013656b9f93749eddfac104dfc
 ```
 
 Public tags that point at the same multi-arch index:
 
 ```text
-ghcr.io/obelisk-app/obelisk-relay:v2026.10.27-memory-apps
-ghcr.io/obelisk-app/obelisk-relay:906f7c9d519b
+ghcr.io/obelisk-app/obelisk-relay:v2026.10.29-invite-allowance
+ghcr.io/obelisk-app/obelisk-relay:1e1b8aa1388a
 ghcr.io/obelisk-app/obelisk-relay:latest
 ```
 
-It is the PR #10 merge: the relay-invites work of `v2026.10.27-relay-invites.2`
-plus the memory-growth fix, Obelisk Apps manifests (kind 32390) without an
-`h` tag, `restricted:` answers for authenticated readers who aren't admitted,
-and the console profile card. Built on a 4-core amd64 workstation with
-`CARGO_BUILD_JOBS=3`, arm64 cross-compiled: both platforms in 40 minutes.
+It adds the automatic invite allowance (the owner, admins and reference
+accounts may each bring in 10 people from the apps), `basis` and
+`admits_total` on `/api/invites/me`, and in the console the Invites → Entries
+view, automatic minters under Minters, and "Add people" (`add_admits`). The
+obelisk-dex and obelisk-sky invite panels released alongside it read the new
+fields, so deploy the relay first. Built on a 4-core amd64 workstation with
+`CARGO_BUILD_JOBS=3`, arm64 cross-compiled: both platforms in about 30 minutes.
 
 The console changed in this release, so re-tint after deploying
 (`scripts/retint-branding.sh`, known-issues §11).
 
-Previous release: `v2026.10.27-relay-invites.2` (618bf11, index
-`sha256:82fcac6d67504b61f7975e75a21ad1d302f13622dcb21a14f94813b8670b4e4e`).
+Previous release: `v2026.10.27-memory-apps` (906f7c9d519b, index
+`sha256:48d775b3256433d527aa7f0b6d5d2720d17dc3901224ca0b3edf3d87888f6380`).
 
 ## Do Not Commit
 
